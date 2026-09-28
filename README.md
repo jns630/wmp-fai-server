@@ -12,6 +12,11 @@ album metadata and cover art, and writing it back into WMP through the player's 
 
 Everything runs on your own machine. No Microsoft endpoint is contacted.
 
+A read-only demo is deployed at **`https://wmp-fai-server.onrender.com`** (dialog
+UI, search, artwork proxy, diagnostics). It is a demo only — see
+[Deploying to the cloud](#deploying-to-the-cloud) for what it cannot do. To
+actually tag discs, run the server on your own Windows machine.
+
 ---
 
 ## Contents
@@ -546,6 +551,34 @@ the module does not run.
 
 **So: use Render to host a demo and to develop the UI. Run `python "FAI Server.py"`
 on your own Windows machine to actually tag discs.**
+
+### The deployment has no stable IP
+
+Render assigns a **shared, dynamic** IP address, not a dedicated one. The
+address changes when the service redeploys, recycles, or is rescheduled onto
+different infrastructure, and the free plan additionally spins the instance
+down entirely after inactivity.
+
+| | |
+|---|---|
+| **Stable address** | `wmp-fai-server.onrender.com` |
+| **IP address** | Changes. Do not depend on it. |
+
+For example, during development the same hostname resolved into
+`216.24.57.0/24`, while the address reported earlier for this service was in
+`74.220.48.0/24` / `74.220.56.0/24` (Amazon AS16509). Same service, different
+infrastructure, moments apart.
+
+Practical consequences:
+
+- **Never put the IP in a hosts file, DNS record, firewall allowlist, or
+  allow/deny rule.** It will go stale and quietly stop matching. Use the
+  hostname, which Render keeps pointed at the current instance.
+- **If you need a fixed address**, that is a paid static-IP feature, not a
+  default. It is also not needed for anything in this project.
+- For WMP itself this is entirely moot: the hosts entry points
+  `musicmatch-ssl.xboxlive.com` at `127.0.0.1`, so WMP only ever talks to the
+  server running on its own machine.
 
 ### Single worker, on purpose
 
