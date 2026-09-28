@@ -27,6 +27,7 @@ Everything runs on your own machine. No Microsoft endpoint is contacted.
 - [Testing](#testing)
 - [Troubleshooting](#troubleshooting)
 - [Security notes](#security-notes)
+- [Deploying to the cloud](#deploying-to-the-cloud)
 - [Project layout](#project-layout)
 - [License](#license)
 
@@ -381,7 +382,7 @@ python test_fai_v2.py
 Expected result:
 
 ```
-==== 133 passed, 0 failed ====
+==== 139 passed, 0 failed ====
 ```
 
 The suite covers, among other things:
@@ -478,11 +479,72 @@ Read this before exposing the server to a network.
 
 ---
 
+## Deploying to the cloud
+
+> **Read this before assuming a cloud deploy can replace your local server. It
+> cannot.** This section exists so the Render deployment is useful for what it
+> genuinely does, and so nobody loses an evening expecting it to tag a CD.
+
+A `render.yaml` is included. The app is Flask, which is **WSGI**, so it is served
+by **gunicorn** — *not* uvicorn, which is an ASGI server and cannot serve Flask at
+all. The entry point is `wsgi:app` rather than `"FAI Server.py":app`, because
+gunicorn imports its target and Python module paths cannot contain spaces.
+
+### What works on Render
+
+Everything that is just HTTP:
+
+| Feature | URL |
+|---|---|
+| Diagnostics dashboard | `/fai_status` |
+| The FAI dialog, in a real browser | `/FAI/ui?artist=…&album=…` |
+| Hybrid search | `/api_search?q=…` |
+| Artwork proxy | `/cover/album.jpg?url=…` |
+| XML delivery + staging endpoints | `/cdinfo/…`, `/redir/…`, `/store_staged_xml` |
+
+### What cannot work on Render
+
+The actual purpose — getting WMP to apply tags to your discs — depends on three
+things a cloud host cannot provide:
+
+1. **WMP resolves `musicmatch-ssl.xboxlive.com` to `127.0.0.1`** via your hosts
+   file. Your player is never at the same machine as a Render dyno, so it will
+   never issue a request to one.
+2. **`window.external.WriteNamesEx(…)` only exists inside the WMP dialog host.**
+   It is a COM object injected by the player. In an ordinary browser it is
+   `undefined`, so the dialog loads and looks correct but cannot write anything.
+3. **The TLS trust step is Windows-only.** The server generates a self-signed
+   certificate for `musicmatch-ssl.xboxlive.com` and installs it with `certutil`
+   into the Windows Trusted Root store. A public cloud host cannot present a
+   certificate for that hostname that Windows will trust, and `certutil` does not
+   exist on Linux.
+
+On Linux, `ensure_ssl_certificates()` and the port 80/443 listeners are never
+reached anyway: they live inside `if __name__ == "__main__":`, which importing
+the module does not run.
+
+**So: use Render to host a demo and to develop the UI. Run `python "FAI Server.py"`
+on your own Windows machine to actually tag discs.**
+
+### Single worker, on purpose
+
+`WEB_CONCURRENCY=1` is set deliberately. Staged XML, `LAST_WMID` and the three
+TTL caches all live in process memory; a second worker is a separate universe that
+can never see the first worker's staged document. Render already defaults to 1 on
+the free plan, and the value is pinned so it cannot drift.
+
+The free plan also sleeps after inactivity, so the first request after an idle
+period will be slow while the dyno cold-starts.
+
+---
+
 ## Project layout
 
 ```
 FAI Server.py     the entire server (single file by design)
+wsgi.py           WSGI entry point for Linux/cloud hosts (gunicorn wsgi:app)
 test_fai_v2.py    the test suite
+render.yaml       Render blueprint (demo only - see "Deploying to the cloud")
 requirements.txt  runtime dependencies
 fai_server.log    runtime log, self-rotating at 5 MB (git-ignored)
 ```

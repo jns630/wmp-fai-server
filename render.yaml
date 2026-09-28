@@ -1,0 +1,33 @@
+# Render blueprint: https://render.com/docs/blueprint-spec
+#
+# IMPORTANT - read the "Deploying to the cloud" section of the README first.
+# A cloud host can serve the dialog UI, search, artwork proxy and diagnostics,
+# but it CANNOT be the Find Album Information server that Windows Media Player
+# actually talks to. See README for the full explanation.
+services:
+  - type: web
+    name: wmp-fai-server
+    runtime: python
+    plan: free
+    region: oregon
+    # gunicorn is WSGI and is the correct server for a Flask app.
+    # wsgi:app is used because the server file is named "FAI Server.py" and
+    # Python module paths cannot contain spaces.
+    startCommand: >-
+      gunicorn wsgi:app
+      --bind 0.0.0.0:$PORT
+      --workers 1
+      --threads 4
+      --timeout 120
+      --access-logfile -
+    healthCheckPath: /fai_status
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.4"
+      # Staged XML, the search/album/image caches and LAST_WMID all live in
+      # process memory. A second worker would be a separate universe and would
+      # never see the first worker's staged document, so this stays at 1.
+      # Render sets WEB_CONCURRENCY=1 by default; this pins it explicitly.
+      - key: WEB_CONCURRENCY
+        value: "1"

@@ -2,5 +2,12 @@
 #   python -m pip install -r requirements.txt
 
 flask>=2.2
+
+# WSGI server for Linux/cloud deploys (Render, Fly, Heroku, ...).
+# This app is Flask/WSGI, NOT ASGI - do not substitute uvicorn here.
+# Not needed when running "python FAI Server.py" on Windows, which starts its
+# own listener on ports 80/443.
+gunicorn>=21.2 ; sys_platform != "win32"
+
 requests>=2.28
 cryptography>=41.0

@@ -5,11 +5,28 @@ Runs the Flask app in-process via test_client() - no port 80 required.
 """
 import importlib.util
 import json
+import os
 import re
 import sys
 import urllib.parse
 
 BASE = r"d:\WMC_EPG\New folder (4)\red alert 3 patch dx 10\FAI Server.py"
+_DIR = os.path.dirname(BASE)
+_req_pkgs = set()
+try:
+    with open(os.path.join(_DIR, "requirements.txt"), encoding="utf-8") as _f:
+        for _line in _f:
+            _line = _line.split("#", 1)[0].strip()   # comments are not packages
+            if _line:
+                _req_pkgs.add(re.split(r"[<>=!;\[\s]", _line, 1)[0].strip().lower())
+except OSError:
+    pass
+_render = ""
+try:
+    with open(os.path.join(_DIR, "render.yaml"), encoding="utf-8") as _f:
+        _render = _f.read()
+except OSError:
+    pass
 
 spec = importlib.util.spec_from_file_location("fai_server", BASE)
 fai = importlib.util.module_from_spec(spec)
@@ -810,6 +827,41 @@ try:
           f"{_w}x{_h} colortype={_ctype} bad_chunks={_bad}")
 except Exception as _e:  # pragma: no cover - only on a broken build
     check("noart-placeholder-valid-png", False, repr(_e))
+
+# 39. Cloud deploy config. An earlier attempt failed with
+#     'uvicorn: command not found' - and even after installing uvicorn it would
+#     still have failed twice over: uvicorn is ASGI (this app is WSGI/Flask),
+#     and "FAI Server.py":app is not an importable module path because Python
+#     module names cannot contain spaces. Both are guarded here.
+check("wsgi-shim-exists",
+      os.path.exists(os.path.join(_DIR, "wsgi.py")),
+      "wsgi.py entry point is missing - a WSGI server has nothing to target")
+check("requirements-has-gunicorn",
+      "gunicorn" in _req_pkgs and "uvicorn" not in _req_pkgs,
+      f"requirements.txt must ship gunicorn (WSGI) and must not pull in uvicorn "
+      f"(ASGI); parsed packages: {sorted(_req_pkgs)}")
+check("render-uses-gunicorn",
+      "gunicorn" in _render and "uvicorn" not in _render,
+      "render.yaml must start gunicorn, not uvicorn")
+check("render-targets-wsgi-shim",
+      "wsgi:app" in _render,
+      "render.yaml must target wsgi:app, not the space-containing module path")
+check("render-single-worker",
+      "WEB_CONCURRENCY" in _render and 'value: "1"' in _render,
+      "in-memory staged XML must stay on a single worker")
+# the shim must actually hand a working Flask app to the server
+try:
+    _wspec = importlib.util.spec_from_file_location(
+        "_wsgi_check", os.path.join(_DIR, "wsgi.py"))
+    _wmod = importlib.util.module_from_spec(_wspec)
+    _wspec.loader.exec_module(_wmod)
+    _wc = _wmod.app.test_client()
+    check("wsgi-shim-serves-app",
+          _wc.get("/fai_status?format=json").status_code == 200
+          and _wc.get("/FAI/ui?artist=a&album=b").status_code == 200,
+          "wsgi:app must expose a working Flask app")
+except Exception as _we:  # pragma: no cover
+    check("wsgi-shim-serves-app", False, repr(_we))
 
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
