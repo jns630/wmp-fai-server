@@ -46,3 +46,7 @@ desktop.ini
 # Local overrides
 local_settings.py
 .env
+# scratch commit-message files (they must never be committed)
+_m.txt
+_msg.txt
+_mb.txt

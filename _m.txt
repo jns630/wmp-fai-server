@@ -1,9 +1,0 @@
-Document the deployment's dynamic IP and the live demo URL
-
-Render assigns a shared, dynamic IP, not a dedicated one. The same
-hostname has been seen in 216.24.57.0/24 and in the 74.220.48.0/24 /
-74.220.56.0/24 ranges, so the address must never be hard-coded in a hosts
-file, DNS record or allowlist. Reference the hostname instead.
-
-- add a 'no stable IP' subsection to Deploying to the cloud
-- link the live demo URL from the README intro
