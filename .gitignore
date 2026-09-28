@@ -1,0 +1,43 @@
+# Runtime logs and rotated copies
+*.log
+*.log.*
+fai_stdout.log
+fai_stderr.log
+
+# TLS material - never commit private keys or certificates
+*.pem
+*.key
+*.crt
+*.pfx
+cert.pem
+key.pem
+
+# Generated / temporary diagnostics
+_page_*.html
+_js/
+noart_preview.png
+tb.txt
+_check_js.py
+_shot_srv.py
+_png_check.py
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+.DS_Store
+
+# Local overrides
+local_settings.py
+.env
