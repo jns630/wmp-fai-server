@@ -382,7 +382,7 @@ python test_fai_v2.py
 Expected result:
 
 ```
-==== 139 passed, 0 failed ====
+==== 141 passed, 0 failed ====
 ```
 
 The suite covers, among other things:
@@ -410,6 +410,27 @@ If you change the served JavaScript, extract each `<script>` block and run
 ---
 
 ## Troubleshooting
+
+**`gunicorn: error: unrecognized arguments: --host 0.0.0.0 --port 10000`**
+`--host` and `--port` are **uvicorn** flags. Gunicorn has exactly one addressing
+flag: `--bind HOST:PORT`. The correct command is:
+
+```
+gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 1 --threads 4 --timeout 120 --access-logfile -
+```
+
+**On Render, check the Start Command in the dashboard, not just the repo.** This
+command is committed in two places — `render.yaml` and `Procfile` — but a Start
+Command typed into the Render dashboard **overrides both**. The build log tells
+you which one actually ran:
+
+```
+==> Running 'gunicorn wsgi:app --host 0.0.0.0 --port $PORT'
+```
+
+If that line does not match the command above, the dashboard value is winning.
+Either paste the correct command into **Settings → Build & Deploy → Start
+Command**, or clear the field entirely so the blueprint's value is used.
 
 **WMP never opens the dialog.**
 WMP is not reaching the server. Check the hosts file entry for
@@ -545,6 +566,7 @@ FAI Server.py     the entire server (single file by design)
 wsgi.py           WSGI entry point for Linux/cloud hosts (gunicorn wsgi:app)
 test_fai_v2.py    the test suite
 render.yaml       Render blueprint (demo only - see "Deploying to the cloud")
+Procfile          Same start command as a fallback for other PaaS
 requirements.txt  runtime dependencies
 fai_server.log    runtime log, self-rotating at 5 MB (git-ignored)
 ```

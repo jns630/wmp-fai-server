@@ -13,6 +13,9 @@ services:
     # gunicorn is WSGI and is the correct server for a Flask app.
     # wsgi:app is used because the server file is named "FAI Server.py" and
     # Python module paths cannot contain spaces.
+    # NOTE: gunicorn has NO --host/--port flags - those belong to uvicorn.
+    # The single correct flag is --bind HOST:PORT. Passing --host/--port to
+    # gunicorn fails with "unrecognized arguments" and exit status 2.
     startCommand: >-
       gunicorn wsgi:app
       --bind 0.0.0.0:$PORT

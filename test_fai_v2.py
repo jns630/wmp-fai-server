@@ -27,6 +27,26 @@ try:
         _render = _f.read()
 except OSError:
     pass
+_procfile = ""
+try:
+    with open(os.path.join(_DIR, "Procfile"), encoding="utf-8") as _f:
+        _procfile = _f.read()
+except OSError:
+    pass
+
+
+def _norm(t):
+    """Strip comments and collapse whitespace.
+
+    The deploy files carry comments that name the very flags that must NOT
+    appear (to warn future editors), so any check has to look at the real
+    command lines only, never at prose about them.
+    """
+    return re.sub(r"\s+", " ", re.sub(r"#[^\n]*", "", t)).strip()
+
+
+_render_norm = _norm(_render)
+_procfile_norm = _norm(_procfile)
 
 spec = importlib.util.spec_from_file_location("fai_server", BASE)
 fai = importlib.util.module_from_spec(spec)
@@ -841,14 +861,28 @@ check("requirements-has-gunicorn",
       f"requirements.txt must ship gunicorn (WSGI) and must not pull in uvicorn "
       f"(ASGI); parsed packages: {sorted(_req_pkgs)}")
 check("render-uses-gunicorn",
-      "gunicorn" in _render and "uvicorn" not in _render,
-      "render.yaml must start gunicorn, not uvicorn")
+      "gunicorn" in _render_norm and "uvicorn" not in _render_norm,
+      f"render.yaml must start gunicorn, not uvicorn; parsed: {_render_norm[:120]!r}")
 check("render-targets-wsgi-shim",
       "wsgi:app" in _render,
       "render.yaml must target wsgi:app, not the space-containing module path")
 check("render-single-worker",
       "WEB_CONCURRENCY" in _render and 'value: "1"' in _render,
       "in-memory staged XML must stay on a single worker")
+# The deploy failed twice on flags before it reached the app at all:
+#   uvicorn: command not found
+#   gunicorn: error: unrecognized arguments: --host 0.0.0.0 --port 10000
+# --host/--port are uvicorn's. Gunicorn has exactly one addressing flag:
+# --bind HOST:PORT.
+_GUNICORN_OK = "gunicorn wsgi:app --bind 0.0.0.0:$PORT"
+check("gunicorn-command-is-valid",
+      _GUNICORN_OK in _render_norm and _GUNICORN_OK in _procfile_norm
+      and "--host" not in _render_norm and "--port" not in _render_norm
+      and "--host" not in _procfile_norm and "--port" not in _procfile_norm,
+      f"gunicorn must be invoked as '{_GUNICORN_OK}' with no --host/--port")
+check("procfile-web-process",
+      re.search(r"^web:\s*gunicorn", _procfile, re.M) is not None,
+      "Procfile must declare a 'web:' gunicorn process")
 # the shim must actually hand a working Flask app to the server
 try:
     _wspec = importlib.util.spec_from_file_location(

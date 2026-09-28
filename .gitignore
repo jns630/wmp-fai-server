@@ -1,8 +1,13 @@
 # Runtime logs and rotated copies
 *.log
 *.log.*
+*.out
+*.err
 fai_stdout.log
 fai_stderr.log
+render.yaml.bak
+Procfile.bak
+_proc*.bak
 
 # TLS material - never commit private keys or certificates
 *.pem
