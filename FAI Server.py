@@ -289,43 +289,26 @@ def _remember_wmid(value):
 def _request_names_a_disc():
     """True when WMP is asking about a specific physical disc.
 
-    WMP re-prompts a disc by appending ?wmid=<collection> to the CD URL, so a
-    delivery request can carry BOTH ?cd= and ?wmid=. The wmid is incidental
-    there: the disc id is the authoritative subject.
+    Used by the delivery path only to decide what to SAY in the log, and by the
+    search page to tell a disc from a library update. It deliberately does NOT
+    suppress retargeting: a request carrying both ?cd= and ?wmid= is WMP naming
+    the collection it made for that disc, and the document must describe that
+    collection or the album-level fields - including where the cover attaches -
+    are keyed to one WMP is not tracking here.
 
     ============================ ARTWORK: WHAT IS ACTUALLY KNOWN =============
-    A CD rip gets its artwork on the FIRST write to that disc, and stops getting
-    it once WMP has adopted a collection for it. CONFIRMED in the field, not
-    inferred: a fresh disc ripped after this was diagnosed fetched its cover
-    immediately, while re-ripping the already-adopted one did not.
+    Artwork for a re-ripped disc needed two separate fixes, neither of which
+    was about the collection id:
 
-      dialog WITHOUT ?wmid  ->  [IMAGE] fetched
-        12:41:23  cd=B+96+1970+523A+..  wmid=-         -> [IMAGE] 103895B
-        12:53:23  cd=4+96+3654+753C+..  wmid=-         -> [IMAGE]  26131B
-        13:39:29  cd=B+96+AB80+13510+.. wmid=-         -> [IMAGE]  82582B x2
-                                                 ('April', artwork applied)
-      dialog WITH ?wmid     ->  no [IMAGE] at all
-        12:54:24  cd=B+96+1970+523A+..  wmid=B17CF884 -> none
-        13:14:26  cd=B+96+1970+523A+..  wmid=B17CF884 -> none
-        13:21:12  cd=B+96+1970+523A+..  wmid=B17CF884 -> none
+      1. The cover was not being RE-FETCHED. WMP had the URL on file and the
+         value never changed. A stable per-album token in the cover URL path
+         fixed that - confirmed on the Prospekt disc, fetched again at 15:43:43
+         and 15:43:45 (170405B) despite the collection already existing.
+      2. For a period the whole document was not well-formed XML (a bare '&'
+         from that token), so WMP rejected the response outright.
 
-    Note the disc ids: the three that worked are all DIFFERENT discs, and the
-    three that failed are all the same disc WMP had already adopted a collection
-    for. The discriminator is the disc's history, not the album or provider.
-
-    This is NOT fixable by changing the document. 12:41 and 13:14 staged the
-    SAME MusicBrainz release and therefore produced a byte-identical document
-    (same guid, same cover params, same <status>OK</status>) - and 12:41 got
-    artwork while 13:14 did not. The document was not the variable; WMP's own
-    request and internal state were. The cover URL is also provably fine: the
-    Tiny Cities image returns 200 / image/jpeg / 140072 bytes through this
-    server's own proxy.
-
-    So the guard below is correctness only - a disc delivery should not be
-    rewritten onto a collection id - and deliberately does NOT claim to fix
-    artwork. Practical rule for the user: artwork lands on the first FAI apply
-    to a disc; to change the art on an album WMP has already adopted, update
-    that album in the library instead.
+    First apply to a fresh disc fetched the cover twice. Re-applies did not
+    fetch at all until the token was added.
     """
     for name in ('toc', 'TOC', 'mdq', 'cd', 'CD'):
         if raw_query_arg(name).strip():
@@ -1425,13 +1408,21 @@ def mdr_post():
                     f"method={request.method} staged={'yes' if staged else 'no'} "
                     f"wmid={wmid_q or '-'}")
     if staged:
-        # Do NOT retarget a request that names a disc. WMP re-prompts a disc by
-        # appending ?wmid= to the CD URL; the disc id is the subject of the
-        # request and the wmid is incidental, so the document keeps describing
-        # the disc. This is a correctness guard, NOT the artwork fix - see the
-        # evidence note on _request_names_a_disc().
-        disc_request = _request_names_a_disc()
-        if wmid_q and not disc_request:
+        # Retarget whenever WMP names a collection, disc or not. A request that
+        # carries both ?cd= and ?wmid= is WMP saying "give me the document for
+        # THIS collection" - the collection it made for that disc on a previous
+        # apply. Serving a document stamped with a different collection id means
+        # the album-level fields, including where the cover attaches, are keyed
+        # to a collection WMP is not tracking for this disc.
+        #
+        # This reverses an earlier guard, added on the theory that retargeting
+        # was what stopped artwork appearing on a re-ripped disc. That theory
+        # was wrong: the cover was not being RE-FETCHED because the URL never
+        # changed, and for a while because the document was not well-formed. With
+        # a per-album token on the cover URL the fetch happens again either way
+        # (logged on the Prospekt disc: 15:43:43 and 15:43:45, 170405B, fetched
+        # while the request still named 2A4F0191).
+        if wmid_q:
             staged = _retarget_collection_id(staged, wmid_q)
             # Remember this wmid -> document pairing: WMP re-fetches the same
             # collection moments later, and by then LAST_XML may have moved on.
@@ -1441,10 +1432,6 @@ def mdr_post():
             # ask would then be able to claim this same document, so a second
             # album would be served the first one's tags.
             _stage_request_xml(staged, wmid=wmid_q, claim_wmid=wmid_q)
-        elif wmid_q and disc_request:
-            log_line("MDR", "request names a disc; keeping the disc's own "
-                            "collection id rather than retargeting to "
-                            f"{wmid_q[:8]}..")
         # Log which album WMP is actually being served, so a mismatch between
         # the dialog selection and what WMP applied is visible in the log.
         m = re.search(r"<albumTitle>([^<]*)</albumTitle>", staged)

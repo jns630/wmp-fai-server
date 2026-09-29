@@ -1059,11 +1059,16 @@ check("cd-flow-ignores-a-borrowed-wmid",
       "if cd:" in _src and "CD flow: ignoring borrowed wmid" in _src,
       "a CD document must describe the disc, not borrow a collection id")
 # ...and the delivery path must not put it straight back.
-check("disc-request-is-not-retargeted",
-      "disc_request = _request_names_a_disc()" in _src
-      and "if wmid_q and not disc_request:" in _src,
-      "a request naming a disc must not be retargeted onto the collection WMP "
-      "appended to the CD URL, or the borrowed id returns at delivery time")
+check("named-collection-is-retargeted-whatever-the-flow",
+      "if wmid_q and not disc_request:" not in _src
+      and "if wmid_q:" in _src,
+      "when WMP names a collection the document must describe that collection, "
+      "disc flow or not. REVERSED: appending ?wmid= to a CD URL is WMP naming "
+      "the collection it made for that disc, not an aside - serving a document "
+      "stamped with a different id keys the cover to a collection it is not "
+      "tracking here. The old guard rested on a disproved correlation: the "
+      "cover was not re-fetched because the URL never changed, and for a while "
+      "because the document was not well-formed.")
 
 # 39a. RECORDED SO THE NEXT PERSON DOES NOT RE-DERIVE IT. B17CF884 is not a WMP
 #      collection id that WMP invented - it is OUR OWN deterministic guid for
@@ -1089,7 +1094,10 @@ _libxml = fai.build_wmp_xml(dict(album, title="Lib Album"),
 check("library-document-still-uses-the-wmid",
       "B17CF884" in _libxml,
       "a library update must still be stamped with the collection it updates")
-# A CD-URL request carrying a wmid must come back un-retargeted.
+# A CD request that ALSO names ?wmid= is WMP naming the collection it made for
+# that disc. It must be retargeted - the earlier "stay stamped for the disc"
+# rule is reversed, see named-collection-is-retargeted-whatever-the-flow.
+_tw = "BBBB2222-CCCC-3333-4444-555566667777"
 fai.STAGED_REQUESTS.clear()
 fai.STAGED_AT.clear()
 fai.FRESH_WRITES.clear()
@@ -1098,15 +1106,14 @@ c.post("/store_staged_xml", data=json.dumps(
     {"album": dict(album, title="Rip Album"),
      "selected_tracks": [album["tracks"][0]],
      "request_id": "", "session_id": "S", "toc": "",
-     "cd": "AA+BB+CC", "wmid": "B17CF884-35B2-5D0B-B819-ED648F592A2B",
-     "wmid_auth": "B17CF884-35B2-5D0B-B819-ED648F592A2B"}),
+     "cd": "AA+BB+CC", "wmid": _tw, "wmid_auth": _tw}),
     content_type="application/json")
-_served = c.get("/cdinfo/GetMDRCD.aspx?locale=409&CD=AA+BB+CC"
-                "&wmid=B17CF884-35B2-5D0B-B819-ED648F592A2B"
+_served = c.get("/cdinfo/GetMDRCD.aspx?locale=409&CD=AA+BB+CC&wmid=" + _tw
                 ).data.decode("utf-8", "ignore")
-check("disc-delivery-is-not-retargeted",
-      "Rip Album" in _served and "B17CF884" not in _served,
-      f"a disc delivery must stay stamped for the disc, got {_served[:260]!r}")
+check("disc-delivery-is-retargeted-to-the-named-collection",
+      "Rip Album" in _served and _tw.upper() in _served.upper(),
+      f"a disc request naming a collection must be answered with that "
+      f"collection's document, got {_served[:260]!r}")
 
 # 35. Aero restyle must be CSS-only: no CSS3 without an IE7 fallback, and
 #     none of the working dialog logic may be disturbed.
