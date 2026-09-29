@@ -1810,6 +1810,50 @@ check("edit-does-not-rewrite-track-rows",
       "ALL_TRACKS" in _src and "ALL_TRACKS[i].id" in _src,
       "per-track selection must be untouched by the album editor")
 
+# 44. A library "Update album info" opens the dialog with NOTHING but
+#     ?requestid= - no disc, no wmid, no artist/album/track. The search page
+#     read that as "Windows Media Player did not pass any disc information",
+#     which is both wrong (WMP did open it, for a specific library album) and
+#     useless. Logged from a real session on 'The Blue Room - EP' (Coldplay):
+#       GET /FAI/ui?...&requestid=D86F70C1-08E2-4219-8F86-7FE6A1C98974
+_lib = c.get("/FAI/ui?locale=409&userlocale=2000"
+             "&requestid=D86F70C1-08E2-4219-8F86-7FE6A1C98974"
+             ).data.decode("utf-8", "ignore")
+_rip = c.get("/FAI/ui?artist=A&album=B&track=C").data.decode("utf-8", "ignore")
+_disc = c.get("/FAI/ui?cd=B+96+1970&requestid=RID2").data.decode("utf-8", "ignore")
+_bare = c.get("/FAI/ui").data.decode("utf-8", "ignore")
+check("no-false-disc-information-claim",
+      "did not pass any disc information" not in _lib
+      and "did not pass any disc information" not in _bare,
+      "WMP opening the dialog IS information - do not claim it passed nothing")
+check("library-flow-is-classified",
+      'var SEARCH_FLOW = "library";' in _lib
+      and 'var SEARCH_FLOW = "disc";' in _disc
+      and 'var SEARCH_FLOW = "unknown";' in _bare,
+      "the search page must know which of the three flows it is in")
+check("library-flow-uses-the-request-id",
+      'var SEARCH_REQUEST_ID = "D86F70C1-08E2-4219-8F86-7FE6A1C98974";' in _lib
+      and "GetMDQByRequestID(SEARCH_REQUEST_ID)" in _lib,
+      "the request id is the only handle on a library album - the MDQ it "
+      "returns is what carries the CURRENT tags")
+check("search-page-renders-existing-info",
+      "function renderExistingInfo" in _lib
+      and 'id="existingTitle"' in _lib and 'id="existingSource"' in _lib,
+      "the search page needs the same current-state panel as the confirm page")
+check("search-page-panel-is-filled-on-load",
+      "renderExistingInfo(mdq);" in _lib,
+      "the panel must be populated from the MDQ when the page opens")
+check("library-empty-state-is-honest",
+      "did not report the current tags of this album." in _src,
+      "when even the MDQ has nothing, say so - do not invent a state")
+# ...and the results pane must not claim to be searching when it is not.
+check("no-false-searching-indicator",
+      "Searching metadata databases..." in _rip
+      and "Searching metadata databases..." not in _bare
+      and "Enter a search and press Enter." in _bare,
+      "the 'Searching...' placeholder must only appear when a search is "
+      "actually going to run")
+
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:

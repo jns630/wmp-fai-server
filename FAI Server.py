@@ -1924,11 +1924,29 @@ def unified_ui():
     wmp_artist = request.args.get("artist", "")
     wmp_album = request.args.get("album", "")
     wmp_track = request.args.get("track", "")
+    # A library "Update album info" arrives with NOTHING but ?requestid= - no
+    # disc, no wmid, and no artist/album/track. The old copy read that as
+    # "Windows Media Player did not pass any disc information", which is both
+    # wrong (WMP did open the dialog, for a specific library album) and useless.
+    # Logged from a real session on 'The Blue Room - EP' (Coldplay):
+    #   GET /FAI/ui?...&requestid=D86F70C1-08E2-4219-8F86-7FE6A1C98974
+    # GetMDQByRequestID() still answers for that id and carries the album's
+    # CURRENT tags, so the panel is filled in from the MDQ on load.
+    request_id = (request.args.get("requestid") or request.args.get("requestID")
+                  or "").strip()
+    wmp_cd = (raw_query_arg("cd") or raw_query_arg("CD") or "").strip()
+    wmp_toc = (raw_query_arg("toc") or raw_query_arg("TOC") or "").strip()
+    has_context = bool(wmp_track or wmp_artist or wmp_album)
+    if wmp_cd or wmp_toc:
+        flow = "disc"
+    elif has_context or request_id:
+        flow = "library"
+    else:
+        flow = "unknown"
     # The authentic FAI lead-in names the whole rip it was opened for, e.g.
     #   Found 500+ Album(s) containing "Mr. E's Beautiful Blues ... Various Artists".
     # WMP hands us those pieces as separate query values; join them back up.
     rip_name = " ".join(x for x in (wmp_track, wmp_artist, wmp_album) if x).strip() or q
-    has_context = bool(wmp_track or wmp_artist or wmp_album)
 
     session_id = get_session_id()
     track_fai_navigation(session_id, 'ui_search', {
@@ -1952,20 +1970,17 @@ def unified_ui():
   <div class="main-container">
     <div class="left-pane">
       <div class="section-label">Existing Information</div>
-      {% if has_context %}
       <div class="existing-info">
-        <img src="/static/noart.png" class="existing-thumb" alt="" onerror="this.onerror=null;">
+        <img src="/static/noart.png" class="existing-thumb" id="existingThumb" alt="" onerror="this.onerror=null;">
         <div class="existing-body">
-          <div class="existing-title">{{ (wmp_album or wmp_track)|e }}</div>
-          {% if wmp_artist %}<div class="existing-artist">{{ wmp_artist|e }}</div>{% endif %}
-          {% if wmp_track and wmp_album %}<div class="existing-sub">{{ wmp_track|e }}</div>{% endif %}
+          <div class="existing-title" id="existingTitle">{% if wmp_album or wmp_track %}{{ (wmp_album or wmp_track)|e }}{% else %}<span class="existing-empty">Reading current information&hellip;</span>{% endif %}</div>
+          <div class="existing-artist" id="existingArtist">{% if wmp_artist %}{{ wmp_artist|e }}{% endif %}</div>
+          <div class="existing-sub" id="existingSub">{% if wmp_track and wmp_album %}{{ wmp_track|e }}{% endif %}</div>
+          <div class="existing-source" id="existingSource">{% if has_context %}Currently stored by Windows Media Player.{% elif flow == 'library' %}Reading the current tags of this library album&hellip;{% else %}No disc in the drive&hellip;{% endif %}</div>
           <div class="existing-links"><span class="link" id="editLink" onclick="editExisting(); return false;">Edit</span><span class="link-gap">&nbsp;&nbsp;&nbsp;</span><span class="link">Buy</span></div>
           <div class="existing-edit" id="editNote" style="display:none;"></div>
         </div>
       </div>
-      {% else %}
-      <div class="empty-msg">Windows Media Player did not pass any disc information.<br>Use the search box to find the album.</div>
-      {% endif %}
     </div>
     <div class="right-pane">
       <div class="section-label">Search</div>
@@ -1978,7 +1993,7 @@ def unified_ui():
       </div>
       <div id="results_area">
         <div class="results-scroll" id="results_scroll">
-          <div class="empty-msg">Searching metadata databases...</div>
+          {% if q %}<div class="empty-msg">Searching metadata databases...</div>{% else %}<div class="empty-msg">Enter a search and press Enter.</div>{% endif %}
         </div>
       </div>
     </div>
@@ -2114,6 +2129,63 @@ def unified_ui():
         doSearch();
       }
     }
+    // ---- 'Existing Information' on the search page --------------------------
+    // A library "Update album info" arrives with only ?requestid=, so there is
+    // no album, artist or track in the URL to render. GetMDQByRequestID() still
+    // answers for that id and carries the CURRENT tags, which is exactly what
+    // this panel is for. Same helpers as the confirmation page.
+    var SEARCH_REQUEST_ID = {{ request_id|tojson }};
+    var SEARCH_FLOW = {{ flow|tojson }};
+
+    function mqText(xml, tag, prefix) {
+      try {
+        var re = new RegExp((prefix ? '(?:' + prefix + ')\\s*' : '') +
+                            '<' + tag + '>\\s*[\\s\\S]*?<text>\\s*([\\s\\S]*?)\\s*</text>',
+                            'i');
+        var m = xml.match(re);
+        return m ? m[1] : '';
+      } catch (e) { return ''; }
+    }
+
+    function renderExistingInfo(mdq) {
+      var tEl = document.getElementById('existingTitle');
+      if (!tEl) return;
+      var aEl = document.getElementById('existingArtist');
+      var sEl = document.getElementById('existingSub');
+      var srcEl = document.getElementById('existingSource');
+      var d = {track_count: 0, disc_track: '', disc_artist: '', disc_album: ''};
+      if (mdq) {
+        try {
+          d.track_count = (mdq.match(/<track>[\\s\\S]*?<\\/track>/g) || []).length;
+          d.disc_track = mqText(mdq, 'title', '');
+          d.disc_artist = mqText(mdq, 'artist', '');
+          d.disc_album = mqText(mdq, 'title', '<album>');
+        } catch (e) {}
+      }
+      var album  = d.disc_album  || {{ wmp_album|tojson  }} || '';
+      var artist = d.disc_artist || {{ wmp_artist|tojson }} || '';
+      var track  = d.disc_track  || {{ wmp_track|tojson  }} || '';
+      if (!album && !artist && !track) {
+        tEl.innerHTML = '<span class="existing-empty">No existing information</span>';
+        if (aEl) aEl.innerHTML = '';
+        if (sEl) sEl.innerHTML = '';
+        if (srcEl) {
+          srcEl.innerHTML = (SEARCH_FLOW === 'library')
+            ? 'Windows Media Player did not report the current tags of this album.'
+            : 'No disc in the drive - use the search box to find the album.';
+        }
+        return;
+      }
+      tEl.innerHTML = escHtml(album || track);
+      if (aEl) aEl.innerHTML = artist ? escHtml(artist) : '';
+      if (sEl) sEl.innerHTML = (album && track) ? escHtml(track) : '';
+      if (srcEl) {
+        srcEl.innerHTML = d.track_count
+          ? ('Currently stored by Windows Media Player (' + d.track_count + ' track(s)).')
+          : 'Currently stored by Windows Media Player.';
+      }
+    }
+
     // Edit on the search page. There is no matched album here yet, so the
     // authentic action is WMP's own metadata editor. When the host does not
     // expose it the link must still say something useful rather than sit
@@ -2138,13 +2210,23 @@ def unified_ui():
       window.location.href = url;
     }
     window.onload = function() {
+      // Fill 'Existing Information' from the disc / library album WMP is
+      // actually asking about. A library update carries only ?requestid=,
+      // and GetMDQByRequestID is the only way to learn what is stored there.
+      try {
+        var mdq = '';
+        if (window.external && SEARCH_REQUEST_ID) {
+          mdq = window.external.GetMDQByRequestID(SEARCH_REQUEST_ID) || '';
+        }
+        renderExistingInfo(mdq);
+      } catch (e) { try { renderExistingInfo(''); } catch (e2) {} }
       if (document.getElementById('sq').value.trim()) {
         doSearch();
       }
     };
   </script>
 </body>
-</html>""", css=COMMON_CSS, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, session_id=session_id)
+</html>""", css=COMMON_CSS, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, flow=flow, request_id=request_id, session_id=session_id)
 # ==========================================================
 # UNIFIED CONFIRMATION & TRACK SELECTION PAGE
 # ==========================================================

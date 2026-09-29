@@ -484,11 +484,13 @@ The legacy `submittoc` / `GetMDRCD.asp` / `QueryTOC.asp` routes are
   verified platforms the host reports `documentMode` **11**; the stylesheet also
   carries IE7 fallbacks and avoids CSS the older engine cannot parse.
 - **Existing Information reports the current state** — what WMP actually holds for
-  the disc or collection, read from the disc MDQ and falling back to the context
-  the dialog was opened with. The matched album is labelled separately, so
-  incoming tags are never mistaken for tags already written. When nothing is
-  stored (the usual case for a fresh rip) it says so instead of inventing a
-  state.
+  the disc or collection. On the search page and the confirmation page alike it
+  reads the disc MDQ (via `GetMDQByRequestID`) and falls back to the context the
+  dialog was opened with. A library *Update album info* arrives with nothing but
+  `?requestid=`, so the MDQ is the only handle on what is stored; when even that
+  is empty the panel says so instead of inventing a state. The matched album is
+  labelled separately, so incoming tags are never mistaken for tags already
+  written.
 - **A working Edit link** on both dialog pages. It tries WMP's own
   `EditMetadata` host first, and otherwise opens an inline editor for the album
   title, artist, year and genre. Saving writes into the object that is POSTed to
