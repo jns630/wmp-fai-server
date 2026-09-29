@@ -275,6 +275,14 @@ LAST_TOC = ""   # most recent CD TOC seen (survives POST-only TOC submissions)
 # library entry instead of an unrelated generated one.
 LAST_WMID = ""
 
+# Counts staged documents, so the artwork URL can be made unique per APPLY.
+# See the token in build_wmp_xml(): WMP will not re-fetch a cover URL it has
+# already seen for a collection, so a stable per-album token means "re-apply to
+# fix the art" can never work. Logged 2026-09-29 15:52: the re-apply of
+# Prospekt's March produced a byte-identical URL to 15:43's and there was no
+# [IMAGE] line at all in that session.
+_COVER_SEQ = 0
+
 def _remember_wmid(value):
     """Record the most recent wmid WMP asked us about."""
     global LAST_WMID
@@ -1141,7 +1149,23 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
     # The proxy already serves /cover/<path:ignore>, so a path segment costs
     # nothing and leaves exactly one '?' and no '&' in the value.
     #   http://127.0.0.1/cover/fai-67cb7ee4/album.jpg?url=https://...
-    ver = hashlib.md5(str(album_data.get("id", "") or art_url).encode(
+    #
+    # The token changes on EVERY APPLY, not just per album. It used to be
+    # md5(album_id), i.e. stable per album, on the reasoning that a stable URL
+    # saves WMP a needless re-download. That is backwards for the only case that
+    # matters - retrying because the artwork was wrong:
+    #
+    #   15:43:43  [IMAGE] 170405B  /cover/fai-51822f10/...   (fetched twice)
+    #   15:52:15  staged, same album, same token
+    #   15:52:16  delivered  - and NO [IMAGE] line at all
+    #
+    # WMP had that exact URL on file for that exact collection already, from the
+    # 15:43 delivery, and did not fetch it again. So a stable token silently
+    # disables every retry. _COVER_SEQ makes each apply present a URL WMP has
+    # never seen, which is the only way a re-apply can change the art.
+    global _COVER_SEQ
+    _COVER_SEQ += 1
+    ver = hashlib.md5(f"{album_data.get('id', '')}|{art_url}|{_COVER_SEQ}".encode(
         "utf-8", "replace")).hexdigest()[:8]
     proxy_art = (xesc(f"http://127.0.0.1/cover/fai-{ver}/album.jpg?url="
                       f"{requests.utils.quote(art_url, safe='/:?=&')}")

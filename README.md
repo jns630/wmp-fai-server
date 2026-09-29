@@ -323,42 +323,49 @@ album at 15:52 produced a byte-identical cover URL (the token is
 
 #### Artwork on a CD rip
 
-Artwork for a CD rip has needed three separate fixes, and it is worth recording
-which was which, because two earlier theories turned out to be wrong:
+Artwork on a CD rip has needed four separate fixes, and it is worth recording
+which was which, because three earlier theories turned out to be wrong:
 
-1. **The cover was not being re-fetched.** WMP had the URL on file and the value
-   never changed, so a re-apply of a disc that already had a collection fetched
-   nothing. `largeCoverParams` now carries a stable per-album token in its *path*
-   (`/cover/fai-<token>/album.jpg?url=…`). Confirmed: the Prospekt disc fetched
-   its cover again at 15:43:43 and 15:43:45 (170,405 B) with the collection
-   already in place.
-2. **The document was briefly not well-formed.** A bare `&` in the cover value
+1. **The document was briefly not well-formed.** A bare `&` in the cover value
    made WMP reject the whole response, so *tags* stopped applying as well as
    artwork. The token lives in the path and the value is `xesc`-escaped, so
    neither can recur.
-3. **A named collection must be retargeted.** A CD request that also carries
-   `?wmid=` is WMP naming the collection it made for that disc — the document
-   has to describe *that* collection, or the album-level fields are keyed to one
-   WMP is not tracking. An earlier guard suppressed this; it has been reverted.
+2. **A named collection must be described.** A CD request that also carries
+   `?wmid=` is WMP naming the collection it is asking about, and the document has
+   to describe *that* collection. Two separate guards suppressed this — one in
+   `build_wmp_xml()`, one in the delivery path. Both are gone.
+3. **The cover token must change on every apply.** It was `md5(album_id)[:8]`,
+   i.e. stable per album, on the reasoning that a stable URL saves WMP a needless
+   re-download. That is backwards for the only case that matters — retrying because
+   the artwork was wrong. Logged 15:52: the retry of Prospekt's March produced a
+   byte-identical URL to 15:43's, and there was **no `[IMAGE]` line at all** in
+   that session. WMP will not re-fetch a URL it already holds for a collection, so
+   a stable token silently disables every retry. It is now `md5(album_id | art_url
+   | apply_seq)`.
 
-Two beliefs held here for a while turned out to be wrong, and are recorded so
+Three beliefs held here for a while turned out to be wrong, and are recorded so
 they are not repeated:
 
-- **`B17CF884` is not a WMP-chosen collection id.** It is our own deterministic
-  GUID: `guid('1570089404') == B17CF884-…`, where `1570089404` is the iTunes
-  album id for *Tiny Cities*. WMP adopted it on an early write and now echoes it
-  back. Refusing to stamp it onto a CD document therefore changes **nothing** for
-  this album — both branches produce the same value. `[CDGUID]` fires and the
-  behaviour is identical.
+- **`wmid` values WMP sends back are often our own GUIDs.** Confirmed exactly for
+  every disc in these sessions: `B17CF884 = guid('1570089404')` (Tiny Cities),
+  `2A4F0191 = guid('ba666150-…')` (MusicBrainz Prospekt), `64C552E6 =
+  guid('1122792846')` (iTunes Prospekt). WMP adopts the `WMCollectionID` we send
+  and echoes it on the next prompt. This is why the old "borrowed wmid" guards
+  were no-ops for these albums — they stamped the very value they claimed to
+  ignore. *(Not a universal claim: other `wmid` values in the log are not ours.
+  The log is also full of test-suite traffic, so check before generalising.)*
 - **"Artwork only lands on the first apply to a disc"** was inferred from a
   correlation that did not hold up. The 12:41 and 13:14 runs staged the *same*
   MusicBrainz release and produced a byte-identical document; the difference was
-  elsewhere, and re-applies do fetch artwork once the URL carries a token.
+  elsewhere.
+- **A cover that WMP downloads is a cover WMP attaches.** Not so. At 15:43:43 and
+  15:43:45 WMP fetched the Prospekt art twice and did not attach it. The fetch is
+  necessary, not sufficient, and no server-side log line can distinguish the two.
 
-The token is `md5(album_id)[:8]`, so it is stable **per album**: it busts WMP's
-cache when the album changes, but re-applying the *same* album yields a
-byte-identical URL and WMP will not re-fetch. That is what the 15:52 re-apply of
-Prospekt's March hit — no `[IMAGE]` line at all.
+**Still unexplained:** WMP downloads the image and does not display it. Everything
+the server controls is now verified — well-formed document, correct collection id,
+reachable `200 image/jpeg`. Closing this needs a capture of an exchange where the
+art *does* attach, to diff against ours; further guessing has been wrong four times.
 
 `XML_LOCK` is an `RLock` because `store_staged_xml()` holds it while calling
 `_stage_request_xml()`, which takes it again. A plain `Lock` self-deadlocks

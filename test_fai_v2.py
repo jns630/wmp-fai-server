@@ -1962,13 +1962,21 @@ check("cover-url-carries-a-version-token",
           "http://127.0.0.1/cover/fai-") and "?url=https://is1" in _c1,
       f"the cover URL must carry a token in the PATH and keep the upstream url "
       f"readable, got {_c1[:130]!r}")
-check("cover-token-is-stable-per-album",
-      _c1 == _c2,
-      "re-applying the SAME album must present the same URL, or WMP re-downloads "
-      "the artwork on every apply")
+check("cover-token-changes-on-every-apply",
+      _c1 != _c2,
+      "re-applying the SAME album must present a URL WMP has not seen, or WMP "
+      "keeps the cover it already has and the retry cannot change anything. "
+      "REVERSED: this was 'cover-token-is-stable-per-album', on the reasoning "
+      "that a stable URL saves a needless re-download. Logged 15:52 - the "
+      "re-apply of Prospekt's March sent a byte-identical URL to 15:43's and "
+      "there was no [IMAGE] line in the session at all.")
 check("cover-token-differs-per-album",
       _c1 != _c3,
       "a different album must present a different URL, so WMP treats it as new")
+check("cover-token-is-well-formed-for-a-path-segment",
+      all(re.fullmatch(r"[0-9a-f]{8}", t)
+          for t in re.findall(r"/cover/fai-([^/]+)/", _c1 + _c2 + _c3)),
+      f"the token is a path segment and must stay hex: {_c1[:120]!r}")
 check("album-without-art-still-has-no-cover",
       _cover(dict(_alb, art_url=""), cd="B+96+1970") == "",
       "no art upstream must mean no cover params, not a broken URL")
