@@ -2143,33 +2143,69 @@ def unified_ui():
     // <title>...<text> match came back empty in EVERY logged session, so the
     // element names differ from the obvious guess. Try each candidate name in
     // each shape rather than assuming one.
+    // Regexes are built from LITERAL sources, never from escaped string
+    // literals: a backslash-s inside a JS string literal collapses to a plain
+    // 's', so the character-class form shipped as [sS] and matched nothing.
+    // That shipped silently for a long time: disc_track / disc_artist /
+    // disc_album came back empty in EVERY logged session because of it, and so
+    // did the library panel. A regex literal has no such ambiguity.
+    function reFrom(literal, name, prefix) {
+      var src = literal.source;
+      if (prefix) { src = src.replace('PREFIX', prefix); }
+      if (name) { src = src.replace('TAG', name); }
+      return new RegExp(src, 'i');
+    }
+    var RE_PREFIX_TEXT  = /(?:<PREFIX>)\\s*<TAG>[\\s\\S]*?<text>\\s*([\\s\\S]*?)\\s*<\\/text>/i;
+    var RE_PREFIX_INNER = /(?:<PREFIX>)\\s*<TAG>\\s*([\\s\\S]*?)\\s*<\\/TAG>/i;
+    var RE_TEXT         = /<TAG>[\\s\\S]*?<text>\\s*([\\s\\S]*?)\\s*<\\/text>/i;
+    var RE_INNER        = /<TAG>\\s*([\\s\\S]*?)\\s*<\\/TAG>/i;
+
     function mqField(mdq, names, prefix) {
       if (!mdq) return '';
       for (var n = 0; n < names.length; n++) {
-        var name = names[n], re, m;
+        var name = names[n], m;
         try {
           if (prefix) {
-            re = new RegExp('(?:<' + prefix + '>)\\s*<' + name +
-                            '>\\s*([\\s\\S]*?)\\s*</' + name + '>', 'i');
-            m = mdq.match(re);
-            if (m && m[1]) return String(m[1]).replace(/<[^>]*>/g, '').trim();
-            re = new RegExp('(?:<' + prefix + '>)\\s*<' + name +
-                            '>[\\s\\S]*?<text>\\s*([\\s\\S]*?)\\s*</text>', 'i');
-            m = mdq.match(re);
+            // <text> FIRST. The MDQ nests a <word> breakdown inside every
+            // <title>/<artist>, so reading the element's inner text yields
+            // "Miracles (Someone Special) Miracles" - the value repeated with
+            // its own word list. Verified against the real library MDQ.
+            m = mdq.match(reFrom(RE_PREFIX_TEXT, name, prefix));
             if (m && m[1]) return String(m[1]).trim();
+            m = mdq.match(reFrom(RE_PREFIX_INNER, name, prefix));
+            if (m && m[1]) {
+              var i = String(m[1]).replace(/<[^>]*>/g, '').trim();
+              if (i) return i;
+            }
           }
-          re = new RegExp('<' + name + '>\\s*([\\s\\S]*?)\\s*</' + name + '>', 'i');
-          m = mdq.match(re);
+          m = mdq.match(reFrom(RE_TEXT, name, null));
+          if (m && m[1]) return String(m[1]).trim();
+          m = mdq.match(reFrom(RE_INNER, name, null));
           if (m && m[1]) {
             var inner = String(m[1]).replace(/<[^>]*>/g, '').trim();
             if (inner) return inner;
           }
-          re = new RegExp('<' + name + '>[\\s\\S]*?<text>\\s*([\\s\\S]*?)\\s*</text>', 'i');
-          m = mdq.match(re);
-          if (m && m[1]) return String(m[1]).trim();
         } catch (e) {}
       }
       return '';
+    }
+
+    // The library track's real content id. WMP reveals the COLLECTION guid only
+    // AFTER the dialog closes - a real library run:
+    //   15:08:16  write=WriteNamesEx-mdq-tagsonly-ok   (no wmid available yet)
+    //   15:08:26  [WMID] captured C52A9FE8-...        (too late for this write)
+    // Writing by MDQ is a CD_BY_MDQCD call and a library album has no disc, so
+    // it is accepted and applies nothing. The MDQ's WMContentID is a real
+    // handle on the track, and type 1 with it is the same call shape as the
+    // collection write that DOES work (WriteNamesEx-wmid-ok).
+    function mqContentId(mdq) {
+      if (!mdq) return '';
+      // Regex LITERAL, not an escaped string: a backslash-s inside a JS
+      // string literal collapses to a plain 's' and matches nothing.
+      try {
+        var m = mdq.match(/<WMContentID>\\s*([^<]+?)\\s*<\\/WMContentID>/i);
+        return m ? String(m[1]).trim() : '';
+      } catch (e) { return ''; }
     }
 
     // One-shot probe. The MDQ's element names are not guessable from the first
@@ -2528,17 +2564,43 @@ def confirm():
     // WMP returns the ACTUAL contents of the disc in the drive. If that does
     // not match the album being applied, WMP may legitimately refuse the
     // write - so tell the user before they click Finish instead of after.
+    // Regex LITERALS, never escaped string literals: a backslash-s inside a JS
+    // string literal collapses to a plain 's', so the character-class form
+    // shipped as [sS] and matched nothing at all. That is why disc_track /
+    // disc_artist / disc_album were empty in EVERY logged session.
+    var RE_TEXT_ANY   = /<TAG>[\\s\\S]*?<text>\\s*([\\s\\S]*?)\\s*<\\/text>/i;
+    var RE_PREFIX_ANY = /(?:PREFIX)\\s*<TAG>[\\s\\S]*?<text>\\s*([\\s\\S]*?)\\s*<\\/text>/i;
+
     function mqText(xml, tag, prefix) {
-      // Allow whitespace between tags: WMP pretty-prints the MDQ, so
-      // '<album><title>' never appears literally.
+      // 'prefix' is a full element name INCLUDING its angle brackets, e.g.
+      // '<album>' - so PREFIX is substituted whole, not wrapped again.
       try {
-        var re = new RegExp((prefix ? '(?:' + prefix + ')\\s*' : '') +
-                            '<' + tag + '>\\s*[\\s\\S]*?<text>\\s*([\\s\\S]*?)\\s*</text>',
-                            'i');
-        var m = xml.match(re);
+        var lit = prefix ? RE_PREFIX_ANY : RE_TEXT_ANY;
+        var src = lit.source;
+        if (prefix) { src = src.replace('PREFIX', prefix); }
+        var m = xml.match(new RegExp(src.replace('TAG', tag), 'i'));
         return m ? m[1] : '';
       } catch (e) { return ''; }
     }
+    // The library track's real content id, from the MDQ. WMP reveals the
+    // COLLECTION guid only AFTER the dialog closes, so on the first library
+    // update of a session there is no wmid to write against:
+    //   15:08:16  write=WriteNamesEx-mdq-tagsonly-ok   (wmid=-)
+    //   15:08:26  [WMID] captured C52A9FE8-...        (10s too late for the write)
+    // Writing by MDQ is a CD_BY_MDQCD call and a library album has no disc, so
+    // WMP accepts it and applies nothing. The MDQ's WMContentID is a real
+    // handle on the track, and type 1 with it is the same call shape as the
+    // collection write that does work.
+    function mqContentId(mdq) {
+      if (!mdq) return '';
+      // Regex LITERAL, not an escaped string: a backslash-s inside a JS
+      // string literal collapses to a plain 's' and matches nothing.
+      try {
+        var m = mdq.match(/<WMContentID>\\s*([^<]+?)\\s*<\\/WMContentID>/i);
+        return m ? String(m[1]).trim() : '';
+      } catch (e) { return ''; }
+    }
+
     function parseDiscIdentity(mdq) {
       // What is ACTUALLY on the disc, as reported by WMP. Compared against the
       // album being applied this shows whether WMP has any chance of matching
@@ -3003,7 +3065,15 @@ def confirm():
         // discKnown is false - which reported every rip as a library update
         // ("library_mode": true on a real rip of Sun Kil Moon - Tiny Cities).
         // WMP_CD is authoritative: if WMP named the disc, it is one.
-        var isLibrary = !discKnown && !WMP_CD;
+        // A CD RIP and a LIBRARY ALBUM are told apart by the URL, not by the
+        // MDQ. A rip arrives with ?cd= (or ?toc=); "Update album info" arrives
+        // with nothing but ?requestid=. The MDQ is a terrible discriminator
+        // because a library track's MDQ carries perfectly good titles - it only
+        // looked empty because the reader's regex never matched (see the RE_
+        // literals above). With a working reader, testing discKnown here would
+        // call every tagged library album a DISC and ask WMP to rename and
+        // regroup its files. WMP_CD / WMP_TOC are authoritative.
+        var isLibrary = !WMP_CD && !WMP_TOC;
         diag.mdq_usable = mdqUsable;
         diag.library_mode = isLibrary;
         diag.rename_flag = isLibrary ? false : true;
@@ -3043,14 +3113,35 @@ def confirm():
             safeLog('WriteNamesEx by wmid failed: ' + e);
           }
         } else if (mdqUsable) {
-          // Last resort for a library album with no wmid on the URL.
-          try {
-            window.external.WriteNamesEx(2, mdq, generatedXml, false);
-            applied = true;
-            diag.write = 'WriteNamesEx-mdq-tagsonly-ok';
-          } catch (e) {
-            diag.write_ex_mdq_error = String(e && e.message ? e.message : e);
-            safeLog('WriteNamesEx by MDQ failed: ' + e);
+          // Last resort for a library album with no wmid. Writing by MDQ is a
+          // CD_BY_MDQCD call and a library album has no disc, so WMP accepts
+          // it and applies NOTHING - which is why library tags appeared to
+          // work twice and then stopped. The MDQ still carries the track's
+          // real WMContentID, and type 1 with it is the same call shape as the
+          // collection write that does work. Logged from a failing run:
+          //   15:08:16  write=WriteNamesEx-mdq-tagsonly-ok  (wmid=-)
+          //   15:08:26  [WMID] captured C52A9FE8-...       (10s too late)
+          var libCid = mqContentId(mdq);
+          if (libCid) {
+            try {
+              window.external.WriteNamesEx(1, libCid, generatedXml, false);
+              applied = true;
+              diag.write = 'WriteNamesEx-lib-cid-ok';
+              diag.lib_content_id = libCid;
+            } catch (e) {
+              diag.write_ex_libcid_error = String(e && e.message ? e.message : e);
+              safeLog('WriteNamesEx by library content id failed: ' + e);
+            }
+          }
+          if (!applied) {
+            try {
+              window.external.WriteNamesEx(2, mdq, generatedXml, false);
+              applied = true;
+              diag.write = 'WriteNamesEx-mdq-tagsonly-ok';
+            } catch (e) {
+              diag.write_ex_mdq_error = String(e && e.message ? e.message : e);
+              safeLog('WriteNamesEx by MDQ failed: ' + e);
+            }
           }
         }
 

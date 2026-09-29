@@ -807,11 +807,17 @@ _m3 = re.search(r"<mdr-id>([^<]+)</mdr-id>", _d3)
 check("different-disc-yields-different-identity",
       bool(_m3) and _m3.group(1) != _m1.group(1),
       "two different discs must not share a document identity")
-# a CD rip is not a library album
+# a CD rip is not a library album. The discriminator is the URL, not the MDQ:
+# a rip arrives with ?cd=/?toc=, "Update album info" with only ?requestid=.
+# This used to test discKnown (whether the MDQ carried any text), which only
+# appeared to work because the MDQ reader never matched anything.
 check("cd-rip-is-not-a-library-update",
-      "var isLibrary = !discKnown && !WMP_CD;" in _src,
-      "a rip must not be reported as a library update: the CD flow sends no "
-      "requestid, so discKnown is always false for a real disc")
+      "var isLibrary = !WMP_CD && !WMP_TOC;" in _src,
+      "a rip must not be reported as a library update: it arrives with ?cd=")
+check("library-detection-does-not-depend-on-the-mdq",
+      "var isLibrary = !discKnown && !WMP_CD;" not in _src,
+      "a library track's MDQ carries real titles, so gating on discKnown would "
+      "call every TAGGED library album a disc and ask WMP to rename its files")
 
 # 34g. A SUCCESSFUL document declared no <status>. EMPTY_METADATA_XML declares
 #      <status>NOTFOUND</status> in exactly that position, so the asymmetry is
@@ -1874,6 +1880,39 @@ check("track-title-is-not-the-album-title",
       "replace(/<album>[\\\\s\\\\S]*?<\\\\/album>/gi, '')" in _src,
       "the <album> block must be stripped before the track title is read, or a "
       "lazy <title> match returns the ALBUM name as the track name")
+
+# 46. THE ROOT CAUSE of the empty 'Existing Information', found by running the
+#     SHIPPED reader against the real MDQ instead of a hand-written copy of it.
+#     Every MDQ regex was built with new RegExp('...') from a PYTHON string, and
+#     '\s' inside a JS *string literal* collapses to a bare 's'. So the
+#     character class shipped as [sS] and every match failed - silently, in
+#     every session, for the whole life of the project:
+#       "disc": {"track_count": 1, "disc_track": "", "disc_artist": "", ...}
+#       "found_album": "", "found_artist": "", "found_track": ""
+#     A regex LITERAL has no such ambiguity, so the readers now build from
+#     literal sources. The shipped reader on the real MDQ returns
+#     disc_track='Miracles (Someone Special)', disc_artist='Coldplay',
+#     disc_album='X&Y', cid='53813A88-...'.
+for _lit in ("RE_PREFIX_TEXT", "RE_PREFIX_INNER", "RE_TEXT", "RE_INNER",
+             "RE_TEXT_ANY", "RE_PREFIX_ANY"):
+    check("regex-literal-%s" % _lit.lower(),
+          _re.search(r"var %s\s*=\s*/" % _lit, _src) is not None,
+          f"{_lit} must be a regex literal, not a new RegExp('...') string - a "
+          f"backslash-s in a JS string literal collapses to 's'")
+check("no-escaped-string-regex-left",
+      _re.search(r"new RegExp\('[^']*\\s", _src) is None,
+      "no MDQ regex may be built from an escaped string literal again: that is "
+      "what made every match fail silently")
+check("mdq-content-id-write-path",
+      "function mqContentId(mdq)" in _src
+      and "WriteNamesEx(1, libCid, generatedXml, false)" in _src
+      and "WriteNamesEx-lib-cid-ok" in _src,
+      "a library update with no wmid must write by the track's real "
+      "WMContentID; writing by MDQ is a CD call and applies nothing")
+check("content-id-is-a-last-resort",
+      _at(_src, "var libCid = mqContentId(mdq);") < _at(_src, "WriteNamesEx(1, libCid"),
+      "the collection write must still be preferred; the content id is only the "
+      "fallback for when WMP has not revealed a wmid yet")
 
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")

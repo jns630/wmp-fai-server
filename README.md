@@ -332,8 +332,15 @@ COM, trying these in order and falling back until one succeeds:
 | 1 | `WriteNamesEx(1, WMP_CD, xml, true)` | Physical disc, by content ID |
 | 2 | `WriteNamesEx(2, mdq, xml, true)` | Real disc MDQ (rename/regroup allowed) |
 | 3 | `WriteNamesEx(1, WMP_WMID, xml, false)` | Library album, tags only |
-| 4 | `WriteNamesEx(2, mdq, xml, false)` | Library fallback, tags only |
-| 5 | `WriteNamesEx(0, WMP_TOC, xml, true)` | Legacy TOC routing |
+| 4 | `WriteNamesEx(1, mdqContentId, xml, false)` | Library album before WMP reveals its collection — written by the track's real `WMContentID` |
+| 5 | `WriteNamesEx(2, mdq, xml, false)` | Last resort only — a **CD** call, applies nothing to a library album |
+| 6 | `WriteNamesEx(0, WMP_TOC, xml, true)` | Legacy TOC routing |
+
+A **rip** and a **library album** are told apart by the URL, never by the MDQ.
+A rip arrives with `?cd=` (or `?toc=`); *Update album info* arrives with nothing
+but `?requestid=`. The MDQ is a poor discriminator because a library track's MDQ
+carries perfectly good titles — gating on it would classify every *tagged* library
+album as a disc and ask WMP to rename and regroup its files.
 
 The MDQ is obtained from `window.external.GetMDQByRequestID(REQUEST_ID)` and its
 **real per-track `WMContentID` values** are used. Generated GUIDs match nothing in
