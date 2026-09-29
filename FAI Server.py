@@ -978,6 +978,8 @@ def parse_mdq_content_ids(mdq_xml):
     numbering frequently disagree, which would hand a track the wrong ID.
     """
     if not mdq_xml or '<MDQ' not in mdq_xml:
+        log_line("MDQ", f"no usable MDQ (len={len(mdq_xml or '')}, "
+                        f"has_MDQ_tag={'<MDQ' in (mdq_xml or '')})")
         return {}
     # A STUB MDQ - one bare track entry with an id but no title/artist/album -
     # is what WMP returns when there is no disc in the drive (a library
@@ -999,6 +1001,16 @@ def parse_mdq_content_ids(mdq_xml):
                 content_ids[idx] = cid.group(1).upper()
     except Exception as e:
         print(f"[MDQ] Content-ID parse error: {e}")
+    if not content_ids:
+        # Log the shape, not the document: this is the case that means every
+        # track gets a GENERATED WMContentID, which WMP cannot match, and the
+        # write is then silently ignored with no other symptom.
+        log_line("MDQ", f"no WMContentID recovered from {len(blocks)} track "
+                        f"block(s); all track ids will be GENERATED and WMP "
+                        f"will ignore the write. mdq={mdq_xml[:700]!r}")
+    else:
+        log_line("MDQ", f"parsed {len(content_ids)} real content IDs: "
+                        f"{sorted(content_ids.items())[:5]}")
     return content_ids
 
 
@@ -1975,9 +1987,26 @@ def confirm():
     # the exact collection it wants updated. Read it raw and reuse it so the
     # write targets the real library entry instead of a generated one.
     wmp_wmid = raw_query_arg("wmid") or raw_query_arg("WMID") or ""
+    wmid_from_url = bool(wmp_wmid)
     if wmp_wmid:
         _remember_wmid(wmp_wmid)
         log_line("WMID", f"dialog opened for wmid={wmp_wmid!r}")
+    elif LAST_WMID:
+        # WMP opened the dialog WITHOUT ?wmid= - logged from real sessions
+        # arriving with only ?requestid=. That leaves the confirm page with no
+        # collection id, so it falls through to WriteNamesEx(2, STUB_MDQ, ...)
+        # as the write target, and a stub MDQ's content id belongs to no real
+        # track (see parse_mdq_content_ids). WMP accepts the call and applies
+        # nothing, with no other symptom.
+        #
+        # LAST_WMID is the collection GUID WMP itself most recently asked us
+        # about, and it is already trusted for delivery - the staged document is
+        # bound to it in store_staged_xml. Using it as the write target as well
+        # is consistent, and a real collection id is strictly better than a
+        # stub that matches nothing.
+        wmp_wmid = LAST_WMID
+        log_line("WMID", f"dialog had no wmid; using last seen "
+                         f"collection {wmp_wmid!r} as the write target")
     wmp_cd = raw_query_arg("cd") or raw_query_arg("CD") or ""
     if wmp_cd:
         log_line("CDID", f"dialog opened for cd={wmp_cd!r}")
@@ -2004,7 +2033,12 @@ def confirm():
     track_fai_navigation(session_id, 'confirm_view', {
         'source': source,
         'album_id': album_id,
-        'request_id': request_id
+        'request_id': request_id,
+        # Recorded so the log shows whether the write target was a real
+        # collection id and where it came from, or fell back to the stub-MDQ
+        # path that WMP silently ignores.
+        'wmid': wmp_wmid,
+        'wmid_from_url': wmid_from_url
     })
 
     if source == "itunes":

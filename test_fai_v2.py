@@ -770,6 +770,26 @@ check("staging-records-the-pending-document",
       "_stage_request_xml must record the pending document and its timestamp, "
       "or the library-write fallback has nothing to serve")
 
+# 34c. A library FAI dialog that WMP opens with ONLY ?requestid= left the
+#      confirm page with no collection id, so the write fell through to
+#      WriteNamesEx(2, STUB_MDQ, ...). A stub MDQ's content id belongs to no
+#      real track - the code says so in parse_mdq_content_ids - so WMP accepted
+#      the call and applied nothing. Logged as
+#      "write":"WriteNamesEx-mdq-tagsonly-ok" with no other symptom.
+check("dialog-falls-back-to-last-collection",
+      "elif LAST_WMID:" in _src
+      and "wmp_wmid = LAST_WMID" in _src,
+      "a dialog opened without ?wmid= must fall back to the last collection "
+      "WMP asked about rather than targeting a stub MDQ that matches nothing")
+check("wmid-origin-is-logged",
+      "'wmid_from_url': wmid_from_url" in _src,
+      "the log must record whether the write target came from the URL or from "
+      "the fallback, or this is undiagnosable next time")
+check("mdq-parse-always-explains-itself",
+      "no usable MDQ" in _src and "no WMContentID recovered" in _src,
+      "parse_mdq_content_ids must log on every path, because an empty result "
+      "means every track id is generated and the write is silently ignored")
+
 # 35. Aero restyle must be CSS-only: no CSS3 without an IE7 fallback, and
 #     none of the working dialog logic may be disturbed.
 ui_html = c.get("/FAI/ui?artist=beatles&album=abbey+road").data.decode("utf-8", "ignore")
