@@ -1126,9 +1126,22 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
     album_genre = xesc(album_data.get("genre", "Rock"))
     release_date = f"{album_data.get('year', '2000')}/01/01"
 
+    # <status> is REQUIRED, not optional. EMPTY_METADATA_XML declares
+    # <status>NOTFOUND</status> in exactly this position, but a SUCCESSFUL
+    # document used to declare no status at all - so WMP read the response as
+    # 'no result', never completed the collection, never fetched the artwork
+    # from largeCoverParams, and re-opened the FAI dialog for the very
+    # collection id we had just supplied. Logged from a real rip of
+    # 'Sun Kil Moon - Tiny Cities':
+    #   12:29:30 [STAGED] album='Tiny Cities'   (no [IMAGE] served anywhere)
+    #   12:29:45 ReturnToMainTask-ok
+    #   12:29:49 GET /FAI/default.aspx?...&wmid=B17CF884-...
+    # B17CF884 was our own generated WMCollectionID: WMP had adopted it and was
+    # asking for it again, which is the reported "hang then search again".
     xml = f"""<?xml version="1.0" encoding="utf-8"?>
 <METADATA>
   <version>5.0</version>
+  <status>OK</status>
   <requestID>{req_id}</requestID>
   <MDR-CD>
     <version>5.0</version>

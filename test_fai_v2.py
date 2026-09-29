@@ -813,6 +813,39 @@ check("cd-rip-is-not-a-library-update",
       "a rip must not be reported as a library update: the CD flow sends no "
       "requestid, so discKnown is always false for a real disc")
 
+# 34g. A SUCCESSFUL document declared no <status>. EMPTY_METADATA_XML declares
+#      <status>NOTFOUND</status> in exactly that position, so the asymmetry is
+#      in our own code. With no status WMP read the response as 'no result': it
+#      never completed the collection, never fetched the artwork from
+#      largeCoverParams, and re-opened the FAI dialog for the collection id we
+#      had just supplied.
+#        12:29:30 [STAGED] album='Tiny Cities'   (no [IMAGE] served anywhere)
+#        12:29:45 ReturnToMainTask-ok
+#        12:29:49 GET /FAI/default.aspx?...&wmid=B17CF884-...
+_stat = fai.build_wmp_xml(dict(album), selected_tracks=[album["tracks"][0]])
+check("successful-document-declares-ok-status",
+      "<status>OK</status>" in _stat,
+      "a successful document must declare <status>OK</status>; without it WMP "
+      "treats the response as 'no result', skips the artwork and re-prompts")
+check("status-sits-before-mdr-cd",
+      "<status>OK</status>" in _stat
+      and _stat.index("<status>OK</status>") < _stat.index("<MDR-CD>"),
+      "the status must be a sibling of MDR-CD, matching EMPTY_METADATA_XML")
+check("status-mirrors-the-notfound-document",
+      fai.EMPTY_METADATA_XML.index("<status>") < fai.EMPTY_METADATA_XML.index("<MDR-CD>"),
+      "the OK and NOTFOUND documents must declare status in the same place")
+check("requestid-is-still-present",
+      "<requestID>" in _stat and "<mdr-id>" in _stat,
+      "adding the status must not displace the request identity")
+try:
+    import xml.etree.ElementTree as _ET
+    _ET.fromstring(_stat)
+    _parsed = True
+except Exception:
+    _parsed = False
+check("document-is-well-formed-xml", _parsed,
+      "the generated document must still be well-formed XML")
+
 _rg2 = c.get("/cdinfo/GetMDRCD.aspx?requestID=ANOTHER-FRESH-GUID").data.decode("utf-8", "ignore")
 check("get-does-not-use-the-fallback",
       "Guard Album" not in _rg2,
