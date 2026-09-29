@@ -1060,8 +1060,13 @@ def parse_mdq_content_ids(mdq_xml):
 
 
 def build_wmp_xml(album_data, selected_tracks=None, request_id="",
-                  content_ids=None, wmid=""):
-    req_id = request_id or str(uuid.uuid4()).upper()
+                  content_ids=None, wmid="", cd=""):
+    # The document's identity must be something WMP can correlate. A library
+    # dialog gives us the requestid. A CD rip arrives with NO requestid at all,
+    # and this used to fall through to uuid4() - a fresh random value on every
+    # staging, leaving WMP nothing stable to match the document against. The one
+    # stable identifier a CD flow supplies is the ?cd= disc content id.
+    req_id = request_id or (guid(cd) if cd else str(uuid.uuid4()).upper())
     # Use the WMID WMP itself supplied when it has one: that is the exact GUID
     # of the library collection being updated, so the document lines up with
     # WMP's own entry. Only generate a GUID when WMP gave us nothing.
@@ -2561,7 +2566,12 @@ def confirm():
         // existing library tracks, which is the most likely reason the write
         // is accepted but no tags land - so ask for a tags-only write.
         var mdqUsable = !!(mdq);
-        var isLibrary = !discKnown;
+        // A CD rip is NOT a library album, whatever the MDQ says. WMP's CD flow
+        // sends no requestid, so GetMDQByRequestID('') returns nothing and
+        // discKnown is false - which reported every rip as a library update
+        // ("library_mode": true on a real rip of Sun Kil Moon - Tiny Cities).
+        // WMP_CD is authoritative: if WMP named the disc, it is one.
+        var isLibrary = !discKnown && !WMP_CD;
         diag.mdq_usable = mdqUsable;
         diag.library_mode = isLibrary;
         diag.rename_flag = isLibrary ? false : true;
@@ -2750,11 +2760,12 @@ def store_staged_xml():
         # best effort - if the user is updating that same album (the common
         # case) the lookup will hit directly instead of falling through to
         # LAST_XML, which by then may hold a completely different album.
-        xml = build_wmp_xml(album, selected_tracks=selected_tracks,
-                            request_id=req_id, content_ids=content_ids,
-                            wmid=str(data.get("wmid", "") or ""))
         toc_val = str(data.get("toc", "") or "").strip()
         cd_val = str(data.get("cd", "") or "").strip()
+        xml = build_wmp_xml(album, selected_tracks=selected_tracks,
+                            request_id=req_id, content_ids=content_ids,
+                            wmid=str(data.get("wmid", "") or ""),
+                            cd=cd_val)
         with XML_LOCK:
             LAST_XML = xml
             # Bind only to a wmid WMP put in THIS dialog's URL. LAST_WMID is a

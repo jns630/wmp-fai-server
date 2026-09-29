@@ -780,31 +780,39 @@ check("cd-flow-logs-the-ignored-collection",
       "the ignored collection must be logged, or a CD that reopens the dialog "
       "is undiagnosable next time")
 
-# 34e. A CD RIP must never inherit a library collection id. Borrowing LAST_WMID
-#      onto a disc document made WMP treat it as metadata for some unrelated
-#      library album: the tags landed but the cover did not, and WMP REOPENED
-#      the FAI dialog 3s after ReturnToMainTask - the "hang".
-#        12:00:49 [CLIENT] finish
-#        12:00:56 done_close / ReturnToMainTask-ok
-#        12:00:59 GET /FAI/default.aspx?...&cd=B+96+...&wmid=F62C9D85-...
-fai.LAST_WMID = "11112222-3333-4444-5555-666677778888"
-_cd = "B+96+1970+523A+8461"
-_cdpage = c.get("/confirm?source=itunes&id=1570089404&cd=" + _cd).data.decode("utf-8", "ignore")
-check("cd-dialog-is-not-stamped-with-a-collection",
-      'var WMP_WMID = "11112222-3333-4444-5555-666677778888"' not in _cdpage
-      and 'var WMP_WMID = ""' in _cdpage,
-      "a CD rip must not borrow the last seen library collection as its "
-      "write target, or WMP applies it to the wrong album and reopens the dialog")
-check("library-dialog-still-borrows-the-collection",
-      'var WMP_WMID = "11112222-3333-4444-5555-666677778888"' in
-      c.get("/confirm?source=itunes&id=1570089404&requestid=R1")
-      .data.decode("utf-8", "ignore"),
-      "a LIBRARY dialog opened without ?wmid= must still fall back to the last "
-      "seen collection, or it regresses to the stub-MDQ write that does nothing")
-check("cd-flow-logs-the-ignored-collection",
-      "CD flow: ignoring last seen collection" in _src,
-      "the ignored collection must be logged, or a CD that reopens the dialog "
-      "is undiagnosable next time")
+# 34f. A CD document had a RANDOM identity. WMP's CD flow sends no requestid, so
+#      req_id fell through to uuid4() - a fresh value on every staging - leaving
+#      WMP nothing stable to correlate the document against. The only stable
+#      identifier a CD flow supplies is the ?cd= disc content id.
+check("cd-document-identity-is-stable",
+      "req_id = request_id or (guid(cd) if cd else str(uuid.uuid4()).upper())" in _src,
+      "a CD document must derive its identity from the disc content id, not a "
+      "fresh random UUID4 on every staging")
+check("cd-is-passed-to-the-xml-builder",
+      "cd=cd_val)" in _src,
+      "store_staged_xml must pass the disc id to build_wmp_xml so it can be used")
+_d1 = fai.build_wmp_xml(dict(album), selected_tracks=[album["tracks"][0]],
+                       request_id="", cd="B+96+1970+523A")
+_d2 = fai.build_wmp_xml(dict(album), selected_tracks=[album["tracks"][0]],
+                       request_id="", cd="B+96+1970+523A")
+_m1 = re.search(r"<mdr-id>([^<]+)</mdr-id>", _d1)
+_m2 = re.search(r"<mdr-id>([^<]+)</mdr-id>", _d2)
+check("same-disc-yields-same-identity",
+      bool(_m1) and bool(_m2) and _m1.group(1) == _m2.group(1),
+      f"the same disc must always produce the same document id, got "
+      f"{_m1.group(1) if _m1 else '?'} vs {_m2.group(1) if _m2 else '?'}")
+_d3 = fai.build_wmp_xml(dict(album), selected_tracks=[album["tracks"][0]],
+                       request_id="", cd="DIFFERENT+DISC")
+_m3 = re.search(r"<mdr-id>([^<]+)</mdr-id>", _d3)
+check("different-disc-yields-different-identity",
+      bool(_m3) and _m3.group(1) != _m1.group(1),
+      "two different discs must not share a document identity")
+# a CD rip is not a library album
+check("cd-rip-is-not-a-library-update",
+      "var isLibrary = !discKnown && !WMP_CD;" in _src,
+      "a rip must not be reported as a library update: the CD flow sends no "
+      "requestid, so discKnown is always false for a real disc")
+
 _rg2 = c.get("/cdinfo/GetMDRCD.aspx?requestID=ANOTHER-FRESH-GUID").data.decode("utf-8", "ignore")
 check("get-does-not-use-the-fallback",
       "Guard Album" not in _rg2,
