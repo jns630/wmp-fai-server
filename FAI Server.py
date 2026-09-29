@@ -294,17 +294,24 @@ def _request_names_a_disc():
     there: the disc id is the authoritative subject.
 
     ============================ ARTWORK: WHAT IS ACTUALLY KNOWN =============
-    A CD rip gets its artwork on the FIRST write to that disc, and stops
-    getting it once WMP has adopted a collection for it. Across every real
-    session in the log the correlation is exact:
+    A CD rip gets its artwork on the FIRST write to that disc, and stops getting
+    it once WMP has adopted a collection for it. CONFIRMED in the field, not
+    inferred: a fresh disc ripped after this was diagnosed fetched its cover
+    immediately, while re-ripping the already-adopted one did not.
 
       dialog WITHOUT ?wmid  ->  [IMAGE] fetched
-        12:41:23  cd=B  wmid=-          -> [IMAGE] 103895B
-        12:53:23  cd=4  wmid=-          -> [IMAGE]  26131B
+        12:41:23  cd=B+96+1970+523A+..  wmid=-         -> [IMAGE] 103895B
+        12:53:23  cd=4+96+3654+753C+..  wmid=-         -> [IMAGE]  26131B
+        13:39:29  cd=B+96+AB80+13510+.. wmid=-         -> [IMAGE]  82582B x2
+                                                 ('April', artwork applied)
       dialog WITH ?wmid     ->  no [IMAGE] at all
-        12:54:24  cd=B  wmid=B17CF884   -> none
-        13:14:26  cd=B  wmid=B17CF884   -> none
-        13:21:12  cd=B  wmid=B17CF884   -> none
+        12:54:24  cd=B+96+1970+523A+..  wmid=B17CF884 -> none
+        13:14:26  cd=B+96+1970+523A+..  wmid=B17CF884 -> none
+        13:21:12  cd=B+96+1970+523A+..  wmid=B17CF884 -> none
+
+    Note the disc ids: the three that worked are all DIFFERENT discs, and the
+    three that failed are all the same disc WMP had already adopted a collection
+    for. The discriminator is the disc's history, not the album or provider.
 
     This is NOT fixable by changing the document. 12:41 and 13:14 staged the
     SAME MusicBrainz release and therefore produced a byte-identical document
@@ -316,8 +323,9 @@ def _request_names_a_disc():
 
     So the guard below is correctness only - a disc delivery should not be
     rewritten onto a collection id - and deliberately does NOT claim to fix
-    artwork. Confirming WMP's remaining precondition needs a trace from inside
-    the player, which the HTTP log cannot supply.
+    artwork. Practical rule for the user: artwork lands on the first FAI apply
+    to a disc; to change the art on an album WMP has already adopted, update
+    that album in the library instead.
     """
     for name in ('toc', 'TOC', 'mdq', 'cd', 'CD'):
         if raw_query_arg(name).strip():
