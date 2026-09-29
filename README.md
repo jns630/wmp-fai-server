@@ -362,26 +362,47 @@ they are not repeated:
   15:43:45 WMP fetched the Prospekt art twice and did not attach it. The fetch is
   necessary, not sufficient, and no server-side log line can distinguish the two.
 
-**Still unexplained:** WMP downloads the image and does not display it. Everything
-else the server controls is now verified — well-formed document, correct collection
-id, a reachable image. The remaining untested variable was the image proxy itself:
+**Solved on 2026-09-29, and it took two changes — one here, one on WMP's side.**
 
-| WMP cover fetches, all time, by user agent | count |
+The last untested variable was the image proxy. Counting `/cover/` requests by user
+agent over the whole log:
+
+| WMP cover fetches, all time | count |
 | --- | --- |
 | via `http://127.0.0.1/cover/…` | **62** |
 | direct upstream URL | **0** |
 
-Not one cover WMP has ever been given on this server went through anything but our
-own loopback proxy, and not one attached. So the proxy is now optional
-(`_ART_MODE`) and defaults to `"direct"` — a plain `https://` URL from the upstream
-CDN, which is what a real FAI server sends. The proxy stays in place as the
-fallback if an upstream host turns out to refuse WMP.
+Not one cover WMP had ever been given went through anything but our own loopback
+proxy, and not one attached. The proxy is now optional (`_ART_MODE`) and defaults
+to `"direct"` — a plain `https://` URL from the upstream CDN, which is what a real
+FAI server sends. The proxy remains as the fallback in case an upstream host turns
+out to refuse WMP. `[STAGED] … art=direct|proxy` records which shape produced each
+document, so a log always says what WMP was actually offered.
 
-**This is a diagnostic, not a proven fix.** It is the first configuration in which
-WMP has been offered a cover it did not have to reach through this server, so if the
-art still does not appear, flip `_ART_MODE` back to `"proxy"` and the remaining
-unknown is inside WMP. `[STAGED] … art=direct|proxy` records which shape produced
-each document, so a log always says what WMP was actually offered.
+But that was only half of it. The confirming sequence:
+
+```text
+16:13:37  [STAGED] "Prospekt's March - EP"  xml_bytes=4075  art=direct
+16:13:38  GET /done          <- dialog closed, and NO [MDR] fetch followed
+16:14:34  [MDR] -> serving album='Prospekt&apos;s March - EP' to WMP (wmid=-)
+16:14:51  [MDR-FALLBACK] serving staged doc for fresh library write (age=73.9s)
+```
+
+`73.9 s` before 16:14:51 is 16:13:37, so the document WMP took was exactly the
+direct-mode one. The 16:13 apply was correct on the server and **was never
+fetched**; renewing WMP's database files made it re-request the metadata, and the
+art arrived with it. Two operational rules follow, both learned the hard way:
+
+- **A staged document that is never fetched is not a failure.** Look for the
+  `[MDR] -> serving` line before concluding that an apply did nothing. The 16:13
+  session looks identical to a failed one in `[STAGED]` terms and is not.
+- **Renewing WMP's database files is a legitimate diagnostic**, not a workaround.
+  When a rip appears to do nothing, the metadata may be staged and unfetched.
+
+Worth recording honestly: three commits were spent chasing server-side causes
+after the server side was already correct, and the 16:13 apply — the first in
+direct mode — was never fetched, so it could not have confirmed anything on its
+own. Both halves were needed.
 
 `XML_LOCK` is an `RLock` because `store_staged_xml()` holds it while calling
 `_stage_request_xml()`, which takes it again. A plain `Lock` self-deadlocks
