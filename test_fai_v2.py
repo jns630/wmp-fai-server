@@ -1914,6 +1914,47 @@ check("content-id-is-a-last-resort",
       "the collection write must still be preferred; the content id is only the "
       "fallback for when WMP has not revealed a wmid yet")
 
+# 47. Artwork for a disc that already has a collection. WMP caches the art it
+#     has seen for a collection and will not fetch again, so a re-apply never
+#     refreshes it: five applies of the Tiny Cities disc between 15:18 and
+#     15:25, every one ?cd=B...&wmid=B17CF884, produced no [IMAGE] at all,
+#     while a first apply to a FRESH disc fetched it twice. A cover URL that
+#     differs from the one WMP has on file is the only lever the server has.
+_ARTU = ("https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/90/81/27/"
+         "908127e4-acd6-8538-b8ab-0b8d1f1cd18c/859727388959_cover.jpg/600x600bb.jpg")
+_alb = dict(album, id="1570089404", source="itunes", art_url=_ARTU)
+
+
+def _cover(a, **kw):
+    x = fai.build_wmp_xml(dict(a), selected_tracks=a["tracks"], **kw)
+    m = re.search(r"<largeCoverParams>([^<]+)</largeCoverParams>", x)
+    return m.group(1) if m else ""
+
+
+_c1 = _cover(_alb, cd="B+96+1970")
+_c2 = _cover(_alb, cd="B+96+1970")
+_c3 = _cover(dict(_alb, id="1065975633"), cd="B+96+1970")
+check("cover-url-carries-a-version-token",
+      "&fai=" in _c1 and _c1.startswith(
+          "http://127.0.0.1/cover/album.jpg?url=https://is1"),
+      f"the cover URL must carry a token and keep the upstream url readable, "
+      f"got {_c1[:120]!r}")
+check("cover-token-is-stable-per-album",
+      _c1 == _c2,
+      "re-applying the SAME album must present the same URL, or WMP re-downloads "
+      "the artwork on every apply")
+check("cover-token-differs-per-album",
+      _c1 != _c3,
+      "a different album must present a different URL, so WMP treats it as new")
+check("album-without-art-still-has-no-cover",
+      _cover(dict(_alb, art_url=""), cd="B+96+1970") == "",
+      "no art upstream must mean no cover params, not a broken URL")
+_r = c.get("/cover/album.jpg?url=" + _ARTU + "&fai=deadbeef&locale=409&geoid=be")
+check("proxy-ignores-the-token",
+      _r.status_code == 200 and len(_r.data) > 1000,
+      f"the image proxy must ignore the extra parameters - WMP appends its own "
+      f"too - got {_r.status_code}, {len(_r.data)}B")
+
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:
