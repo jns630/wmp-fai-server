@@ -283,6 +283,28 @@ LAST_WMID = ""
 # [IMAGE] line at all in that session.
 _COVER_SEQ = 0
 
+# How the artwork URL is presented to WMP: "proxy" (our own /cover/ endpoint) or
+# "direct" (the upstream image URL, verbatim).
+#
+# Set to "direct" on 2026-09-29 after this in the log settled the argument:
+#
+#   WMP cover fetches, all time, by user agent
+#     via our proxy : 62
+#     direct        :  0
+#
+# Every single cover WMP has ever been given on this server went through
+# http://127.0.0.1/cover/... and not one of them ever attached. A plain
+# https:// URL from the upstream CDN is what a real FAI server sends, it keeps
+# the document free of a loopback host, and it removes our own proxy from the
+# path entirely. The proxy stays available because it is the fallback if the
+# upstream host turns out to refuse WMP.
+#
+# NOT PROVEN. This is the first configuration in which the cover has been
+# offered to WMP directly, so it is a diagnostic as much as a fix. If the art
+# still does not appear, flip this back to "proxy" and the remaining unknown is
+# inside WMP, not in anything this server can observe.
+_ART_MODE = "direct"
+
 def _remember_wmid(value):
     """Record the most recent wmid WMP asked us about."""
     global LAST_WMID
@@ -1137,18 +1159,19 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
     content_ids = content_ids or {}
 
     art_url = album_data.get("art_url", "")
-    # safe="/" keeps the slashes readable: quoting them makes the value
-    # double-encoded once WMP passes it back through a query string, and the
-    # image proxy then fetches an unparseable 'https%3A%2F%2F...' string.
+    # THE ARTWORK URL. Two shapes, selected by _ART_MODE (see its definition for
+    # why the direct form is now the default):
     #
-    # The version token goes in the PATH, not the query. As a second query
-    # parameter it introduced a bare '&' into this XML - and a bare '&' makes
-    # the whole document not-well-formed, so WMP rejected the ENTIRE response
-    # and stopped applying tags as well as artwork:
+    #   direct : https://is1-ssl.mzstatic.com/.../600x600bb.jpg
+    #   proxy  : http://127.0.0.1/cover/fai-<token>/album.jpg?url=<quoted upstream>
+    #
+    # In the proxy form the version token goes in the PATH, not the query. As a
+    # second query parameter it introduced a bare '&' into this XML - and a bare
+    # '&' makes the whole document not-well-formed, so WMP rejected the ENTIRE
+    # response and stopped applying tags as well as artwork:
     #   ET.fromstring(xml) -> not well-formed (invalid token): line 16, column 198
-    # The proxy already serves /cover/<path:ignore>, so a path segment costs
-    # nothing and leaves exactly one '?' and no '&' in the value.
-    #   http://127.0.0.1/cover/fai-67cb7ee4/album.jpg?url=https://...
+    # The proxy serves /cover/<path:ignore>, so a path segment costs nothing and
+    # leaves exactly one '?' and no '&' in the value.
     #
     # The token changes on EVERY APPLY, not just per album. It used to be
     # md5(album_id), i.e. stable per album, on the reasoning that a stable URL
@@ -1163,13 +1186,24 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
     # 15:43 delivery, and did not fetch it again. So a stable token silently
     # disables every retry. _COVER_SEQ makes each apply present a URL WMP has
     # never seen, which is the only way a re-apply can change the art.
-    global _COVER_SEQ
-    _COVER_SEQ += 1
-    ver = hashlib.md5(f"{album_data.get('id', '')}|{art_url}|{_COVER_SEQ}".encode(
-        "utf-8", "replace")).hexdigest()[:8]
-    proxy_art = (xesc(f"http://127.0.0.1/cover/fai-{ver}/album.jpg?url="
-                      f"{requests.utils.quote(art_url, safe='/:?=&')}")
-                 if art_url else "")
+    #
+    # safe="/" keeps the slashes readable in the proxy form: quoting them makes
+    # the value double-encoded once WMP passes it back through a query string,
+    # and the image proxy then fetches an unparseable 'https%3A%2F%2F...' string.
+    if not art_url:
+        proxy_art = ""
+    elif _ART_MODE == "direct":
+        # Upstream URLs carry no '&' in practice, but xesc unconditionally, so
+        # this cannot reintroduce the well-formedness bug above.
+        proxy_art = xesc(art_url)
+    else:
+        global _COVER_SEQ
+        _COVER_SEQ += 1
+        ver = hashlib.md5(
+            f"{album_data.get('id', '')}|{art_url}|{_COVER_SEQ}".encode(
+                "utf-8", "replace")).hexdigest()[:8]
+        proxy_art = xesc(f"http://127.0.0.1/cover/fai-{ver}/album.jpg?url="
+                         f"{requests.utils.quote(art_url, safe='/:?=&')}")
 
     tracks_to_include = selected_tracks if selected_tracks is not None else album_data.get("tracks", [])
 
@@ -3383,7 +3417,7 @@ def store_staged_xml():
         print(f"\n[METADATA APPLIED] Successfully staged XML for '{album.get('title')}' ({len(selected_tracks)} tracks)")
         log_line("STAGED", f"album={album.get('title')!r} artist={album.get('artist')!r} "
                            f"tracks={len(selected_tracks)} req_id={req_id!r} toc={toc_val!r} "
-                           f"xml_bytes={len(xml)}")
+                           f"xml_bytes={len(xml)} art={_ART_MODE}")
         return Response(xml, mimetype='text/xml')
     except Exception as e:
         import traceback

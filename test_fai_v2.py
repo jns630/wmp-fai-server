@@ -492,15 +492,23 @@ check("disc-parsed-before-write",
 #     escapes '/'. WMP passes the value back verbatim, so the proxy received
 #     'https%3A%2F%2F...' and every cover 404'd - which is why album art never
 #     appeared even though WMP did fetch the URL. Slashes must stay readable.
+#     The check is run in proxy mode specifically: in direct mode there is no
+#     encoding step at all, so this bug cannot occur (see _ART_MODE).
 ART = "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/52/aa/85/x.jpg/600x600bb.jpg"
-xml_art = fai.build_wmp_xml(dict(album, art_url=ART), selected_tracks=[album["tracks"][0]])
+_prev_art_mode = fai._ART_MODE
+fai._ART_MODE = "proxy"
+try:
+    xml_art = fai.build_wmp_xml(dict(album, art_url=ART),
+                                selected_tracks=[album["tracks"][0]])
+finally:
+    fai._ART_MODE = _prev_art_mode
 m = re.search(r"<largeCoverParams>([^<]+)</largeCoverParams>", xml_art)
 check("cover-url-not-double-encoded",
       m is not None
       and re.match(r"^http://127\.0\.0\.1/cover/(fai-[0-9a-f]{8}/)?album\.jpg"
                    r"\?url=https://", m.group(1)) is not None,
       f"the upstream url must stay readable (slashes not encoded); the path may "
-      f"carry the per-album token. got: {m.group(1) if m else None}")
+      f"carry the per-apply token. got: {m.group(1) if m else None}")
 
 # the proxy must also recover a double-encoded url (older staged documents)
 REAL_ART = ("https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/52/aa/85/"
@@ -1943,25 +1951,36 @@ check("content-id-is-a-last-resort",
 #     15:25, every one ?cd=B...&wmid=B17CF884, produced no [IMAGE] at all,
 #     while a first apply to a FRESH disc fetched it twice. A cover URL that
 #     differs from the one WMP has on file is the only lever the server has.
+#
+#     There are now TWO shapes for that URL, selected by _ART_MODE, because the
+#     proxy had never once produced an attached cover: 62 WMP cover fetches
+#     through it, 0 direct, 0 attachments. Both are pinned here so neither can
+#     regress unnoticed.
 _ARTU = ("https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/90/81/27/"
          "908127e4-acd6-8538-b8ab-0b8d1f1cd18c/859727388959_cover.jpg/600x600bb.jpg")
 _alb = dict(album, id="1570089404", source="itunes", art_url=_ARTU)
 
 
-def _cover(a, **kw):
-    x = fai.build_wmp_xml(dict(a), selected_tracks=a["tracks"], **kw)
+def _cover(a, mode="proxy", **kw):
+    _prev = fai._ART_MODE
+    fai._ART_MODE = mode
+    try:
+        x = fai.build_wmp_xml(dict(a), selected_tracks=a["tracks"], **kw)
+    finally:
+        fai._ART_MODE = _prev
     m = re.search(r"<largeCoverParams>([^<]+)</largeCoverParams>", x)
     return m.group(1) if m else ""
 
 
-_c1 = _cover(_alb, cd="B+96+1970")
-_c2 = _cover(_alb, cd="B+96+1970")
-_c3 = _cover(dict(_alb, id="1065975633"), cd="B+96+1970")
+# --- proxy shape -----------------------------------------------------------
+_c1 = _cover(_alb, "proxy", cd="B+96+1970")
+_c2 = _cover(_alb, "proxy", cd="B+96+1970")
+_c3 = _cover(dict(_alb, id="1065975633"), "proxy", cd="B+96+1970")
 check("cover-url-carries-a-version-token",
       "/cover/fai-" in _c1 and _c1.startswith(
           "http://127.0.0.1/cover/fai-") and "?url=https://is1" in _c1,
-      f"the cover URL must carry a token in the PATH and keep the upstream url "
-      f"readable, got {_c1[:130]!r}")
+      f"in proxy mode the cover URL must carry a token in the PATH and keep the "
+      f"upstream url readable, got {_c1[:130]!r}")
 check("cover-token-changes-on-every-apply",
       _c1 != _c2,
       "re-applying the SAME album must present a URL WMP has not seen, or WMP "
@@ -1977,9 +1996,28 @@ check("cover-token-is-well-formed-for-a-path-segment",
       all(re.fullmatch(r"[0-9a-f]{8}", t)
           for t in re.findall(r"/cover/fai-([^/]+)/", _c1 + _c2 + _c3)),
       f"the token is a path segment and must stay hex: {_c1[:120]!r}")
-check("album-without-art-still-has-no-cover",
-      _cover(dict(_alb, art_url=""), cd="B+96+1970") == "",
-      "no art upstream must mean no cover params, not a broken URL")
+
+# --- direct shape ----------------------------------------------------------
+# The default, and the first configuration in which WMP has ever been offered a
+# cover it did not have to go through this server to reach.
+check("art-mode-defaults-to-direct",
+      fai._ART_MODE == "direct",
+      "the proxy produced 62 fetched covers and 0 attachments; the direct URL is "
+      "what a real FAI server sends and keeps a loopback host out of the document")
+_d1 = _cover(_alb, "direct", cd="B+96+1970")
+_d2 = _cover(dict(_alb, art_url="https://example.com/x.jpg?a=1&b=2"),
+             "direct", cd="B+96+1970")
+check("direct-cover-is-the-upstream-url",
+      _d1 == _ARTU,
+      f"in direct mode the cover must be the upstream URL verbatim, got {_d1!r}")
+check("direct-cover-survives-an-ampersand-in-the-upstream-url",
+      _d2 == "https://example.com/x.jpg?a=1&amp;b=2",
+      f"direct mode still xesc-escapes, so an upstream '&' cannot make the "
+      f"document malformed, got {_d2!r}")
+check("both-art-modes-agree-when-there-is-no-art",
+      _cover(dict(_alb, art_url=""), "direct", cd="B+96+1970") == ""
+      and _cover(dict(_alb, art_url=""), "proxy", cd="B+96+1970") == "",
+      "no art upstream must mean no cover params in either mode, not a broken URL")
 _r = c.get("/cover/album.jpg?url=" + _ARTU + "&locale=409&geoid=be")
 check("proxy-ignores-wmp-parameters",
       _r.status_code == 200 and len(_r.data) > 1000,
@@ -2002,24 +2040,35 @@ check("proxy-serves-the-path-token-form",
 #      upstream URL contains its own '&'.
 import xml.etree.ElementTree as _ET2
 _bad = []
-for _label, _alb2, _url in (
-        ("plain", _alb, _ARTU),
-        ("ampersand-in-upstream",
-         _alb, "https://example.com/art.jpg?w=1&h=2&x=3"),
-        ("ampersand-in-title", dict(_alb, title="X & Y"), _ARTU),
-):
-    _x = fai.build_wmp_xml(dict(_alb2), selected_tracks=_alb2["tracks"],
-                           cd="B+96+1970")
-    try:
-        _ET2.fromstring(_x)
-    except Exception as _e:
-        _bad.append("%s: %s" % (_label, _e))
+# Both art modes: the bare-'&' bug lived in the proxy form, but the direct form
+# puts a raw upstream URL in the same field and must be escaped just as firmly.
+for _mode in ("proxy", "direct"):
+    for _label, _alb2, _url in (
+            ("plain", _alb, _ARTU),
+            ("ampersand-in-upstream",
+             _alb, "https://example.com/art.jpg?w=1&h=2&x=3"),
+            ("ampersand-in-title", dict(_alb, title="X & Y"), _ARTU),
+    ):
+        _prev_mode = fai._ART_MODE
+        fai._ART_MODE = _mode
+        try:
+            _x = fai.build_wmp_xml(dict(_alb2), selected_tracks=_alb2["tracks"],
+                                   cd="B+96+1970")
+        finally:
+            fai._ART_MODE = _prev_mode
+        try:
+            _ET2.fromstring(_x)
+        except Exception as _e:
+            _bad.append("%s/%s: %s" % (_mode, _label, _e))
 check("document-is-well-formed-with-artwork",
       not _bad,
-      f"every delivered document must be well-formed XML even with a cover: {_bad}")
+      f"every delivered document must be well-formed XML even with a cover, in "
+      f"either art mode: {_bad}")
 check("cover-value-has-no-bare-ampersand",
-      "&" not in re.sub(r"&(amp|lt|gt|quot|apos);", "", _c1),
-      f"the cover value must not contain a bare '&', got {_c1[:130]!r}")
+      "&" not in re.sub(r"&(amp|lt|gt|quot|apos);", "", _c1)
+      and "&" not in re.sub(r"&(amp|lt|gt|quot|apos);", "", _d1),
+      f"neither cover form may contain a bare '&': proxy={_c1[:110]!r} "
+      f"direct={_d1[:110]!r}")
 
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
