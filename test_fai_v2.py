@@ -753,6 +753,58 @@ check("wmid-claim-is-get-only",
       'claimable = (request.method == "GET" and wmid_raw' in _src,
       "only a GET may claim a pending document by wmid; a POST naming a wmid "
       "has its own request id and must be left alone")
+
+# 34e. A CD RIP must never inherit a library collection id. Borrowing LAST_WMID
+#      onto a disc document made WMP treat it as metadata for some unrelated
+#      library album: the tags landed but the cover did not, and WMP REOPENED
+#      the FAI dialog 3s after ReturnToMainTask - the "hang".
+#        12:00:49 [CLIENT] finish
+#        12:00:56 done_close / ReturnToMainTask-ok
+#        12:00:59 GET /FAI/default.aspx?...&cd=B+96+...&wmid=F62C9D85-...
+fai.LAST_WMID = "11112222-3333-4444-5555-666677778888"
+_cd = "B+96+1970+523A+8461"
+_cdpage = c.get("/confirm?source=itunes&id=1570089404&cd=" + _cd).data.decode("utf-8", "ignore")
+check("cd-dialog-is-not-stamped-with-a-collection",
+      'var WMP_WMID = "11112222-3333-4444-5555-666677778888"' not in _cdpage
+      and 'var WMP_WMID = ""' in _cdpage,
+      "a CD rip must not borrow the last seen library collection as its "
+      "write target, or WMP applies it to the wrong album and reopens the dialog")
+check("library-dialog-still-borrows-the-collection",
+      'var WMP_WMID = "11112222-3333-4444-5555-666677778888"' in
+      c.get("/confirm?source=itunes&id=1570089404&requestid=R1")
+      .data.decode("utf-8", "ignore"),
+      "a LIBRARY dialog opened without ?wmid= must still fall back to the last "
+      "seen collection, or it regresses to the stub-MDQ write that does nothing")
+check("cd-flow-logs-the-ignored-collection",
+      "CD flow: ignoring last seen collection" in _src,
+      "the ignored collection must be logged, or a CD that reopens the dialog "
+      "is undiagnosable next time")
+
+# 34e. A CD RIP must never inherit a library collection id. Borrowing LAST_WMID
+#      onto a disc document made WMP treat it as metadata for some unrelated
+#      library album: the tags landed but the cover did not, and WMP REOPENED
+#      the FAI dialog 3s after ReturnToMainTask - the "hang".
+#        12:00:49 [CLIENT] finish
+#        12:00:56 done_close / ReturnToMainTask-ok
+#        12:00:59 GET /FAI/default.aspx?...&cd=B+96+...&wmid=F62C9D85-...
+fai.LAST_WMID = "11112222-3333-4444-5555-666677778888"
+_cd = "B+96+1970+523A+8461"
+_cdpage = c.get("/confirm?source=itunes&id=1570089404&cd=" + _cd).data.decode("utf-8", "ignore")
+check("cd-dialog-is-not-stamped-with-a-collection",
+      'var WMP_WMID = "11112222-3333-4444-5555-666677778888"' not in _cdpage
+      and 'var WMP_WMID = ""' in _cdpage,
+      "a CD rip must not borrow the last seen library collection as its "
+      "write target, or WMP applies it to the wrong album and reopens the dialog")
+check("library-dialog-still-borrows-the-collection",
+      'var WMP_WMID = "11112222-3333-4444-5555-666677778888"' in
+      c.get("/confirm?source=itunes&id=1570089404&requestid=R1")
+      .data.decode("utf-8", "ignore"),
+      "a LIBRARY dialog opened without ?wmid= must still fall back to the last "
+      "seen collection, or it regresses to the stub-MDQ write that does nothing")
+check("cd-flow-logs-the-ignored-collection",
+      "CD flow: ignoring last seen collection" in _src,
+      "the ignored collection must be logged, or a CD that reopens the dialog "
+      "is undiagnosable next time")
 _rg2 = c.get("/cdinfo/GetMDRCD.aspx?requestID=ANOTHER-FRESH-GUID").data.decode("utf-8", "ignore")
 check("get-does-not-use-the-fallback",
       "Guard Album" not in _rg2,

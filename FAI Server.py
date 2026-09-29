@@ -2038,22 +2038,37 @@ def confirm():
     # wmp_wmid may be the LAST_WMID guess set below, and pre-binding a document
     # to a guess stops the genuine collection from ever claiming it.
     wmp_wmid_auth = wmp_wmid
+    # Read the disc id BEFORE deciding anything about collections. A CD rip
+    # never has - and never will have - a collection id, and stamping one onto
+    # a disc document is actively harmful: logged from a real rip of
+    # 'Sun Kil Moon - Tiny Cities', whose document inherited the previous
+    # library album's collection, the tags landed but the cover did not, and
+    # WMP then REOPENED the FAI dialog 3s after ReturnToMainTask:
+    #
+    #   12:00:49 [CLIENT] finish
+    #   12:00:56 done_close / ReturnToMainTask-ok
+    #   12:00:59 GET /FAI/default.aspx?...&cd=B+96+...&wmid=F62C9D85-...
+    wmp_cd = raw_query_arg("cd") or raw_query_arg("CD") or ""
+    if wmp_cd:
+        log_line("CDID", f"dialog opened for cd={wmp_cd!r}")
     if wmp_wmid:
         _remember_wmid(wmp_wmid)
         log_line("WMID", f"dialog opened for wmid={wmp_wmid!r}")
+    elif LAST_WMID and wmp_cd:
+        log_line("WMID", f"CD flow: ignoring last seen collection "
+                         f"{LAST_WMID!r} so the disc is not stamped with it")
     elif LAST_WMID:
-        # WMP opened the dialog WITHOUT ?wmid= - logged from real sessions
-        # arriving with only ?requestid=. That leaves the confirm page with no
-        # collection id, so it falls through to WriteNamesEx(2, STUB_MDQ, ...)
-        # as the write target, and a stub MDQ's content id belongs to no real
-        # track (see parse_mdq_content_ids). WMP accepts the call and applies
-        # nothing, with no other symptom.
+        # WMP opened a LIBRARY dialog without ?wmid= - logged from real
+        # sessions arriving with only ?requestid=. That leaves the confirm page
+        # with no collection id, so it falls through to WriteNamesEx(2, STUB_MDQ,
+        # ...) as the write target, and a stub MDQ's content id belongs to no
+        # real track (see parse_mdq_content_ids). WMP accepts the call and
+        # applies nothing, with no other symptom.
         #
         # LAST_WMID is the collection GUID WMP itself most recently asked us
-        # about, and it is already trusted for delivery - the staged document is
-        # bound to it in store_staged_xml. Using it as the write target as well
-        # is consistent, and a real collection id is strictly better than a
-        # stub that matches nothing.
+        # about. A real collection id is strictly better than a stub that
+        # matches nothing - but only for a LIBRARY album. A disc write must
+        # never borrow it.
         wmp_wmid = LAST_WMID
         log_line("WMID", f"dialog had no wmid; using last seen "
                          f"collection {wmp_wmid!r} as the write target")
