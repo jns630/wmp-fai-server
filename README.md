@@ -603,6 +603,39 @@ The album half is now OR'd over its individual words
 (`artist:"coldplay" AND (ghost OR story)`), which returns 24 releases. The artist
 half stays an exact phrase, because that is the reliable side of the match.
 
+### Scrolling and paging the result list
+
+The dialog's results pane is only about 450px tall, but a broad query fills it
+with up to 40 rows at roughly 58px each — some 2,300px of list. **There was no
+scrollbar and no way to reach anything past the fold.**
+
+The cause was subtle: `.album-item` is `float: left`, and a float does not
+contribute to its container's scroll height. `.right-pane` had
+`overflow-y: auto`, but its `scrollHeight` equalled its `clientHeight`, so the
+browser correctly concluded there was nothing to scroll and drew no bar. The
+rows were rendered, just unreachable.
+
+Two independent fixes, so neither depends on the other:
+
+- **Scrollbar.** The list is wrapped in `.results-scroll`, which sets
+  `overflow: hidden` purely to establish a formatting context, making the float
+  stack measurable. It deliberately sets no height or `max-height`, so it never
+  clips and never nests a second scrollbar — `.right-pane` does the scrolling.
+  The query box and the Artists/Albums/Tracks strip are `position: sticky` so
+  they stay visible while the list scrolls; IE7 ignores `sticky` and falls back
+  to the pane scrolling normally.
+- **Show more.** A pager strip under the list appends the next slice in place,
+  preserving scroll position and the rows already read. It reports
+  `Showing N of M loaded` and turns into `End of results` on the last page.
+
+`/api_search` accepts `?page=` (1-based) and `?per_page=`, and reports
+`page`, `per_page`, `available`, `start_index`, `end_index` and `has_more` in
+the `X-Search-Totals` header. Defaults reproduce previous behaviour exactly, so
+existing WMP and API callers are unaffected. Paging slices the *combined*
+iTunes + MusicBrainz album list, so pages are disjoint and ordered — verified:
+3 pages at `per_page=5` yield 15 unique rows with no overlap. Junk values
+(`page=0`, `page=abc`, `per_page=0`) clamp rather than error.
+
 ### Result counts
 
 The dialog's lead-in used to read a hardcoded **`Found 500+ Album(s)`** no matter

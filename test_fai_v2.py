@@ -1095,6 +1095,69 @@ check("recording-parser-guards-lists",
       'isinstance(rels[0], dict)' in _src and 'isinstance(media[0], dict)' in _src,
       "recording payloads nest lists; .get() must be guarded or Tracks returns 0")
 
+# 43. The results pane is only ~450px tall but the list can be ~2,300px, and
+#     the rows are FLOATS - a float does not contribute to its container's
+#     scroll height, so the pane reported scrollHeight == clientHeight and drew
+#     NO scrollbar. Everything past the fold was unreachable. Fixed with a
+#     clearfix scroll wrapper plus a 'Show more' pager.
+check("results-have-scroll-container",
+      'id="results_scroll"' in ui_html and 'class="results-scroll"' in ui_html,
+      "the results list needs its own scroll container to get a scrollbar")
+check("scroll-container-establishes-bfc",
+      ".results-scroll { overflow: hidden; }" in _src,
+      ".results-scroll must set overflow so the float stack is actually measured")
+check("scroll-wrapper-does-not-nest-a-scrollbar",
+      "max-height" not in _src.split(".results-scroll {")[1].split("}")[0],
+      "the clearfix must not constrain height, or it would clip or nest a scrollbar")
+check("pager-is-wired",
+      "function showMore" in ui_html and "function renderPager" in ui_html
+      and 'onclick="showMore();"' in ui_html,
+      "a 'Show more' pager must exist and be wired")
+check("paging-state-tracked",
+      "var CURRENT_PAGE = 1;" in ui_html and "'&page=' + CURRENT_PAGE" in ui_html,
+      "the client must track and send the current page")
+check("pager-resets-on-new-search",
+      ui_html.count("CURRENT_PAGE = 1;") >= 3,
+      "switching tab / Next / clear must all reset the page counter")
+check("server-slices-by-page",
+      'request.args.get("page"' in _src
+      and "_start = (page - 1) * per_page" in _src
+      and "_it_slice = itunes_results[_start:" in _src
+      and "_mb_slice = mb_results[_mb_from:" in _src,
+      "the server must slice the combined iTunes+MusicBrainz list by page")
+check("paging-reported-to-client",
+      'totals["has_more"]' in _src and 'totals["end_index"]' in _src
+      and "t.has_more === true" in ui_html,
+      "paging state must ride along in X-Search-Totals for the pager")
+# paging must not change page 1 from what it always returned
+_rp1 = c.get("/api_search?q=coldplay+ghost+story&page=1")
+check("page-1-unchanged",
+      _rp1.status_code == 200 and "album-item" in _rp1.data.decode("utf-8", "ignore"),
+      f"page=1 must still return results, got {_rp1.status_code}")
+# page 2 must return DIFFERENT rows, otherwise Show more does nothing
+_rp2 = c.get("/api_search?q=coldplay+ghost+story&page=2&per_page=5")
+check("page-2-returns-more",
+      _rp2.status_code == 200 and "album-item" in _rp2.data.decode("utf-8", "ignore"),
+      f"page=2 must return further rows, got {_rp2.status_code}")
+_r1 = c.get("/api_search?q=coldplay+ghost+story&page=1&per_page=5").data.decode("utf-8", "ignore")
+_r2 = _rp2.data.decode("utf-8", "ignore")
+_t1 = set(re.findall(r"pick\('(?:itunes|musicbrainz)',\s*'([^']+)'\)", _r1))
+_t2 = set(re.findall(r"pick\('(?:itunes|musicbrainz)',\s*'([^']+)'\)", _r2))
+check("pages-do-not-overlap",
+      bool(_t1) and bool(_t2) and not (_t1 & _t2),
+      f"page 1 and page 2 must be disjoint; overlap={_t1 & _t2}")
+# out-of-range / junk paging must not 500
+for _bad in ("page=0&per_page=1", "page=abc&per_page=1", "per_page=0"):
+    _rb = c.get("/api_search?q=coldplay+ghost+story&" + _bad)
+    check("paging-junk-safe-%s" % _bad.replace("&", "-").replace("=", ""),
+          _rb.status_code == 200,
+          f"{_bad} returned {_rb.status_code}")
+# the IE7 conditional must cover the new rules too
+check("ie7-covers-pager",
+      ".pager-btn { background-image: none !important;" in _src
+      and ".results-scroll, .pager-btn { border-radius: 0; }" in _src,
+      "the pager and scroll wrapper need IE7 filter fallbacks")
+
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:

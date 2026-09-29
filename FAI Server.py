@@ -1184,6 +1184,23 @@ def api_search():
     if view not in ("album", "artist", "track"):
         view = "album"
 
+    # Paging. The dialog pane is only ~450px tall, so a 40-row result list is
+    # several screens deep. The list now scrolls (see .results-scroll in
+    # COMMON_CSS) AND can be paged: ?page=2 returns the next slice rather than
+    # the first 25 again. Defaults reproduce the previous behaviour exactly.
+    try:
+        page = max(1, int(request.args.get("page", 1)))
+    except (TypeError, ValueError):
+        page = 1
+    try:
+        per_page = int(request.args.get("per_page", 0))
+    except (TypeError, ValueError):
+        per_page = 0
+    if per_page <= 0:
+        # Album view: 25 iTunes + 15 MusicBrainz. Artist/track views: 20.
+        per_page = 40 if view == "album" else 20
+    per_page = max(1, min(per_page, 100))
+
     artist_hint = ""
     album_hint = ""
     if " - " in q:
@@ -1201,15 +1218,23 @@ def api_search():
     totals = {"albums": None, "tracks": None, "artists": None,
               "albums_shown": 0, "tracks_shown": 0}
 
+    # Ask the providers for enough rows to fill the requested slice: page 1
+    # fetches 2x so 'Show more' has somewhere to go, later pages extend the
+    # window. Capped so a huge ?page= cannot ask for the whole catalogue.
+    _fetch_mult = min(page + 1, 4)
+    _itunes_limit = min(25 * _fetch_mult, 100)
+    _mb_limit = min(15 * _fetch_mult, 60)
+    _view_limit = min(20 * _fetch_mult, 80)
+
     # Parallel execution of iTunes, MusicBrainz and the exact-count lookups. Four
     # workers so the count round-trips never hold up the result rows. The
     # artist/track views are fetched lazily - only the tab that is open.
     with ThreadPoolExecutor(max_workers=4) as executor:
-        f_itunes = executor.submit(search_itunes, q, limit=25)
-        f_mb = executor.submit(search_musicbrainz, q, artist_hint=artist_hint, album_hint=album_hint, limit=15)
+        f_itunes = executor.submit(search_itunes, q, limit=_itunes_limit)
+        f_mb = executor.submit(search_musicbrainz, q, artist_hint=artist_hint, album_hint=album_hint, limit=_mb_limit)
         f_cnt = executor.submit(count_search_totals, q, artist_hint, album_hint)
         f_view = executor.submit(search_mb_entities, q, "artist" if view == "artist" else "recording",
-                                 artist_hint, album_hint, 20) if view != "album" else None
+                                 artist_hint, album_hint, _view_limit) if view != "album" else None
         try:
             itunes_results = f_itunes.result(timeout=6)
         except Exception as e:
@@ -1234,6 +1259,15 @@ def api_search():
     totals["albums_shown"] = len(itunes_results) + len(mb_results)
     totals["tracks_shown"] = sum(
         int(i.get("track_count") or 0) for i in itunes_results) or 0
+    # Paging state, consumed by the client to build the 'Show more' strip.
+    _available = totals["albums_shown"] if view == "album" else len(view_rows)
+    _start = (page - 1) * per_page
+    totals["page"] = page
+    totals["per_page"] = per_page
+    totals["available"] = _available
+    totals["has_more"] = _start + per_page < _available
+    totals["start_index"] = min(_start, _available)
+    totals["end_index"] = min(_start + per_page, _available)
     for key in ("albums", "tracks", "artists"):
         totals[key + "_exact"] = totals.get(key) is not None
         if totals.get(key) is None:
@@ -1276,7 +1310,7 @@ def api_search():
                 f'<div class="empty-msg">No matching {label.lower()} found. '
                 f'Try different search terms or check spelling.</div>')
         out = [f'<div class="section-label">{label}</div>']
-        for row in view_rows:
+        for row in view_rows[_start:_start + per_page]:
             if view == "artist":
                 nm = esc(row.get("name", "Unknown Artist"))
                 bits = [b for b in (row.get("type", ""), row.get("country", "")) if b]
@@ -1312,8 +1346,17 @@ def api_search():
             '<div class="section-label">Search Results</div>'
             '<div class="empty-msg">No matching albums found. Try different search terms or check spelling.</div>')
 
+    # The album list is iTunes first, then MusicBrainz. Paging has to slice the
+    # COMBINED list, so iTunes takes the front of the window and MusicBrainz
+    # takes whatever is left of it.
+    _win = per_page
+    _it_slice = itunes_results[_start:_start + _win]
+    _mb_from = max(0, _start - len(itunes_results))
+    _mb_take = max(0, _win - len(_it_slice))
+    _mb_slice = mb_results[_mb_from:_mb_from + _mb_take] if _mb_take else []
+
     # Render iTunes results (fast, high-res artwork)
-    for item in itunes_results:
+    for item in _it_slice:
         cid = item.get("id")
         title = esc(item.get("title"))
         artist = esc(item.get("artist"))
@@ -1343,7 +1386,7 @@ def api_search():
 </div>'''
 
     # Render MusicBrainz results (comprehensive, classical, multi-disc)
-    for item in mb_results:
+    for item in _mb_slice:
         mid = item.get("id")
         title = esc(item.get("title"))
         artist = esc(item.get("artist"))
@@ -1457,6 +1500,26 @@ body { font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 9pt; line-
 .filter-tab { cursor: pointer; padding: 1px 2px; }
 .filter-tab:hover { text-decoration: underline; }
 .filter-sep { margin: 0 5px; color: #9AA7B4; }
+/* ---- Results scrolling + paging ---------------------------------------
+   The result rows are floats (see .album-item), and a float does NOT
+   contribute to its container's scroll height. The right-hand pane therefore
+   computed scrollHeight == clientHeight and showed NO scrollbar at all, which
+   left ~40 rows unreachable in a ~450px dialog. 'overflow: hidden' here is a
+   pure clearfix: it establishes a formatting context so the float stack is
+   actually measured. It sets no height and no max-height, so it never clips
+   and never nests a second scrollbar - .right-pane does the scrolling. ---- */
+.results-scroll { overflow: hidden; }
+/* Keep the query box and the filter strip in view while the list scrolls.
+   IE7 has no 'sticky' and simply ignores this, falling back to the pane
+   scrolling normally. */
+.search-box-row, .filter-row { position: sticky; top: 0; z-index: 3; background-color: #FFFFFF; }
+.filter-row { top: 0; }
+/* Pager strip under the list: 'Show more' plus a running count. */
+.pager { clear: both; padding: 8px 6px 2px 6px; font-size: 8.5pt; color: #7F7F7F; }
+.pager-btn { display: inline-block; min-width: 64px; margin-right: 8px; padding: 3px 12px; font-size: 9pt; color: #1A1A1A; text-align: center; cursor: pointer; border: 1px solid #ADADAD; border-radius: 2px; background-color: #F0F0F0; background-image: linear-gradient(to bottom, #FCFCFC 0%, #F2F2F2 48%, #E6E6E6 52%, #F0F0F0 100%); }
+.pager-btn:hover { border-color: #7EB4EA; background-image: linear-gradient(to bottom, #FFFFFF 0%, #F3F8FD 48%, #E0EBF8 52%, #F3F8FD 100%); }
+.pager-btn[disabled] { color: #A6A6A6; cursor: default; border-color: #D6D6D6; background-image: linear-gradient(to bottom, #F6F6F6 0%, #EFEFEF 48%, #E6E6E6 52%, #F6F6F6 100%); }
+.pager-info { margin-left: 4px; }
 /* Track rows on /confirm share the result row look: flat, hairline on
    hover, tinted field when the track is staged for writing. */
 .track-row { padding: 3px 6px; margin-bottom: 1px; overflow: hidden; cursor: pointer; font-size: 9pt; color: #1A1A1A; border: 1px solid transparent; }
@@ -1493,8 +1556,11 @@ body { display: block; height: auto; overflow: auto; }
 .btn[disabled] { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F6F6F6', endColorstr='#E6E6E6', type='0'); }
 .album-item:hover, .track-row:hover { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#DCEAF9', type='0'); }
 .album-item.sel, .track-row.selected { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#E4EFFA', endColorstr='#E4EFFA', type='0'); }
-.btn, .search-input, .search-clear, .album-item, .track-row, .existing-info, .section-label, .filter-row { border-radius: 0; }
-.track-row, .album-item, .footer, .main-container, .existing-info { zoom: 1; }
+.pager-btn { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FCFCFC', endColorstr='#E6E6E6', type='0'); }
+.pager-btn:hover { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#DCEAF9', type='0'); }
+.pager-btn[disabled] { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F6F6F6', endColorstr='#E6E6E6', type='0'); }
+.btn, .search-input, .search-clear, .album-item, .track-row, .existing-info, .section-label, .filter-row, .results-scroll, .pager-btn { border-radius: 0; }
+.track-row, .album-item, .footer, .main-container, .existing-info, .results-scroll { zoom: 1; }
 <![endif]-->
 """
 
@@ -1556,7 +1622,9 @@ def unified_ui():
         <span class="link filter-tab" id="tabArtists" onclick="switchView('artist');">Artists</span><span class="filter-sep">|</span><span class="link filter-active filter-tab" id="tabAlbums" onclick="switchView('album');">Albums</span><span class="filter-sep">|</span><span class="link filter-tab" id="tabTracks" onclick="switchView('track');">Tracks</span>
       </div>
       <div id="results_area">
-        <div class="empty-msg">Searching metadata databases...</div>
+        <div class="results-scroll" id="results_scroll">
+          <div class="empty-msg">Searching metadata databases...</div>
+        </div>
       </div>
     </div>
   </div>
@@ -1600,17 +1668,48 @@ def unified_ui():
       setActiveTab(view);
       doSearch();
     }
+    // Paging state. The results pane is ~450px tall, so the list is both
+    // scrollable and pageable; 'Show more' appends the next slice.
+    var CURRENT_PAGE = 1;
     function doSearch() {
       var query = document.getElementById('sq').value.trim();
       if (!query) return;
       var resultsDiv = document.getElementById('results_area');
-      resultsDiv.innerHTML = '<div class="empty-msg">Searching Apple Music &amp; MusicBrainz...</div>';
+      var scrollBox = document.getElementById('results_scroll');
+      var target = scrollBox || resultsDiv;
+      target.innerHTML = '<div class="empty-msg">Searching Apple Music &amp; MusicBrainz...</div>';
       var xhr = new XMLHttpRequest();
-      xhr.open('GET', '/api_search?q=' + encodeURIComponent(query) + '&view=' + CURRENT_VIEW, true);
+      xhr.open('GET', '/api_search?q=' + encodeURIComponent(query) + '&view=' + CURRENT_VIEW + '&page=' + CURRENT_PAGE, true);
       xhr.onreadystatechange = function() {
         if (xhr.readyState == 4) {
-          resultsDiv.innerHTML = xhr.responseText;
+          target.innerHTML = xhr.responseText;
           applyTotals(xhr.getResponseHeader('X-Search-Totals'), query);
+          target.scrollTop = 0;
+        }
+      };
+      xhr.send();
+    }
+    // Append the next slice instead of replacing the list, so the reader keeps
+    // their scroll position and the rows they have already read.
+    function showMore() {
+      var query = document.getElementById('sq').value.trim();
+      if (!query) return;
+      var target = document.getElementById('results_scroll') || document.getElementById('results_area');
+      CURRENT_PAGE = CURRENT_PAGE + 1;
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', '/api_search?q=' + encodeURIComponent(query) + '&view=' + CURRENT_VIEW + '&page=' + CURRENT_PAGE, true);
+      xhr.onreadystatechange = function() {
+        if (xhr.readyState == 4) {
+          // Drop the section heading the server re-sends, and the stale pager.
+          var html = xhr.responseText.replace(/<div class="section-label">[^<]*<[/]div>/, '');
+          var divs = target.getElementsByTagName('div');
+          for (var i = divs.length - 1; i >= 0; i--) {
+            if (divs[i].className === 'pager') { divs[i].parentNode.removeChild(divs[i]); }
+          }
+          var keep = target.scrollHeight;
+          target.innerHTML = target.innerHTML + html;
+          applyTotals(xhr.getResponseHeader('X-Search-Totals'), query);
+          target.scrollTop = keep - target.clientHeight;
         }
       };
       xhr.send();
@@ -1667,12 +1766,36 @@ def unified_ui():
       if (aEl) { aEl.innerHTML = 'Artists' + (artists === null ? '' : ' (' + groupDigits(artists) + ')'); }
       if (tEl) { tEl.innerHTML = 'Tracks' + (tracks === null ? '' : ' (' + groupDigits(tracks) + ')'); }
       if (rEl) { rEl.innerHTML = 'Albums' + (albums === null ? '' : ' (' + groupDigits(albums) + ')'); }
+      renderPager(t);
+    }
+    // 'Show more' strip under the list. The pane is ~450px tall, so without
+    // this the rows past the fold were simply unreachable - the result rows
+    // are floats, so the pane reported no overflow and drew no scrollbar.
+    function renderPager(t) {
+      var box = document.getElementById('results_scroll') || document.getElementById('results_area');
+      if (!box || !t) { return; }
+      var old = box.getElementsByTagName('div');
+      for (var j = old.length - 1; j >= 0; j--) {
+        if (old[j].className === 'pager') { old[j].parentNode.removeChild(old[j]); }
+      }
+      var end = toNum(t.end_index) || 0;
+      if (end <= 0) { return; }
+      var more = (t.has_more === true)
+        ? '<span class="pager-btn" onclick="showMore();">Show more</span>'
+        : '<span class="pager-btn" style="color:#A6A6A6;">End of results</span>';
+      var p = document.createElement('div');
+      p.className = 'pager';
+      p.innerHTML = more + '<span class="pager-info">Showing '
+                     + (end) + ' of ' + (toNum(t.available) || 0) + ' loaded</span>';
+      box.appendChild(p);
     }
     // The in-field 'X' in the authentic dialog wipes the query and the list.
     function clearSearch() {
       var el = document.getElementById('sq');
       el.value = '';
-      document.getElementById('results_area').innerHTML = '<div class="empty-msg">Enter a search and press Enter.</div>';
+      CURRENT_PAGE = 1;
+      var box = document.getElementById('results_scroll') || document.getElementById('results_area');
+      box.innerHTML = '<div class="empty-msg">Enter a search and press Enter.</div>';
       el.focus();
     }
     // 'Next' is the default command: move focus into the search field and run
@@ -1680,6 +1803,7 @@ def unified_ui():
     function nextToSearch() {
       var el = document.getElementById('sq');
       el.focus();
+      CURRENT_PAGE = 1;
       if (el.value.replace(/^\\s+|\\s+$/g, '')) {
         doSearch();
       }
