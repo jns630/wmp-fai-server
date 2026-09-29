@@ -2783,6 +2783,37 @@ check("close-is-never-called",
       "IWMPCDDVDWizardExternal has no Close/Finish. ReturnToMainTask (disp "
       "10002) is the only way to dismiss the wizard.")
 
+# 59. EditMetadata MUST NOT BE USED AS A WRITE PATH. It was implemented in
+#     db0480f, deployed, and reverted in 55088c1 after a real run proved it does
+#     nothing. From the log of a Filmmaker library update:
+#         "edit_handoff": "EditMetadata-ok"   <- did not throw
+#         "metadata_editable": true          <- WMP said yes
+#     and no editor ever opened: an open editor must fetch metadata, and there
+#     was no cdinfo/GetMDRCD request after the handoff. Worse, the page then sat
+#     on "Waiting for WMP..." with no way out.
+#
+#     The interface advertises the method; the dialog host does not act on it.
+#     This test exists so nobody re-adds it on the strength of it being a real
+#     member of the type library.
+_am_final = _src_code.split("function applyMetadata(")[1].split("\n    function ")[0]
+check("edit-metadata-is-not-a-write-path",
+      "EditMetadata()" not in _am_final,
+      "EditMetadata (disp 10011) must not be called from applyMetadata(). It was "
+      "tried in db0480f and reverted in 55088c1: the call does not throw and "
+      "IsMetadataAvailableForEdit() returns true, but no editor ever opens and "
+      "the user is left stranded. A COM call returning cleanly is not evidence "
+      "it did anything.")
+check("edit-metadata-is-only-an-explicit-user-action",
+      "external.EditMetadata()" in _src_code,
+      "EditMetadata may still be offered where the user explicitly asked to edit "
+      "(the existing 'Edit' link), which is WMP's own behaviour and a no-op if "
+      "unsupported. It just may not be wired into the write path.")
+check("finish-always-leaves-the-dialog",
+      _re.search(r"beaconSync\(diag\);\s*leaveDialog\(\);", _src) is not None,
+      "after reporting, the finish path must navigate to /done in the same tick. "
+      "db0480f made this conditional on a handoff that never fires, which left "
+      "the dialog stuck on 'Waiting for WMP...' with no exit.")
+
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:

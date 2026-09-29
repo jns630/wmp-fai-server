@@ -559,9 +559,42 @@ a track's `WMContentID`) into a slot the interface defines as a *disc* content
 ID. The call is type-correct and WMP accepts it — the logs show
 `WriteNamesEx-wmid-ok` and `WriteNamesEx-lib-cid-ok` — but **WMP accepting a
 call is not WMP applying it**, and the two cannot be told apart from in-page
-code. Treat library writes as best-effort. If tags still fail to land after this,
-the next step is `EditMetadata()` (disp 10011), which hands off to WMP's own
-metadata editor, not another `WriteNamesEx` variant.
+code. Treat library writes as best-effort.
+
+#### `EditMetadata` was tried and does not work — do not retry it
+
+The obvious-looking next step was `EditMetadata` (disp 10011), which opens
+WMP's own metadata editor, gated on `IsMetadataAvailableForEdit` (disp 10010).
+It was implemented, deployed, and **removed again**. A real run
+(2026-09-29 22:49, Filmmaker *An Invitation To An Accident*, library flow):
+
+```json
+"write": "WriteNamesEx-lib-cid-ok",
+"edit_handoff": "EditMetadata-ok",
+"metadata_editable": true
+```
+
+Both calls reported success and **no editor ever opened**. The proof is that an
+open editor must fetch metadata, and there was no `cdinfo/GetMDRCD` request
+after the handoff — the only one came 91 seconds later, for a different disc,
+with a different user agent.
+
+So `IsMetadataAvailableForEdit()` returning `true` and `EditMetadata()` not
+throwing **carry no information**. The interface advertises the method; the
+dialog host does not act on it. Worse, the page then sat on *Waiting for WMP…*
+with no way out.
+
+Two lessons, both now enforced by tests:
+
+- **A COM call returning without throwing is not evidence it did anything.**
+  This is the same false signal as the library write above, and the reason
+  `WriteNamesEx-*-ok` must never be read as "the tags landed".
+- **An unproven host behaviour must not gate the user's exit.** Never trade a
+  working exit for one that might be better.
+
+If library tags are genuinely landing, leave the write paths as they are. If
+they are not, the fix has to come from WMP's own *Update album info* flow, not
+from this COM interface.
 
 ### Keeping the dialog responsive
 
@@ -782,7 +815,7 @@ python test_fai_v2.py
 Expected result:
 
 ```
-==== 424 passed, 0 failed ====
+==== 423 passed, 0 failed ====
 ```
 
 The suite covers, among other things:
