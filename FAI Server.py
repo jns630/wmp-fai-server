@@ -243,10 +243,30 @@ EMPTY_METADATA_XML = (
 )
 
 LAST_XML = None   # last staged document (diagnostics only - never served blindly)
-XML_LOCK = threading.Lock()
+# Reentrant: store_staged_xml() holds this while calling _stage_request_xml(),
+# which takes it again to record the pending document. A plain Lock would
+# deadlock there and no XML would ever be staged.
+XML_LOCK = threading.RLock()
 # Staged XML keyed by WMP's requestid / CD TOC so the background delivery
 # endpoint can echo the exact XML belonging to the current dialog session.
 STAGED_REQUESTS = {}
+# When each key above was staged, so any fallback can be time-bounded.
+STAGED_AT = {}
+# The most recently staged document. WMP's LIBRARY write is a separate request
+# carrying a FRESHLY GENERATED request id, so it matches nothing in
+# STAGED_REQUESTS; this is what answers it. Used only for that specific call
+# shape - see _lookup_staged_xml().
+PENDING_WRITE = {'xml': '', 'at': 0.0}
+# Fresh library-write ids we have answered, mapped to the document they were
+# answered with. Kept separate from STAGED_REQUESTS because such a pairing is
+# only valid for the document that was pending at the time: pinning one in
+# STAGED_REQUESTS made a LATER, different album resolve as an exact match and
+# serve the PREVIOUS album's tags. Cleared whenever a new document is staged.
+FRESH_WRITES = {}
+# How long a staged document may still answer a library write. Generous enough
+# to cover WMP finishing the dialog and committing the write, short enough that
+# a disc swapped much later cannot pick up the previous album.
+_LIBRARY_WRITE_WINDOW = 180.0
 LAST_TOC = ""   # most recent CD TOC seen (survives POST-only TOC submissions)
 # WMP identifies a library collection by its WMID. WMP sends it as ?wmid=...
 # (e.g. /cdinfo/GetMDRCD.aspx?...&wmid=5FA05D35-...) when it fetches metadata
@@ -274,20 +294,44 @@ def _stage_request_xml(xml, request_id="", toc="", wmid="", cd=""):
     """
     keys = [str(request_id).strip(), str(toc).strip(),
             str(wmid).strip(), str(cd).strip()]
+    now = time.time()
     for k in keys:
         if k:
             STAGED_REQUESTS[k] = xml
+            STAGED_AT[k] = now
+    # Remember the document staged most recently, and when. WMP writes tags to
+    # the library in a SEPARATE request carrying a freshly generated request id,
+    # so this is the only thing that can answer it - see _lookup_staged_xml().
+    # Callers may already hold XML_LOCK, which is why it is an RLock.
+    PENDING_WRITE['xml'] = xml
+    PENDING_WRITE['at'] = now
+    # A fresh library-write id we remembered was paired with the PREVIOUS
+    # document, so it must not survive this staging.
+    FRESH_WRITES.clear()
     if len(STAGED_REQUESTS) > 32:
         for old_key in list(STAGED_REQUESTS.keys())[: len(STAGED_REQUESTS) - 32]:
             STAGED_REQUESTS.pop(old_key, None)
+            STAGED_AT.pop(old_key, None)
 
 def _lookup_staged_xml():
     """Find staged XML matching the current requestid/TOC/wmid/cd.
 
-    NEVER falls back to the last staged document: that made every CD report the
-    same album. An unmatched disc now gets an empty metadata document, so discs
-    are left untouched rather than all being written with whatever album was
-    applied most recently.
+    Two ways WMP asks, and they must both be answered:
+
+    1. The BACKGROUND fetch, which echoes the dialog's own request id
+       (?requestid=4E6825F4-...). Matches STAGED_REQUESTS directly.
+    2. The LIBRARY write. WMP POSTs /cdinfo/GetMDRCD.aspx with a FRESHLY
+       GENERATED request id that we have never seen - logged from a real
+       session as staging under 23FDCD4D-... and then writing with
+       E7A89714-.... It matched nothing, so the library was served
+       <status>NOTFOUND</status> and the tracks kept their old tags.
+
+    For (2) we fall back to the most recently staged document, but ONLY when
+    the call has no disc identifier of its own. A request that names a ?cd=,
+    ?toc= or ?wmid= is asking about a specific disc or collection, so an
+    unmatched one still gets empty metadata and is left alone. That guard is
+    what stops this reintroducing the bug where every disc was written with
+    whichever album was applied last.
     """
     candidates = []
     for name in ('requestid', 'requestID'):
@@ -295,32 +339,67 @@ def _lookup_staged_xml():
         if val:
             candidates.append(val)
     # wmid is how WMP identifies the library collection it wants updated.
-    wmid = _remember_wmid(raw_query_arg('wmid'))
+    # Keep the RAW value too: _remember_wmid() only accepts GUID-shaped values,
+    # so gating the fallback on the validated one would let a wmid-bearing
+    # request slip through as 'no wmid' whenever the value is not a GUID.
+    wmid_raw = raw_query_arg('wmid').strip()
+    wmid = _remember_wmid(wmid_raw)
     if wmid:
         candidates.append(wmid)
     # TOC/MDQ must be read raw: Werkzeug turns a literal '+' into a space and
     # WMP CD TOCs always start with '+'.
+    disc_ids = []
     for name in ('toc', 'TOC', 'mdq'):
         val = raw_query_arg(name).strip()
         if val:
             candidates.append(val)
+            disc_ids.append(val)
     # WMP's real CD flow fetches by ?cd=<hex>+<hex>... - the same disc id the
     # dialog was opened with, so staged XML resolves to it too.
     for name in ('cd', 'CD'):
         val = raw_query_arg(name).strip()
         if val:
             candidates.append(val)
-    if request.method == "POST" and not candidates:
+            disc_ids.append(val)
+    # ALWAYS scan the POST body, not just when the query had nothing. The query
+    # carries WMP's fresh request id, but the body may repeat the original
+    # mdqRequestID we did stage under, which is an exact match.
+    if request.method == "POST":
         post_body = request.data.decode("utf-8", errors="ignore")
-        for name in ('requestid', 'toc', 'mdq', 'cd'):
-            match = re.search(name + r'=([^&]+)', post_body, re.IGNORECASE)
+        for name in ('requestid', 'requestID', 'toc', 'mdq', 'cd', 'wmid'):
+            match = re.search(name + r'=([^&"\s]+)', post_body, re.IGNORECASE)
             if match:
                 candidates.append(requests.utils.unquote(match.group(1)))
+        log_line("MDR-BODY", f"body={post_body[:200]!r} ids={candidates[:4]}")
+
     with XML_LOCK:
         for cand in candidates:
             xml = STAGED_REQUESTS.get(cand)
             if xml:
                 return xml
+        # A fresh library-write id we already answered, for the same document.
+        for cand in candidates:
+            xml = FRESH_WRITES.get(cand)
+            if xml:
+                return xml
+
+        # No exact match. A library write names no disc of its own, so answer
+        # it with the document staged a moment ago, and remember the pairing so
+        # a repeat of the same fresh id is an exact lookup.
+        if (request.method == "POST" and not disc_ids and not wmid_raw
+                and 'getmdrcd' in request.path.lower()):
+            pending = PENDING_WRITE.get('xml') or ''
+            age = time.time() - (PENDING_WRITE.get('at') or 0.0)
+            if pending and age <= _LIBRARY_WRITE_WINDOW:
+                log_line("MDR-FALLBACK", f"serving staged doc for fresh "
+                                          f"library write (age={age:.1f}s)")
+                for cand in candidates[:1]:
+                    FRESH_WRITES[cand] = pending
+                return pending
+            if pending and age > _LIBRARY_WRITE_WINDOW:
+                log_line("MDR-STALE", f"staged doc is {age:.0f}s old, "
+                                      f"not serving it for a library write")
+
     if candidates:
         log_line("MDR-EMPTY", f"no metadata staged for {candidates[0][:40]!r} "
                               f"- returning empty (discs left untouched)")

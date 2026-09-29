@@ -653,7 +653,7 @@ check("no-last-xml-fallback",
       "return LAST_XML" not in _src and "Response(LAST_XML" not in _src,
       "LAST_XML must never be served as a fallback")
 check("lookup-returns-none-when-unmatched",
-      "    return None" in _src.split("def _lookup_staged_xml(")[1][:2500],
+      "    return None" in _src.split("def _lookup_staged_xml(")[1].split("\ndef ")[0],
       "_lookup_staged_xml must return None rather than the last document")
 check("empty-metadata-defined",
       "EMPTY_METADATA_XML" in _src and "<status>NOTFOUND</status>" in _src,
@@ -678,6 +678,97 @@ check("matched-disc-still-gets-album",
       "Isolation Album" in c.get("/cdinfo/GetMDRCD.aspx?CD=AA+BB+CC")
       .data.decode("utf-8", "ignore"),
       "the disc that WAS selected must still receive its album")
+
+# 34b. The LIBRARY write never worked. From a real WMP session: the document is
+#      staged under the dialog's request id, and WMP then POSTs
+#      /cdinfo/GetMDRCD.aspx with a FRESHLY GENERATED id it never told us
+#      about - staging under 23FDCD4D-... then writing with E7A89714-....
+#      Nothing matched, so the library was served <status>NOTFOUND</status> and
+#      the tracks kept their old tags. The background art fetch used the
+#      original id and worked, which is why artwork applied but tags did not.
+c.post("/store_staged_xml", data=json.dumps(
+    {"album": dict(album, title="Library Write Album"),
+     "selected_tracks": [album["tracks"][0]],
+     "request_id": "REQ_LIBWRITE", "session_id": "S",
+     "toc": "", "wmid": ""}),
+    content_type="application/json")
+_r = c.post("/cdinfo/GetMDRCD.aspx?locale=409&userlocale=2000"
+            "&requestID=FRESH-GUID-NEVER-SEEN")
+_lw = _r.data.decode("utf-8", "ignore")
+check("library-write-gets-the-staged-album",
+      "Library Write Album" in _lw and "<status>NOTFOUND</status>" not in _lw,
+      f"a library write with a fresh request id must still receive the album, "
+      f"got {_lw[:200]!r}")
+_r2 = c.post("/cdinfo/GetMDRCD.aspx?locale=409&userlocale=2000"
+             "&requestID=FRESH-GUID-NEVER-SEEN")
+check("library-write-repeat-is-exact",
+      "Library Write Album" in _r2.data.decode("utf-8", "ignore"),
+      "repeating the same fresh id must keep returning the same album")
+# ...but that remembered pairing must NOT outlive the document it was made for.
+# Staging a DIFFERENT album afterwards and then reusing the same fresh id
+# returned the PREVIOUS album, because the pairing had been pinned in
+# STAGED_REQUESTS and so resolved as an exact match before the fallback.
+c.post("/store_staged_xml", data=json.dumps(
+    {"album": dict(album, title="Second Album"),
+     "selected_tracks": [album["tracks"][0]],
+     "request_id": "REQ_SECOND", "session_id": "S",
+     "toc": "", "wmid": ""}),
+    content_type="application/json")
+_r3 = c.post("/cdinfo/GetMDRCD.aspx?requestID=FRESH-GUID-NEVER-SEEN")
+_s2 = _r3.data.decode("utf-8", "ignore")
+check("fresh-id-does-not-serve-a-stale-album",
+      "Second Album" in _s2 and "Library Write Album" not in _s2,
+      f"after staging a new album, the same fresh id must serve the new one, "
+      f"not the previous: {_s2[:200]!r}")
+check("fresh-write-pairings-are-cleared",
+      "FRESH_WRITES.clear()" in _src
+      and "STAGED_REQUESTS[cand] = pending" not in _src,
+      "a fresh library-write pairing must be dropped when a new document is "
+      "staged, and must not be pinned in STAGED_REQUESTS")
+# the guard: a request that DOES name a disc must still get nothing, or this
+# would reintroduce 'every disc gets the last album applied'
+c.post("/store_staged_xml", data=json.dumps(
+    {"album": dict(album, title="Guard Album"),
+     "selected_tracks": [album["tracks"][0]],
+     "request_id": "REQ_GUARD", "session_id": "S",
+     "toc": "", "cd": "GG+HH+II"}),
+    content_type="application/json")
+_rg = c.post("/cdinfo/GetMDRCD.aspx?locale=409&CD=ZZ+YY+XX").data.decode("utf-8", "ignore")
+check("named-disc-post-still-gets-nothing",
+      "Guard Album" not in _rg,
+      f"a POST naming an unknown ?cd= must still be left alone: {_rg[:200]!r}")
+_rw = c.post("/cdinfo/GetMDRCD.aspx?wmid=5FA05D35-1111-2222-3333-444455556666").data.decode("utf-8", "ignore")
+check("named-wmid-post-still-gets-nothing",
+      "Guard Album" not in _rw,
+      f"a POST naming an unknown ?wmid= must still be left alone: {_rw[:200]!r}")
+# _remember_wmid() only accepts GUID-shaped values, so a wmid-bearing request
+# must still count as naming a collection when the value is not a GUID.
+_rwn = c.post("/cdinfo/GetMDRCD.aspx?wmid=NOT-A-GUID").data.decode("utf-8", "ignore")
+check("non-guid-wmid-post-still-gets-nothing",
+      "Guard Album" not in _rwn,
+      f"a ?wmid= that is not GUID-shaped must not enable the fallback: {_rwn[:200]!r}")
+_rg2 = c.get("/cdinfo/GetMDRCD.aspx?requestID=ANOTHER-FRESH-GUID").data.decode("utf-8", "ignore")
+check("get-does-not-use-the-fallback",
+      "Guard Album" not in _rg2,
+      "a plain GET must not be answered from the pending document")
+check("library-write-is-time-bounded",
+      "_LIBRARY_WRITE_WINDOW" in _src and "age <= _LIBRARY_WRITE_WINDOW" in _src,
+      "the pending document must expire, or a disc swapped later picks up the "
+      "previous album")
+check("post-body-always-scanned",
+      "and not candidates" not in _src.split("def _lookup_staged_xml(")[1][:3000],
+      "the POST body must be scanned for ids unconditionally; the query's fresh "
+      "id does not mean the body has nothing useful")
+# store_staged_xml() holds XML_LOCK while calling _stage_request_xml(), which
+# takes it again to record the pending document. With a plain Lock that is a
+# self-deadlock: no XML is ever staged and every write silently does nothing.
+check("xml-lock-is-reentrant",
+      "XML_LOCK = threading.RLock()" in _src and "XML_LOCK = threading.Lock()" not in _src,
+      "XML_LOCK must be reentrant or staging deadlocks against itself")
+check("staging-records-the-pending-document",
+      "PENDING_WRITE['xml'] = xml" in _src and "PENDING_WRITE['at'] = now" in _src,
+      "_stage_request_xml must record the pending document and its timestamp, "
+      "or the library-write fallback has nothing to serve")
 
 # 35. Aero restyle must be CSS-only: no CSS3 without an IE7 fallback, and
 #     none of the working dialog logic may be disturbed.

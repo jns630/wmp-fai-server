@@ -184,11 +184,54 @@ When the dialog finishes, the client POSTs the generated XML to `/store_staged_x
 The server stores it **keyed by the identifier** (requestid / CD / WMID / TOC) and
 WMP's background fetches are answered from that per-identifier store.
 
-Critically, there is **no fallback to the most recently staged document**. An
+Critically, there is **no blanket fallback to the most recently staged document**. An
 identifier with nothing staged for it receives `EMPTY_METADATA_XML`, a valid
 document carrying `<status>NOTFOUND</status>` and no album and no tracks — so an
 unrelated disc is left exactly as it was instead of inheriting someone else's
 album.
+
+#### The library write is a *second* request, with a *new* id
+
+This is the one place a blanket fallback would actually be needed, and getting it
+wrong is why artwork applied while **tags never did**. WMP makes two separate
+asks after the dialog closes:
+
+| | Request | Identifier |
+|---|---|---|
+| Background art | `GET /redir/getmdrcdbackground/` | the dialog's own `requestid` |
+| **Library write** | `POST /cdinfo/GetMDRCD.aspx` | a **freshly generated** `requestID` |
+
+The second one uses an id WMP has never told us about. From a real session:
+
+```
+[STAGED]  ... req_id='23FDCD4D-A314-4BCC-91CC-BF5B1138A2DB'  xml_bytes=1545
+[MDR]     /redir/getmdrcdbackground/  requestid=23FDCD4D-...  staged=yes   <- worked
+[MDR]     /cdinfo/GetMDRCD.aspx     requestID=E7A89714-...  staged=no    <- tags lost
+```
+
+So the library write is answered from the most recently staged document — but
+**only** when the request names no disc of its own. A request carrying a
+`?cd=`, `?toc=` or `?wmid=` is asking about a specific disc or collection, so
+an unmatched one still gets empty metadata. That guard is what keeps this from
+reintroducing the "every disc gets the last album applied" bug.
+
+Two further details, both of which caused real failures:
+
+- The pending document **expires** after `_LIBRARY_WRITE_WINDOW` (180s), so a
+  disc swapped in much later cannot inherit the previous album.
+- A fresh write id is remembered in a separate `FRESH_WRITES` map that is
+  **cleared whenever a new document is staged**. Pinning it in `STAGED_REQUESTS`
+  made a later, different album resolve as an exact match and serve the
+  *previous* album's tags.
+
+The POST body is also scanned for identifiers unconditionally, not only when the
+query string had none — the query carries WMP's fresh id, but the body may
+repeat the original `mdqRequestID` that we did stage under, which is an exact
+match.
+
+`XML_LOCK` is an `RLock` because `store_staged_xml()` holds it while calling
+`_stage_request_xml()`, which takes it again. A plain `Lock` self-deadlocks
+there, and no XML is ever staged — every write then silently does nothing.
 
 ### Write paths
 
