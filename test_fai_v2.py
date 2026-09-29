@@ -2731,6 +2731,58 @@ for _fn in ("toggleRow", "syncRow", "selectAll", "selectNone", "finishSync",
           f"the confirm page's inline onclick handlers call {_fn}(), so it must "
           f"exist; if it is undefined the dialog is dead on arrival")
 
+# 57. EVERY window.external.<name> MUST BE A REAL MEMBER OF
+#     IWMPCDDVDWizardExternal. The project called window.external.Close(), which
+#     does not exist. It was reached on every close where ReturnToMainTask()
+#     did not succeed, and it could only ever throw a COM error - it was dead
+#     code written as if the method were real.
+#
+#     The interface was read from the type library of
+#     {2D7EF888-1D3C-484A-A906-9F49D99BB344} (C:\WINDOWS\System32\wmp.dll). It
+#     derives from IWMPExternalColors -> IWMPExternal and adds exactly seven
+#     methods of its own. There is no Close and no Finish.
+#
+#     WMP agrees at runtime: the dialog host's own probe reports
+#     "Close": "undefined" and "Finish": "undefined" in every log line, while
+#     each real member reports "unknown" (a COM member whose typeof is not a
+#     JS type - the reason this project never truthiness-tests them).
+#
+#     This is the same lesson as test 56, one level up: node --check proves the
+#     JavaScript parses, not that the COM members it calls exist. A typo or an
+#     invented method is invisible to every other check in this file.
+_REAL_EXTERNAL_MEMBERS = frozenset({
+    # own methods
+    "WriteNames", "ReturnToMainTask", "WriteNamesEx", "GetMDQByRequestID",
+    "EditMetadata", "IsMetadataAvailableForEdit", "BuyCD",
+    # IWMPExternal / IWMPExternalColors
+    "version", "appColorLight", "appColorMedium", "appColorDark",
+    "appColorButtonHighlight", "appColorButtonShadow",
+    "appColorButtonHoverFace", "OnColorChange",
+})
+_src_all = open(BASE, encoding="utf-8").read()
+# Scan with comments removed, or prose about a member counts as a call to it.
+# The JavaScript in this file uses // comments, so _norm() (which strips Python
+# # comments) is not enough - strip // and /* */ as well.
+_src_code = re.sub(r"/\*.*?\*/", "", _src_all, flags=re.S)
+_src_code = re.sub(r"//[^\n]*", "", _src_code)
+_called = sorted(set(re.findall(r"window\.external\.([A-Za-z_]\w*)", _src_code)))
+for _m in _called:
+    check("external-member-exists-%s" % _m,
+          _m in _REAL_EXTERNAL_MEMBERS,
+          f"window.external.{_m}() is not a member of IWMPCDDVDWizardExternal "
+          f"{{2D7EF888-1D3C-484A-A906-9F49D99BB344}}. The complete interface is "
+          f"{sorted(_REAL_EXTERNAL_MEMBERS)} - a call to anything else throws a "
+          f"COM error and silently does nothing.")
+check("external-probe-has-no-invented-members",
+      not re.search(r"'Close'|'Finish'", _src_code.split("function listExternalMethods")[1].split("}")[0] if "function listExternalMethods" in _src_code else ""),
+      "listExternalMethods() must probe only real members. Probing 'Close' and "
+      "'Finish' manufactured two permanent 'undefined' entries in every log "
+      "line that looked like a host fault but were just nonexistent members.")
+check("close-is-never-called",
+      "external.Close(" not in _src_code and "external.Finish(" not in _src_code,
+      "IWMPCDDVDWizardExternal has no Close/Finish. ReturnToMainTask (disp "
+      "10002) is the only way to dismiss the wizard.")
+
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:

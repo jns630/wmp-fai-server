@@ -3409,9 +3409,22 @@ def confirm():
     function listExternalMethods() {
       // Probe the COM members of IWMPCDDVDWizardExternal individually -
       // COM dispatch members are not enumerable with for..in.
-      var names = ['WriteNames', 'WriteNamesEx', 'ReturnToMainTask',
+      //
+      // This list is the COMPLETE set of members on the interface, read from the
+      // type library of {2D7EF888-1D3C-484A-A906-9F49D99BB344} in
+      // C:\WINDOWS\System32\wmp.dll. The interface derives from
+      // IWMPExternalColors -> IWMPExternal; it adds seven methods of its own and
+      // inherits only the read-only properties listed at the end.
+      //
+      // Close and Finish are NOT members. They were probed here as if they were,
+      // which made two permanent "undefined" entries in every log line look
+      // like a host problem. The real close is ReturnToMainTask (disp 10002).
+      var names = ['WriteNames', 'ReturnToMainTask', 'WriteNamesEx',
                    'GetMDQByRequestID', 'EditMetadata',
-                   'IsMetadataAvailableForEdit', 'BuyCD', 'Close', 'Finish'];
+                   'IsMetadataAvailableForEdit', 'BuyCD', 'version',
+                   'appColorLight', 'appColorMedium', 'appColorDark',
+                   'appColorButtonHighlight', 'appColorButtonShadow',
+                   'appColorButtonHoverFace'];
       var found = {};
       var hasExt = false;
       try { hasExt = !!window.external; } catch (e) { hasExt = false; }
@@ -3588,7 +3601,13 @@ def confirm():
       //    (IWMPCDDVDWizardExternal exposed as window.external on the dialog page).
       //    WriteNamesEx(type, bstrTypeId, bstrMetadata, fRenameRegroupFiles):
       //      type 0 = WMP_WRITENAMES_TYPE_CD_BY_TOC (bstrTypeId holds the CD TOC).
+      //      type 1 = WMP_WRITENAMES_TYPE_CD_BY_CONTENT_ID (bstrTypeId holds the
+      //               disc content id).
       //      type 2 = WMP_WRITENAMES_TYPE_CD_BY_MDQCD (bstrTypeId holds the MDQ).
+      //      type 3 = WMP_WRITENAMES_TYPE_DVD_BY_DVDID.
+      //    These four values are confirmed from the type library; the enum has no
+      //    library/collection member, which is the hard limit described at the
+      //    wmid branch below.
       //    This is what makes WMP apply the tags/artwork and rename/regroup the
       //    files automatically when the dialog finishes - no manual
       //    "Update album info" click required. Falls back to WriteNames(toc, xml).
@@ -3659,6 +3678,21 @@ def confirm():
           // use it as the type id (CD_BY_CONTENT_ID) rather than a stub MDQ
           // that belongs to no real track. Tags only - never rename library
           // files.
+          //
+          // WHY THIS IS THE RIGHT SHAPE, AND WHY IT IS STILL A GUESS:
+          // WMP_WRITENAMES_TYPE has exactly four members in the type library -
+          // CD_BY_TOC (0), CD_BY_CONTENT_ID (1), CD_BY_MDQCD (2),
+          // DVD_BY_DVDID (3). Every one of them names a physical disc or DVD.
+          // There is no library/collection/playlist type, so WriteNamesEx has
+          // no documented way to target a library album at all. Passing the
+          // collection GUID as a disc content id is type-correct (a GUID in
+          // the content-id slot) and is what the host logs show being accepted
+          // ("WriteNamesEx-wmid-ok"), so it is the only call available.
+          // A sibling path passes the album track's real WMContentID instead,
+          // which lands in the same slot from the MDQ.
+          // Treat both as best-effort: WMP accepting the call is not the same
+          // as WMP applying it to the library, and the two are not
+          // distinguishable from in-page code. See README "Library writes".
           try {
             window.external.WriteNamesEx(1, WMP_WMID, generatedXml, false);
             setApplied(true);
@@ -4067,21 +4101,26 @@ def done():
       report(diag);
       try {
         if (window.external) {
+          // IWMPCDDVDWizardExternal has no Close method. Verified against the
+          // type library for {2D7EF888-1D3C-484A-A906-9F49D99BB344} in
+          // C:\WINDOWS\System32\wmp.dll: the whole interface is WriteNames,
+          // ReturnToMainTask, WriteNamesEx, GetMDQByRequestID, EditMetadata,
+          // IsMetadataAvailableForEdit, BuyCD, plus the inherited read-only
+          // appColor*/version properties. The dialog host agrees - the probe in
+          // listExternalMethods() reports Close and Finish as "undefined" while
+          // every real member reports "unknown".
+          //
+          // This call therefore could only ever throw, and it was reached on
+          // every close where ReturnToMainTask() did not succeed. ReturnToMainTask
+          // (disp 10002) is the ONLY way to dismiss the wizard; the log shows it
+          // succeeding as "ReturnToMainTask-ok". Fall straight through to
+          // window.close() instead of provoking a COM error.
           try {
             window.external.ReturnToMainTask();
             handled = true;
             diag.close = 'ReturnToMainTask-ok';
           } catch (e1) {
             diag.rtmt_error = String(e1 && e1.message ? e1.message : e1);
-          }
-          if (!handled) {
-            try {
-              window.external.Close();
-              handled = true;
-              diag.close = 'Close-ok';
-            } catch (e2) {
-              diag.close_error = String(e2 && e2.message ? e2.message : e2);
-            }
           }
         }
       } catch (e) {

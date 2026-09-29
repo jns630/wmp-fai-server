@@ -509,6 +509,60 @@ about, so the document describes the collection WMP is tracking.
 > `if (window.external.WriteNamesEx)` silently skips the call. Invoke them
 > directly inside a `try`/`catch`.
 
+#### The complete COM interface
+
+`window.external` in the FAI dialog is `IWMPCDDVDWizardExternal`,
+`{2D7EF888-1D3C-484A-A906-9F49D99BB344}`. Read from the type library in
+`C:\WINDOWS\System32\wmp.dll`, the entire interface is:
+
+| Member | dispid | Signature |
+|---|---|---|
+| `WriteNames` | 10001 | `(bstrTOC, bstrMetadata)` |
+| `ReturnToMainTask` | 10002 | `()` — **the only way to dismiss the wizard** |
+| `WriteNamesEx` | 10007 | `(type, bstrTypeId, bstrMetadata, fRenameRegroupFiles)` |
+| `GetMDQByRequestID` | 10008 | `(bstrRequestID) → string` |
+| `IsMetadataAvailableForEdit` | 10010 | `() → bool` |
+| `EditMetadata` | 10011 | `()` |
+| `BuyCD` | 10023 | `(bstrURLParams)` |
+
+It derives from `IWMPExternalColors` → `IWMPExternal`, which add only the
+read-only `version`, `appColorLight`, `appColorMedium`, `appColorDark`,
+`appColorButtonHighlight`, `appColorButtonShadow`, `appColorButtonHoverFace`
+properties and an `OnColorChange` event.
+
+**There is no `Close` and no `Finish` method.** This project called
+`window.external.Close()` as a close fallback; it could only ever throw a COM
+error. The dialog host agrees — the runtime probe reports `"Close": "undefined"`
+and `"Finish": "undefined"` while every real member reports `"unknown"`. Both
+were removed; `ReturnToMainTask()` then `window.close()` is the correct
+sequence. The test suite now validates every `window.external.<name>` in the
+source against the member list above, so an invented method cannot ship again.
+
+#### Why library writes are unproven
+
+`WMP_WRITENAMES_TYPE` has exactly four members, confirmed from the same type
+library:
+
+| Value | Name | Identifies |
+|---|---|---|
+| 0 | `WMP_WRITENAMES_TYPE_CD_BY_TOC` | a CD by its TOC |
+| 1 | `WMP_WRITENAMES_TYPE_CD_BY_CONTENT_ID` | a CD by its content ID |
+| 2 | `WMP_WRITENAMES_TYPE_CD_BY_MDQCD` | a CD by its MDQ |
+| 3 | `WMP_WRITENAMES_TYPE_DVD_BY_DVDID` | a DVD |
+
+**Every one of them names a physical disc or DVD. There is no library,
+collection, or playlist type.** `WriteNamesEx` has no documented way to target
+a library album at all.
+
+Rows 3 and 4 of the write-path table above therefore pass a collection GUID (or
+a track's `WMContentID`) into a slot the interface defines as a *disc* content
+ID. The call is type-correct and WMP accepts it — the logs show
+`WriteNamesEx-wmid-ok` and `WriteNamesEx-lib-cid-ok` — but **WMP accepting a
+call is not WMP applying it**, and the two cannot be told apart from in-page
+code. Treat library writes as best-effort. If tags still fail to land after this,
+the next step is `EditMetadata()` (disp 10011), which hands off to WMP's own
+metadata editor, not another `WriteNamesEx` variant.
+
 ### Keeping the dialog responsive
 
 WMP's dialog host is single-threaded. Three mistakes reliably hang `wmplayer`:
@@ -728,7 +782,7 @@ python test_fai_v2.py
 Expected result:
 
 ```
-==== 181 passed, 0 failed ====
+==== 424 passed, 0 failed ====
 ```
 
 The suite covers, among other things:
@@ -736,6 +790,12 @@ The suite covers, among other things:
 - Identifier handling, including that a literal `+` in a TOC survives
 - All five COM write paths and their ordering
 - MDQ `WMContentID` parsing, and that `applyMetadata` reads a shared `RESOLVED_MDQ`
+- **That every served dialog's JavaScript actually parses**, via `node --check`
+  (skipped when `node` is absent; a brace-balance check always runs)
+- **That every `window.external.<name>` in the source is a real member of
+  `IWMPCDDVDWizardExternal`**, per the type-library member list. Parsing is not
+  enough — a call to a method that does not exist throws a COM error and does
+  nothing, which is exactly how `window.external.Close()` survived in the code.
 - That no synchronous XHR exists anywhere in the source
 - That an unrelated disc gets `NOTFOUND` while the staged disc still gets its album
 - `WMID` retargeting and per-identifier staging stability
