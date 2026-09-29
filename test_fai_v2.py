@@ -747,6 +747,12 @@ _rwn = c.post("/cdinfo/GetMDRCD.aspx?wmid=NOT-A-GUID").data.decode("utf-8", "ign
 check("non-guid-wmid-post-still-gets-nothing",
       "Guard Album" not in _rwn,
       f"a ?wmid= that is not GUID-shaped must not enable the fallback: {_rwn[:200]!r}")
+# A collection fetch is a GET; a POST that names a wmid is a different shape and
+# must not be able to claim the pending document either.
+check("wmid-claim-is-get-only",
+      'claimable = (request.method == "GET" and wmid_raw' in _src,
+      "only a GET may claim a pending document by wmid; a POST naming a wmid "
+      "has its own request id and must be left alone")
 _rg2 = c.get("/cdinfo/GetMDRCD.aspx?requestID=ANOTHER-FRESH-GUID").data.decode("utf-8", "ignore")
 check("get-does-not-use-the-fallback",
       "Guard Album" not in _rg2,
@@ -789,6 +795,60 @@ check("mdq-parse-always-explains-itself",
       "no usable MDQ" in _src and "no WMContentID recovered" in _src,
       "parse_mdq_content_ids must log on every path, because an empty result "
       "means every track id is generated and the write is silently ignored")
+
+# 34d. The FIRST FAI run of a session could never tag a library album. WMP
+#      reveals the collection GUID for the first time only in its own fetch
+#      moments AFTER the dialog closes, so at staging time the document was not
+#      bound to it and the fetch was answered empty:
+#        [STAGED] album='Clocks' req_id='4934E449-...'
+#        WRITE=WriteNamesEx-mdq-tagsonly-ok
+#        [WMID] captured F62C9D85-...
+#        [MDR-EMPTY] no metadata staged for 'F62C9D85-...'
+#      Only the SECOND attempt (Update album info) worked, because by then
+#      LAST_WMID was known. An unclaimed pending document now answers that
+#      first fetch and binds the collection to it.
+# The test client is bound to the `fai` module, so THAT is what must look like a
+# first-ever run. Resetting a freshly imported module would change nothing.
+fai.LAST_WMID = ""           # nothing known yet - the first run of a session
+fai.PENDING_WRITE.update({'xml': '', 'at': 0.0, 'wmid': ''})
+c.post("/store_staged_xml", data=json.dumps(
+    {"album": dict(album, title="First Run Album"),
+     "selected_tracks": [album["tracks"][0]],
+     "request_id": "REQ_FIRST", "session_id": "S", "toc": "", "wmid": ""}),
+    content_type="application/json")
+_newwmid = "AAAA1111-BBBB-2222-CCCC-333344445555"
+_rfw = c.get("/cdinfo/GetMDRCD.aspx?wmid=" + _newwmid)
+_fw = _rfw.data.decode("utf-8", "ignore")
+check("first-wmid-fetch-claims-the-pending-doc",
+      "First Run Album" in _fw and "NOTFOUND" not in _fw,
+      f"the first wmid fetch of a session must be able to claim the pending "
+      f"document, got {_fw[:200]!r}")
+# and it must be exact from then on
+_rfw2 = c.get("/cdinfo/GetMDRCD.aspx?wmid=" + _newwmid)
+check("claimed-wmid-is-exact-afterwards",
+      "First Run Album" in _rfw2.data.decode("utf-8", "ignore"),
+      "once claimed, later fetches for that collection must resolve exactly")
+# a DIFFERENT collection must still get nothing
+_rfw3 = c.get("/cdinfo/GetMDRCD.aspx?wmid=DDDD4444-EEEE-5555-FFFF-666677778888")
+check("second-collection-is-not-claimed",
+      "First Run Album" not in _rfw3.data.decode("utf-8", "ignore"),
+      "a pending document must be claimable by only ONE collection, or every "
+      "album in the library would inherit the last one applied")
+# a new document starts unclaimed again
+c.post("/store_staged_xml", data=json.dumps(
+    {"album": dict(album, title="Next Album"),
+     "selected_tracks": [album["tracks"][0]],
+     "request_id": "REQ_NEXT", "session_id": "S", "toc": "", "wmid": ""}),
+    content_type="application/json")
+_rfw4 = c.get("/cdinfo/GetMDRCD.aspx?wmid=9999AAAA-1111-2222-3333-444455556666")
+check("new-document-is-unclaimed",
+      "Next Album" in _rfw4.data.decode("utf-8", "ignore")
+      and "First Run Album" not in _rfw4.data.decode("utf-8", "ignore"),
+      "a newly staged document must start unclaimed and serve its own album")
+check("wmid-claim-is-recorded",
+      "PENDING_WRITE['wmid']" in _src and "bound == wmid_raw" in _src,
+      "the collection a pending document is committed to must be tracked, or "
+      "the same document could be claimed by unrelated collections")
 
 # 35. Aero restyle must be CSS-only: no CSS3 without an IE7 fallback, and
 #     none of the working dialog logic may be disturbed.

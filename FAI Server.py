@@ -256,7 +256,7 @@ STAGED_AT = {}
 # carrying a FRESHLY GENERATED request id, so it matches nothing in
 # STAGED_REQUESTS; this is what answers it. Used only for that specific call
 # shape - see _lookup_staged_xml().
-PENDING_WRITE = {'xml': '', 'at': 0.0}
+PENDING_WRITE = {'xml': '', 'at': 0.0, 'wmid': ''}
 # Fresh library-write ids we have answered, mapped to the document they were
 # answered with. Kept separate from STAGED_REQUESTS because such a pairing is
 # only valid for the document that was pending at the time: pinning one in
@@ -303,8 +303,20 @@ def _stage_request_xml(xml, request_id="", toc="", wmid="", cd=""):
     # the library in a SEPARATE request carrying a freshly generated request id,
     # so this is the only thing that can answer it - see _lookup_staged_xml().
     # Callers may already hold XML_LOCK, which is why it is an RLock.
+    prev_xml = PENDING_WRITE.get('xml')
     PENDING_WRITE['xml'] = xml
     PENDING_WRITE['at'] = now
+    # Which collection this document is committed to. Empty means UNCLAIMED,
+    # and the FIRST wmid that fetches this document claims it.
+    #
+    # Only an id the dialog itself was opened with pre-claims it. LAST_WMID is
+    # deliberately NOT used here: it is a guess about the previous album, and
+    # pre-binding to it would stop a genuinely different collection from ever
+    # claiming this document - which is the bug this whole path exists to fix.
+    if prev_xml is not xml:
+        PENDING_WRITE['wmid'] = ''
+    if wmid:
+        PENDING_WRITE['wmid'] = wmid
     # A fresh library-write id we remembered was paired with the PREVIOUS
     # document, so it must not survive this staging.
     FRESH_WRITES.clear()
@@ -383,14 +395,47 @@ def _lookup_staged_xml():
             if xml:
                 return xml
 
-        # No exact match. A library write names no disc of its own, so answer
-        # it with the document staged a moment ago, and remember the pairing so
-        # a repeat of the same fresh id is an exact lookup.
-        if (request.method == "POST" and not disc_ids and not wmid_raw
-                and 'getmdrcd' in request.path.lower()):
+        # No exact match, and the request names no DISC of its own.
+        #
+        # Two shapes need the pending document, and both were observed failing
+        # against real WMP:
+        #
+        #  a) a library WRITE: POST /cdinfo/GetMDRCD.aspx with a freshly
+        #     generated requestID, naming neither a disc nor a collection.
+        #  b) WMP's own collection fetch: GET .../GetMDRCD.aspx?wmid=<GUID>.
+        #     On the very first run of a session WMP reveals the collection GUID
+        #     for the FIRST TIME in this request, moments after the dialog
+        #     closed - so it could not have been known at staging time, the
+        #     document was not bound to it, and the fetch was answered empty:
+        #
+        #       [STAGED] album='Clocks' req_id='4934E449-...'
+        #       WRITE=WriteNamesEx-mdq-tagsonly-ok
+        #       [WMID] captured F62C9D85-...
+        #       [MDR-EMPTY] no metadata staged for 'F62C9D85-...'
+        #
+        # A wmid is claimed at most once by the pending document. Binding it
+        # makes every later fetch for that collection an exact lookup, while a
+        # DIFFERENT collection still gets nothing - which is the guard that
+        # stops every disc being written with whichever album was last applied.
+        if not disc_ids and 'getmdrcd' in request.path.lower():
             pending = PENDING_WRITE.get('xml') or ''
             age = time.time() - (PENDING_WRITE.get('at') or 0.0)
-            if pending and age <= _LIBRARY_WRITE_WINDOW:
+            bound = (PENDING_WRITE.get('wmid') or '').strip()
+            # A collection fetch is a GET in every real session logged. A POST
+            # that names a wmid is a different shape - it already carries its own
+            # requestID and its body ids were scanned above - so it is left alone.
+            claimable = (request.method == "GET" and wmid_raw
+                         and (not bound or bound == wmid_raw))
+            if pending and age <= _LIBRARY_WRITE_WINDOW and (
+                    (request.method == "POST" and not wmid_raw) or claimable):
+                if wmid_raw:
+                    # Bind it, so repeats are exact rather than fallbacks.
+                    PENDING_WRITE['wmid'] = wmid_raw
+                    STAGED_REQUESTS[wmid_raw] = pending
+                    STAGED_AT[wmid_raw] = time.time()
+                    log_line("MDR-FALLBACK", f"bound pending doc to collection "
+                                              f"{wmid_raw} (age={age:.1f}s)")
+                    return pending
                 log_line("MDR-FALLBACK", f"serving staged doc for fresh "
                                           f"library write (age={age:.1f}s)")
                 for cand in candidates[:1]:
@@ -1988,6 +2033,11 @@ def confirm():
     # write targets the real library entry instead of a generated one.
     wmp_wmid = raw_query_arg("wmid") or raw_query_arg("WMID") or ""
     wmid_from_url = bool(wmp_wmid)
+    # Kept separate from wmp_wmid: only a wmid WMP actually put in THIS
+    # dialog's URL is authoritative enough to pre-claim a staged document.
+    # wmp_wmid may be the LAST_WMID guess set below, and pre-binding a document
+    # to a guess stops the genuine collection from ever claiming it.
+    wmp_wmid_auth = wmp_wmid
     if wmp_wmid:
         _remember_wmid(wmp_wmid)
         log_line("WMID", f"dialog opened for wmid={wmp_wmid!r}")
@@ -2161,6 +2211,9 @@ def confirm():
     // Library flow: the collection GUID WMP is updating. Used as the write
     // type id and as the WMCollectionID in the generated XML.
     var WMP_WMID = {{ wmp_wmid_json|safe }};
+    // Only a wmid that was really in this dialog's URL. wmp_wmid may be the
+    // server's LAST_WMID guess, and a guess must not pre-claim a document.
+    var WMP_WMID_AUTH = {{ wmp_wmid_auth_json|safe }};
     // MDQ for the current dialog session. Shared because finishSync() resolves it
     // and applyMetadata() needs it - a local var in finishSync is invisible to
     // the callback, which produced "'mdq' is undefined" on every apply.
@@ -2429,7 +2482,7 @@ def confirm():
         toc: WMP_TOC,
         mdq: mdq,
         cd: WMP_CD,
-        wmid: WMP_WMID
+        wmid: WMP_WMID_AUTH
       });
 
       var xhr = new XMLHttpRequest();
@@ -2648,7 +2701,8 @@ def confirm():
       session_id=session_id,
       wmp_toc_json=json.dumps(wmp_toc),
       wmp_cd_json=json.dumps(wmp_cd),
-      wmp_wmid_json=json.dumps(wmp_wmid))
+      wmp_wmid_json=json.dumps(wmp_wmid),
+      wmp_wmid_auth_json=json.dumps(wmp_wmid_auth))
 # ==========================================================
 # XML STAGING ENDPOINT (JSON PAYLOAD + ROBUST FALLBACK)
 # ==========================================================
@@ -2688,7 +2742,12 @@ def store_staged_xml():
         cd_val = str(data.get("cd", "") or "").strip()
         with XML_LOCK:
             LAST_XML = xml
-            _stage_request_xml(xml, req_id, toc_val, LAST_WMID)
+            # Bind only to a wmid WMP put in THIS dialog's URL. LAST_WMID is a
+            # guess about some earlier album, and pre-binding to it would stop
+            # the genuine collection from ever claiming this document - which
+            # is exactly why the first FAI run of a session used to tag nothing.
+            _stage_request_xml(xml, req_id, toc_val,
+                               str(data.get("wmid", "") or "").strip())
             if cd_val:
                 # WMP fetches by ?cd=... after the dialog closes; bind the
                 # staged document to that id so the lookup hits directly.
