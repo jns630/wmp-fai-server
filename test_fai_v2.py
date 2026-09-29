@@ -496,8 +496,11 @@ ART = "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/52/aa/85/x.jpg/600x6
 xml_art = fai.build_wmp_xml(dict(album, art_url=ART), selected_tracks=[album["tracks"][0]])
 m = re.search(r"<largeCoverParams>([^<]+)</largeCoverParams>", xml_art)
 check("cover-url-not-double-encoded",
-      m is not None and m.group(1).startswith("http://127.0.0.1/cover/album.jpg?url=https://"),
-      f"cover url mangled: {m.group(1) if m else None}")
+      m is not None
+      and re.match(r"^http://127\.0\.0\.1/cover/(fai-[0-9a-f]{8}/)?album\.jpg"
+                   r"\?url=https://", m.group(1)) is not None,
+      f"the upstream url must stay readable (slashes not encoded); the path may "
+      f"carry the per-album token. got: {m.group(1) if m else None}")
 
 # the proxy must also recover a double-encoded url (older staged documents)
 REAL_ART = ("https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/52/aa/85/"
@@ -1935,10 +1938,10 @@ _c1 = _cover(_alb, cd="B+96+1970")
 _c2 = _cover(_alb, cd="B+96+1970")
 _c3 = _cover(dict(_alb, id="1065975633"), cd="B+96+1970")
 check("cover-url-carries-a-version-token",
-      "&fai=" in _c1 and _c1.startswith(
-          "http://127.0.0.1/cover/album.jpg?url=https://is1"),
-      f"the cover URL must carry a token and keep the upstream url readable, "
-      f"got {_c1[:120]!r}")
+      "/cover/fai-" in _c1 and _c1.startswith(
+          "http://127.0.0.1/cover/fai-") and "?url=https://is1" in _c1,
+      f"the cover URL must carry a token in the PATH and keep the upstream url "
+      f"readable, got {_c1[:130]!r}")
 check("cover-token-is-stable-per-album",
       _c1 == _c2,
       "re-applying the SAME album must present the same URL, or WMP re-downloads "
@@ -1949,11 +1952,46 @@ check("cover-token-differs-per-album",
 check("album-without-art-still-has-no-cover",
       _cover(dict(_alb, art_url=""), cd="B+96+1970") == "",
       "no art upstream must mean no cover params, not a broken URL")
-_r = c.get("/cover/album.jpg?url=" + _ARTU + "&fai=deadbeef&locale=409&geoid=be")
-check("proxy-ignores-the-token",
+_r = c.get("/cover/album.jpg?url=" + _ARTU + "&locale=409&geoid=be")
+check("proxy-ignores-wmp-parameters",
       _r.status_code == 200 and len(_r.data) > 1000,
       f"the image proxy must ignore the extra parameters - WMP appends its own "
       f"too - got {_r.status_code}, {len(_r.data)}B")
+_rp = c.get("/cover/fai-deadbeef/album.jpg?url=" + _ARTU)
+check("proxy-serves-the-path-token-form",
+      _rp.status_code == 200 and len(_rp.data) > 1000,
+      f"the proxy must serve the tokenised path form, got {_rp.status_code}, "
+      f"{len(_rp.data)}B")
+
+# 48. REGRESSION. Adding the token as a SECOND QUERY PARAMETER put a bare '&'
+#      into largeCoverParams, which made the whole document not-well-formed.
+#      WMP then rejected the entire response, so tags stopped applying as well
+#      as artwork:
+#        ET.fromstring(xml) -> not well-formed (invalid token): line 16, column 198
+#      The pre-existing well-formedness checks all used an album with NO
+#      artwork, so the cover field was empty and the bug sailed past them. Every
+#      document must be well-formed WHILE CARRYING a cover, including one whose
+#      upstream URL contains its own '&'.
+import xml.etree.ElementTree as _ET2
+_bad = []
+for _label, _alb2, _url in (
+        ("plain", _alb, _ARTU),
+        ("ampersand-in-upstream",
+         _alb, "https://example.com/art.jpg?w=1&h=2&x=3"),
+        ("ampersand-in-title", dict(_alb, title="X & Y"), _ARTU),
+):
+    _x = fai.build_wmp_xml(dict(_alb2), selected_tracks=_alb2["tracks"],
+                           cd="B+96+1970")
+    try:
+        _ET2.fromstring(_x)
+    except Exception as _e:
+        _bad.append("%s: %s" % (_label, _e))
+check("document-is-well-formed-with-artwork",
+      not _bad,
+      f"every delivered document must be well-formed XML even with a cover: {_bad}")
+check("cover-value-has-no-bare-ampersand",
+      "&" not in re.sub(r"&(amp|lt|gt|quot|apos);", "", _c1),
+      f"the cover value must not contain a bare '&', got {_c1[:130]!r}")
 
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")

@@ -1153,20 +1153,19 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
     # double-encoded once WMP passes it back through a query string, and the
     # image proxy then fetches an unparseable 'https%3A%2F%2F...' string.
     #
-    # &fai= is a stable per-album token on the cover URL. WMP caches the artwork
-    # it has already seen for a collection, and a disc that already has one
-    # never gets a fresh fetch: five applies of the Tiny Cities disc
-    # (15:18-15:25, all ?cd=B...&wmid=B17CF884) produced no [IMAGE] at all,
-    # while a first apply to a fresh disc fetched it twice. A URL that differs
-    # from the one WMP has on file is the only lever the server has. The token
-    # is derived from the album id, so it is stable per album (no churn, and a
-    # re-apply of the same album looks unchanged) while still being distinct
-    # from the bare URL WMP cached. The proxy ignores unknown parameters - WMP
-    # already appends &locale=...&geoid=... to it and gets a 200.
+    # The version token goes in the PATH, not the query. As a second query
+    # parameter it introduced a bare '&' into this XML - and a bare '&' makes
+    # the whole document not-well-formed, so WMP rejected the ENTIRE response
+    # and stopped applying tags as well as artwork:
+    #   ET.fromstring(xml) -> not well-formed (invalid token): line 16, column 198
+    # The proxy already serves /cover/<path:ignore>, so a path segment costs
+    # nothing and leaves exactly one '?' and no '&' in the value.
+    #   http://127.0.0.1/cover/fai-67cb7ee4/album.jpg?url=https://...
     ver = hashlib.md5(str(album_data.get("id", "") or art_url).encode(
         "utf-8", "replace")).hexdigest()[:8]
-    proxy_art = (f"http://127.0.0.1/cover/album.jpg?url={requests.utils.quote(art_url, safe='/:?=&')}"
-                 f"&fai={ver}" if art_url else "")
+    proxy_art = (xesc(f"http://127.0.0.1/cover/fai-{ver}/album.jpg?url="
+                      f"{requests.utils.quote(art_url, safe='/:?=&')}")
+                 if art_url else "")
 
     tracks_to_include = selected_tracks if selected_tracks is not None else album_data.get("tracks", [])
 
