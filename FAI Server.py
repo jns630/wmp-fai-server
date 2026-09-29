@@ -393,6 +393,12 @@ def get_itunes_album_details(collection_id):
         for item in items[1:]:
             if item.get("wrapperType") == "track":
                 t_artist = item.get("artistName", album_artist)
+                # iTunes' composerName is present on the wire but empirically
+                # always null (verified: 0 of 26 tracks on The Wall, and 0 on
+                # every other album tried). It is deprecated in the storefront
+                # API. Do NOT fall back to the artist - that writes a false
+                # credit into the user's library. Leave it empty instead.
+                t_composer = (item.get("composerName") or "").strip()
                 tracks.append({
                     "id": str(item.get("trackId")),
                     "name": item.get("trackName", "Unknown Track"),
@@ -400,7 +406,7 @@ def get_itunes_album_details(collection_id):
                     "disc": item.get("discNumber", 1),
                     "artist": t_artist,
                     "performer": t_artist,
-                    "composer": item.get("composerName", t_artist),
+                    "composer": t_composer,
                     "duration_ms": item.get("trackTimeMillis", 0),
                     "genre": item.get("primaryGenreName", album_genre)
                 })
@@ -485,9 +491,14 @@ def get_musicbrainz_album_details(release_id):
         return cached
 
     try:
+        # Composer credits live on the WORK, not the recording, and MusicBrainz
+        # only returns a work's own relations when 'work-rels' is requested.
+        # Verified: same release, 5 tracks - 0 composers without work-rels,
+        # 5 with it. Without these incs every composer came back as the artist.
         url = MUSICBRAINZ_BASE_URL + f"release/{release_id}"
         params = {
-            "inc": "recordings+release-groups+labels+artist-credits+media+genres",
+            "inc": ("recordings+release-groups+labels+artist-credits+media+genres"
+                    "+recording-level-rels+work-level-rels+work-rels+artist-rels"),
             "fmt": "json"
         }
         headers = {
@@ -521,6 +532,26 @@ def get_musicbrainz_album_details(release_id):
                 elif t.get("artist-credit"):
                     t_artist = t["artist-credit"][0].get("name", album_artist)
 
+                # Composer credit: recording -> performance relation -> work
+                # -> the work's own 'composer' relations. An empty string means
+                # "MusicBrainz has no composer for this track", which is honest;
+                # substituting the artist (the old behaviour) wrote a factually
+                # wrong credit into the user's library.
+                t_composer = ""
+                for rel in t.get("recording", {}).get("relations", []) or []:
+                    work = rel.get("work")
+                    if not work:
+                        continue
+                    names = []
+                    for wrel in work.get("relations", []) or []:
+                        if wrel.get("type") == "composer":
+                            wname = (wrel.get("artist") or {}).get("name")
+                            if wname and wname not in names:
+                                names.append(wname)
+                    if names:
+                        t_composer = "; ".join(names)
+                        break
+
                 tracks.append({
                     "id": t.get("id") or f"{release_id}_{disc_num}_{t.get('position', track_seq)}",
                     "name": t_name,
@@ -528,7 +559,7 @@ def get_musicbrainz_album_details(release_id):
                     "disc": disc_num,
                     "artist": t_artist,
                     "performer": t_artist,
-                    "composer": t_artist,
+                    "composer": t_composer,
                     "duration_ms": t.get("length", 0),
                     "genre": primary_genre
                 })
@@ -654,7 +685,13 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
         t_num = str(t.get("number", 1))
         t_artist = xesc(t.get("artist", album_data.get("artist", "Unknown Artist")))
         t_performer = xesc(t.get("performer", t_artist))
-        t_composer = xesc(t.get("composer", t_artist))
+        # Only emit a composer when the provider actually gave us one. The old
+        # fallback to the artist wrote a false credit into the user's library:
+        # for 'So What' it claimed Miles Davis wrote his own composition, and
+        # for a jazz album it misattributed the bandleader on every track.
+        t_composer_raw = t.get("composer", "") or ""
+        composer_tag = (f"\n  <trackComposer>{xesc(t_composer_raw)}</trackComposer>"
+                        if t_composer_raw.strip() else "")
         t_disc = str(t.get("disc", 1))
         t_genre = xesc(t.get("genre", album_data.get("genre", "Rock")))
 
@@ -665,8 +702,7 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
   <trackNumber>{t_num}</trackNumber>
   <discNumber>{t_disc}</discNumber>
   <trackArtist>{t_artist}</trackArtist>
-  <trackPerformer>{t_performer}</trackPerformer>
-  <trackComposer>{t_composer}</trackComposer>
+  <trackPerformer>{t_performer}</trackPerformer>{composer_tag}
   <genre>{t_genre}</genre>
 </track>"""
         track_nodes.append(track_xml)
@@ -1162,6 +1198,8 @@ body { font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 9pt; line-
 .track-title { float: left; max-width: 55%; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .track-artist { float: left; max-width: 33%; margin-left: 7px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 8.5pt; color: #7F7F7F; }
 .track-time { float: right; font-size: 8.5pt; color: #7F7F7F; }
+/* Composer line, rendered only when the provider supplied a real credit. */
+.track-composer { clear: both; padding-left: 30px; font-size: 8pt; color: #8C7B5A; }
 .disc-header { margin: 12px 0 4px 0; padding-bottom: 2px; font-size: 9pt; font-weight: 700; color: #1A1A1A; border-bottom: 1px solid #E4E9EF; }
 .selection-badge { margin-top: 12px; padding: 6px 8px; font-size: 9pt; font-weight: 700; color: #1A1A1A; text-align: center; border: 1px solid #E4E9EF; background-color: #F4F8FC; }
 .wmp-context-card { padding: 8px 9px; margin-bottom: 10px; font-size: 9pt; color: #1A1A1A; border: 1px solid #E4E9EF; background-color: #FBFCFE; }
@@ -1403,6 +1441,11 @@ def confirm():
             t_num = t.get("number", 0)
             t_name = esc(t.get("name", "Unknown Track"))
             t_artist = esc(t.get("artist", details.get("artist")))
+            # Show the composer when the provider gave us a real one. Empty
+            # stays empty - a row that invents a composer is worse than none.
+            t_composer = esc(t.get("composer", "") or "")
+            composer_html = (f'<div class="track-composer">Composer: {t_composer}</div>'
+                             if t_composer.strip() else "")
             dur_ms = t.get("duration_ms", 0)
             dur_str = f"{dur_ms//60000}:{(dur_ms%60000)//1000:02d}" if dur_ms > 0 else ""
 
@@ -1420,6 +1463,7 @@ def confirm():
   <div class="track-title">{t_name}</div>
   <div class="track-artist">{t_artist}</div>
   <div class="track-time">{dur_str}</div>
+  {composer_html}
 </div>'''
 
     return render_template_string("""<!DOCTYPE html>

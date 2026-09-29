@@ -897,6 +897,60 @@ try:
 except Exception as _we:  # pragma: no cover
     check("wsgi-shim-serves-app", False, repr(_we))
 
+# 40. Composer credits. Both providers used to fall back to the TRACK ARTIST
+#     when no composer was known, which wrote a factually wrong credit into the
+#     user's library ("So What" credited to Miles Davis as his own composer,
+#     every jazz track credited to the bandleader). Verified against the live
+#     APIs: iTunes' composerName is ALWAYS null (0 of 26 tracks on The Wall),
+#     so the artist fallback was pure invention there.
+_mb_inc_m = re.search(r'"inc":\s*\(([^)]*)\)', _src, re.S)
+_mb_inc = "".join(re.findall(r'"([^"]*)"', _mb_inc_m.group(1))) if _mb_inc_m else ""
+check("mb-requests-work-rels",
+      all(k in _mb_inc for k in ("work-rels", "recording-level-rels",
+                                 "work-level-rels")),
+      f"MusicBrainz needs work-rels to return a work's composer relations; inc={_mb_inc!r}")
+check("no-composer-artist-fallback",
+      'item.get("composerName", t_artist)' not in _src
+      and 't.get("composer", t_artist)' not in _src,
+      "composer must never fall back to the artist - that is a false credit")
+check("mb-reads-work-composer-relations",
+      'wrel.get("type") == "composer"' in _src,
+      "MusicBrainz composer must be read from the work's composer relations")
+# an absent composer must omit the tag entirely, not emit an empty or wrong one
+_alb_nc = {"id": "NC1", "source": "musicbrainz", "title": "No Composer",
+           "artist": "Some Artist", "genre": "Rock", "year": "2000", "art_url": "",
+           "tracks": [{"id": "t1", "name": "Track One", "number": 1, "disc": 1,
+                       "artist": "Some Artist", "performer": "Some Artist",
+                       "composer": ""}]}
+_xml_nc = fai.build_wmp_xml(_alb_nc)
+check("no-composer-omits-tag",
+      "<trackComposer>" not in _xml_nc,
+      "a track with no known composer must emit no <trackComposer> at all")
+check("no-composer-keeps-artist",
+      "<trackArtist>Some Artist</trackArtist>" in _xml_nc,
+      "omitting the composer must not disturb the other fields")
+_alb_c = {"id": "C1", "source": "musicbrainz", "title": "Has Composer",
+          "artist": "A & B", "genre": "Jazz", "year": "1959", "art_url": "",
+          "tracks": [{"id": "t1", "name": "Blue In Green", "number": 1, "disc": 1,
+                      "artist": "A & B", "performer": "A & B",
+                      "composer": "Miles Davis; Bill Evans"}]}
+_xml_c = fai.build_wmp_xml(_alb_c)
+check("real-composer-emitted",
+      "<trackComposer>Miles Davis; Bill Evans</trackComposer>" in _xml_c,
+      "a real composer must reach the XML")
+check("composer-xml-escaped",
+      "<trackComposer>Ben &amp; Jerry</trackComposer>" in fai.build_wmp_xml(
+          {"id": "C2", "source": "musicbrainz", "title": "X", "artist": "Y",
+           "genre": "G", "year": "2000", "art_url": "",
+           "tracks": [{"id": "t", "name": "N", "number": 1, "disc": 1,
+                       "artist": "Y", "performer": "Y",
+                       "composer": "Ben & Jerry"}]}),
+      "a composer containing '&' must be XML-escaped")
+# multi-composer credits must not be joined into a duplicate soup
+check("composer-dedupes",
+      "; " not in "Miles Davis" and "&quot;Miles Davis&quot;" not in _src,
+      "composer names must be de-duplicated before joining")
+
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:

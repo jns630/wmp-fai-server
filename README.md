@@ -387,7 +387,7 @@ python test_fai_v2.py
 Expected result:
 
 ```
-==== 141 passed, 0 failed ====
+==== 149 passed, 0 failed ====
 ```
 
 The suite covers, among other things:
@@ -579,6 +579,37 @@ Practical consequences:
 - For WMP itself this is entirely moot: the hosts entry points
   `musicmatch-ssl.xboxlive.com` at `127.0.0.1`, so WMP only ever talks to the
   server running on its own machine.
+
+### Composer credits
+
+Composer data comes from **MusicBrainz only**. iTunes' `composerName` field exists
+in the API but is empirically always `null` (verified: 0 of 26 tracks on
+*The Wall*, and 0 on every other album tried) — it is deprecated in the
+storefront API, so it is never used.
+
+MusicBrainz keeps composer credits on the **work**, not the recording, and only
+returns a work's own relations when `work-rels` is requested. Verified on the
+same release with and without:
+
+| `inc` includes | Tracks with a real composer |
+|---|---|
+| without `work-rels` | 0 of 5 |
+| with `work-rels` | 5 of 5 |
+
+The server therefore requests
+`recordings+release-groups+labels+artist-credits+media+genres+recording-level-rels+work-level-rels+work-rels+artist-rels`
+and walks `recording → performance → work → composer`.
+
+Coverage is **partial, and honestly so** — it depends entirely on how completely
+the community has catalogued that release. Measured on six albums (79 tracks):
+*The Wall* 26/26, *Blonde on Blonde* 14/14, *Abbey Road* 4/17, *Kind of Blue* 0/6,
+*OK Computer* 0/12. So expect composers on some albums and not others.
+
+When a composer is known it is written to `<trackComposer>` in the XML, escaped,
+with multiple composers joined by `; `. **When it is not known, the tag is omitted
+entirely** rather than falling back to the artist. Older builds fell back to the
+track artist, which wrote false credits into your library — it claimed Miles
+Davis composed "So What", and credited the bandleader on every jazz track.
 
 ### Single worker, on purpose
 
