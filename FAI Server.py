@@ -3411,8 +3411,8 @@ def confirm():
       // COM dispatch members are not enumerable with for..in.
       //
       // This list is the COMPLETE set of members on the interface, read from the
-      // type library of {2D7EF888-1D3C-484A-A906-9F49D99BB344} in the System32
-      // wmp.dll. The interface derives from
+      // type library of {2D7EF888-1D3C-484A-A906-9F49D99BB344} in
+      // C:\WINDOWS\System32\wmp.dll. The interface derives from
       // IWMPExternalColors -> IWMPExternal; it adds seven methods of its own and
       // inherits only the read-only properties listed at the end.
       //
@@ -3756,56 +3756,6 @@ def confirm():
             }
           }
         }
-
-        // ---- Library handoff: WMP's own metadata editor -------------------
-        // WMP_WRITENAMES_TYPE has no library/collection member (see the write
-        // paths above), so a LIBRARY album can reach this point with every
-        // WriteNamesEx having returned without throwing and nothing actually
-        // tagged. There is no way to tell that apart from success from in-page
-        // code, so this runs for library flows whenever we have a document to
-        // hand over, and lets WMP's own editor do the write.
-        //
-        // EditMetadata (disp 10011) takes NO arguments. It does not apply our
-        // XML directly - it opens WMP's editor on whatever WMP has STAGED for
-        // this request, which is the document served by /redir/getmdrcdbackground
-        // and /cdinfo/GetMDRCD.aspx. That is why the handoff only runs after
-        // applyMetadata() has already POSTed the XML to /store_staged_xml, and
-        // why the background fetch below is fired FIRST: WMP must have pulled
-        // the document before its editor is asked to open on it.
-        //
-        // The user then presses OK in WMP's own dialog, which is the
-        // authentic application path. IsMetadataAvailableForEdit (disp 10010)
-        // is the capability check for it - call it directly, never
-        // truthiness-test the member (see the note at the top of applyMetadata).
-        if (isLibrary) {
-          diag.edit_handoff = 'attempted';
-          var canEdit = false;
-          try {
-            canEdit = !!window.external.IsMetadataAvailableForEdit();
-            diag.metadata_editable = canEdit;
-          } catch (e) {
-            diag.is_available_error = String(e && e.message ? e.message : e);
-          }
-          if (canEdit) {
-            // Fire the background fetch BEFORE opening the editor, so the
-            // document is already on its way to WMP when the editor renders.
-            try {
-              var hx = new XMLHttpRequest();
-              hx.open('GET', '/redir/getmdrcdbackground/' + window.location.search, true);
-              hx.send();
-            } catch (e) {}
-            try {
-              window.external.EditMetadata();
-              diag.edit_handoff = 'EditMetadata-ok';
-            } catch (e) {
-              diag.edit_handoff_error = String(e && e.message ? e.message : e);
-              safeLog('EditMetadata handoff failed: ' + e);
-            }
-          } else {
-            // Not editable in this host - say so instead of pretending.
-            diag.edit_handoff = canEdit ? 'attempted' : 'not-editable';
-          }
-        }
       } else {
         diag.external_missing = true;
       }
@@ -3853,25 +3803,6 @@ def confirm():
         window.sessionStorage.setItem('fai_diag', JSON.stringify(diag));
       } catch (e) { /* host policy may refuse storage; the beacon still stands */ }
       beaconSync(diag);
-      // If we handed off to WMP's own metadata editor, do NOT navigate. The
-      // editor is a live WMP dialog layered over this page; navigating to /done
-      // in the same tick tears the page out from under it and the user is left
-      // with nothing. Stay put, say what happened, and let WMP's own OK/Cancel
-      // close the wizard. Every other path still leaves immediately - the
-      // 2m25s "Applying..." hang documented above only happens when a timer
-      // stands between the write and the navigation.
-      if (diag.edit_handoff === 'EditMetadata-ok') {
-        try {
-          var eb = document.getElementById('btnFinish');
-          if (eb) {
-            eb.disabled = false;
-            eb.innerHTML = 'Waiting for WMP&hellip;';
-            eb.onclick = leaveDialog;
-          }
-          safeLog('handed off to WMP editor; staying on the confirm page');
-        } catch (e) {}
-        return;
-      }
       leaveDialog();
     }
 
@@ -4171,8 +4102,8 @@ def done():
       try {
         if (window.external) {
           // IWMPCDDVDWizardExternal has no Close method. Verified against the
-          // type library for {2D7EF888-1D3C-484A-A906-9F49D99BB344} in the
-          // System32 wmp.dll: the whole interface is WriteNames,
+          // type library for {2D7EF888-1D3C-484A-A906-9F49D99BB344} in
+          // C:\WINDOWS\System32\wmp.dll: the whole interface is WriteNames,
           // ReturnToMainTask, WriteNamesEx, GetMDQByRequestID, EditMetadata,
           // IsMetadataAvailableForEdit, BuyCD, plus the inherited read-only
           // appColor*/version properties. The dialog host agrees - the probe in
