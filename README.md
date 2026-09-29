@@ -23,6 +23,7 @@ actually tag discs, run the server on your own Windows machine.
 
 - [What it does](#what-it-does)
 - [Requirements](#requirements)
+- [Screenshot](#screenshot)
 - [Quick start](#quick-start)
 - [How to use](#how-to-use)
 - [How it works](#how-it-works)
@@ -82,6 +83,19 @@ server stands in for that service and provides:
 ```powershell
 pip install -r requirements.txt
 ```
+
+---
+
+## Screenshot
+
+A freshly ripped disc (*April* — Sun Kil Moon), applied through the Find Album
+Information dialog: album title, artist, genre, year and cover art all written by
+WMP, with every track attributed.
+
+![WMP library showing the ripped album "April" by Sun Kil Moon with cover art and all 11 tracks tagged](docs/images/wmp-rip-applied.png)
+
+*WMP after applying album information to a ripped CD — cover art, album metadata
+and per-track artist credits.*
 
 ---
 
