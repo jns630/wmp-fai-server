@@ -46,10 +46,10 @@ server stands in for that service and provides:
 - **Concurrent hybrid search** across the iTunes Search API and the MusicBrainz
   Web Service, merged into a single ranked result list.
 - **A Find Album Information dialog** rendered in the player's own browser host,
-  restyled to match the authentic Microsoft dialog: the blue *"Found 500+ Album(s)
-  containing …"* lead-in, the **Existing Information** / **Search** column pair, the
-  `Artists | Albums | Tracks` filter strip, and the *Read the privacy statement.* /
-  **Next** / **Cancel** command strip.
+  restyled to match the authentic Microsoft dialog: a blue lead-in reporting the
+  real number of matches, the **Existing Information** / **Search** column pair,
+  the live `Artists | Albums | Tracks` filter tabs, and the *Read the privacy
+  statement.* / **Next** / **Cancel** command strip.
 - **Cover art** proxied and cached locally, so WMP can fetch it without reaching
   out to a CDN.
 - **WMP-format XML** (`MDR-CD`) delivered over the exact endpoints WMP polls,
@@ -351,11 +351,11 @@ Please read this section before assuming something is broken.
 - **Result quality depends on the upstream APIs.** iTunes is fast with
   high-resolution art but is storefront-dependent; MusicBrainz is comprehensive
   but frequently has no cover art.
-- **The search box is the only input.** The filter strip
-  (`Artists | Albums | Tracks`) is decorative — it mirrors the original dialog but
-  does not change the query. The `Edit`, `Buy`, `More…` and *Read the privacy
-  statement.* links are likewise presentational and intentionally non-navigating,
-  because navigating away inside the player's modal host traps the wizard.
+- **The search box is the only text input.** The `Artists | Albums | Tracks` strip
+  *is* live — it re-queries the server for that entity type. The `Edit`, `Buy`,
+  `More…` and *Read the privacy statement.* links remain presentational and
+  intentionally non-navigating, because navigating away inside the player's
+  modal host traps the wizard.
 - **WMP must be the browser that opens the dialog.** The layout is tuned for the
   player's IE7 host. Modern browsers render it correctly but will never look
   pixel-identical to the original, which was IE7.
@@ -387,7 +387,7 @@ python test_fai_v2.py
 Expected result:
 
 ```
-==== 166 passed, 0 failed ====
+==== 181 passed, 0 failed ====
 ```
 
 The suite covers, among other things:
@@ -579,6 +579,29 @@ Practical consequences:
 - For WMP itself this is entirely moot: the hosts entry points
   `musicmatch-ssl.xboxlive.com` at `127.0.0.1`, so WMP only ever talks to the
   server running on its own machine.
+
+### The filter strip: Artists / Albums / Tracks
+
+These three tabs are **live**. Clicking one re-queries the server for that
+entity type and swaps the result list:
+
+| Tab | Source | Rows shown |
+|---|---|---|
+| **Artists** | MusicBrainz `artist` | name, type, country |
+| **Albums** *(default)* | iTunes + MusicBrainz `release` | cover, artist, title, `N Track(s)  Genre • Year` |
+| **Tracks** | MusicBrainz `recording` | title, artist, format, duration |
+
+Each tab keeps its own count, so `Artists (2) | Albums (24) | Tracks (73)` shows
+how many of each exist. The active view is passed as `?view=` on
+`/api_search`; the default stays `album`, so existing callers and the WMP flow
+are unaffected.
+
+A real bug surfaced here. The scoped album query used `release:"ghost story"`
+as an exact phrase, so Coldplay's *Ghost Stories* matched nothing, the whole
+`AND` returned **zero** MusicBrainz albums, and only iTunes results ever appeared.
+The album half is now OR'd over its individual words
+(`artist:"coldplay" AND (ghost OR story)`), which returns 24 releases. The artist
+half stays an exact phrase, because that is the reliable side of the match.
 
 ### Result counts
 

@@ -757,8 +757,8 @@ check("fai-two-columns",
       and 'class="section-label">Search' in ui_html,
       "the 'Existing Information' / 'Search' column pair is missing")
 check("fai-filter-strip",
-      'id="cntArtists"' in ui_html and 'id="cntAlbums"' in ui_html
-      and 'id="cntTracks"' in ui_html,
+      'id="tabArtists"' in ui_html and 'id="tabAlbums"' in ui_html
+      and 'id="tabTracks"' in ui_html,
       "the Artists/Albums/Tracks filter strip is missing")
 check("fai-command-strip",
       "Read the privacy statement." in ui_html
@@ -1035,6 +1035,65 @@ check("search-and-count-share-query",
       _src.count("def _build_lucene_query") == 1
       and _src.count("_build_lucene_query(query, artist_hint, album_hint)") == 2,
       "the search and the count must build their Lucene query with one shared helper")
+
+# 42. Two bugs found from a real screenshot of 'coldplay ghost story':
+#     (a) NO MusicBrainz albums surfaced at all
+#     (b) the Artists / Albums / Tracks strip was inert decoration
+# Root cause of (a): the scoped query used release:"ghost story" as an exact
+# PHRASE, so Coldplay's 'Ghost Stories' did not match and the AND returned 0.
+# A quoted phrase must not gate the album term - the words are OR'd instead.
+check("album-term-not-exact-phrase",
+      'release:"{clean_alb}"' not in _src.split("def _build_lucene_query")[1].split("def ")[0]
+      or 'album_clause' in _src,
+      "the album half of the scoped query must not be an exact quoted phrase")
+check("album-term-uses-or-clause",
+      'album_clause = "(" + " OR ".join(terms) + ")"' in _src,
+      "the album terms must be OR'd so singular/plural still matches")
+# the live shape of the query that used to return 0
+_q = "coldplay ghost story"
+_toks = _q.split()
+_eq = fai._build_entity_queries(_q, " ".join(_toks[:len(_toks)//2]),
+                                " ".join(_toks[len(_toks)//2:]))
+check("scoped-release-query-is-not-bare-phrase",
+      "release:" not in _eq["release"] and _eq["release"].startswith('artist:"coldplay"'),
+      f"release query must not be an exact album phrase: {_eq['release']!r}")
+check("entity-queries-differ-per-entity",
+      _eq["artist"] == 'artist:"coldplay"' and "AND" in _eq["recording"],
+      f"artist/recording queries must be scoped differently: {_eq}")
+
+# (b) the filter strip must actually do something
+check("filter-tabs-are-clickable",
+      "function switchView" in ui_html and "function setActiveTab" in ui_html
+      and "onclick=\"switchView('artist');\"" in ui_html
+      and "onclick=\"switchView('track');\"" in ui_html,
+      "the Artists/Tracks tabs must be wired to a real view switch")
+check("view-sent-to-server",
+      "'&view=' + CURRENT_VIEW" in ui_html
+      and 'request.args.get("view"' in _src,
+      "the active view must be sent to the server")
+for _v in ("artist", "album", "track"):
+    _rv = c.get("/api_search?q=coldplay+ghost+story&view=" + _v)
+    check("view-%s-returns-200" % _v, _rv.status_code == 200,
+          f"view={_v} returned {_rv.status_code}")
+    check("view-%s-has-rows-or-empty" % _v,
+          ("album-item" in _rv.data.decode("utf-8", "ignore"))
+          or ("No matching" in _rv.data.decode("utf-8", "ignore")),
+          f"view={_v} rendered neither results nor an empty-state message")
+# the default must stay 'album' so nothing else regresses
+_rv_def = c.get("/api_search?q=coldplay+ghost+story")
+check("view-defaults-to-album",
+      "Search Results" in _rv_def.data.decode("utf-8", "ignore"),
+      "the no-view request must still return the album view")
+# bad view values must not 500
+_rv_bad = c.get("/api_search?q=coldplay+ghost+story&view=bogus")
+check("view-invalid-falls-back",
+      _rv_bad.status_code == 200
+      and "Search Results" in _rv_bad.data.decode("utf-8", "ignore"),
+      f"an unknown view must fall back to albums, got {_rv_bad.status_code}")
+# the recording parser must tolerate list-shaped releases/media
+check("recording-parser-guards-lists",
+      'isinstance(rels[0], dict)' in _src and 'isinstance(media[0], dict)' in _src,
+      "recording payloads nest lists; .get() must be guarded or Tracks returns 0")
 
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")

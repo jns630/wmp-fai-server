@@ -441,6 +441,18 @@ def _build_lucene_query(query, artist_hint=None, album_hint=None):
         clean_art = re.sub(r'[\'"+]', ' ', artist_hint).strip()
         clean_alb = re.sub(r'[\'"+]', ' ', album_hint).strip()
         if clean_art and clean_alb:
+            # The album half is matched as loose OR terms, not as one exact
+            # phrase. A quoted phrase requires the release title to contain
+            # that exact wording, so 'release:"ghost story"' missed Coldplay's
+            # 'Ghost Stories' entirely and the whole scoped query returned 0 -
+            # which is why no MusicBrainz albums surfaced at all. The artist
+            # stays an exact phrase (it is the reliable half) and the album
+            # terms are OR'd so singular/plural and minor wording differences
+            # still match. Measured: 'coldplay ghost story' 0 -> 24 releases.
+            terms = [t for t in clean_alb.split() if t]
+            if terms:
+                album_clause = "(" + " OR ".join(terms) + ")"
+                return f'artist:"{clean_art}" AND {album_clause}'
             return f'artist:"{clean_art}" AND release:"{clean_alb}"'
     return re.sub(r'[\'"+]', ' ', query or "").strip()
 
@@ -452,17 +464,25 @@ def _build_entity_queries(query, artist_hint=None, album_hint=None):
     _build_lucene_query). The artist and track counts cannot reuse that string:
     'artist:"X" AND release:"Y"' is a release-scoped clause, and asking the
     artist or recording endpoint with it returns 0, because those entities have
-    no 'release' field. They are therefore scoped to the artist term alone,
-    which is the honest question: how many artists / recordings match the
-    artist part of what you typed.
+    no 'release' field. They are therefore scoped to the artist plus the album
+    TERMS, which is the honest question: how many artists / recordings match
+    the artist and title words of what you typed.
     """
     base = _build_lucene_query(query, artist_hint, album_hint)
-    artist_q = re.sub(r'[\'"+]', ' ', query or "").strip()
+    loose = re.sub(r'[\'"+]', ' ', query or "").strip()
+    artist_q = loose
+    rec_q = loose
     if artist_hint and album_hint:
         ca = re.sub(r'[\'"+]', ' ', artist_hint).strip()
+        cb = re.sub(r'[\'"+]', ' ', album_hint).strip()
+        terms = [t for t in cb.split() if t]
         if ca:
             artist_q = f'artist:"{ca}"'
-    return {"release": base, "recording": artist_q, "artist": artist_q}
+            # Keep the album words for the recording search too. Scoping to the
+            # artist alone returned Coldplay's entire 3,008-track catalogue
+            # instead of the Ghost Stories material the user searched for.
+            rec_q = artist_q + ((" AND (" + " OR ".join(terms) + ")") if terms else "")
+    return {"release": base, "recording": rec_q, "artist": artist_q}
 
 
 def count_search_totals(query, artist_hint=None, album_hint=None):
@@ -506,6 +526,80 @@ def count_search_totals(query, artist_hint=None, album_hint=None):
                 out[key] = fut.result(timeout=9)
             except Exception:
                 out[key] = None
+    return out
+
+
+def search_mb_entities(query, kind, artist_hint=None, album_hint=None, limit=15):
+    """Search MusicBrainz for artists or recordings (the filter-strip views).
+
+    The album view is served by search_musicbrainz(); this covers the other two
+    tabs so Artists and Tracks return real rows instead of being decorative.
+    Reuses the same scoped query builder as the album search and the counts.
+    """
+    cache_key = f"mb_{kind}_{query.lower().strip()}_{artist_hint}_{album_hint}_{limit}"
+    cached = search_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    if kind == "artist":
+        q = re.sub(r'[\'"+]', ' ', query or "").strip()
+        if artist_hint:
+            ca = re.sub(r'[\'"+]', ' ', artist_hint).strip()
+            if ca:
+                q = f'artist:"{ca}"'
+    else:
+        q = _build_entity_queries(query, artist_hint, album_hint).get("recording", "")
+
+    out = []
+    if not q:
+        return out
+    try:
+        resp = session.get(MUSICBRAINZ_BASE_URL + kind,
+                           params={"query": q, "fmt": "json", "limit": limit},
+                           headers={"User-Agent": MUSICBRAINZ_USER_AGENT},
+                           timeout=8)
+        if resp.status_code == 200:
+            data = resp.json()
+            if kind == "artist":
+                for a in data.get("artists", []):
+                    name = a.get("name", "")
+                    if not name:
+                        continue
+                    score = a.get("score") or 0
+                    out.append({
+                        "id": a.get("id", ""), "name": name,
+                        "country": a.get("country", ""),
+                        "type": a.get("type", "") or "",
+                        "score": score,
+                        "art_thumb": f"https://coverartarchive.org/release/{a.get('id','')}/front-250.jpg",
+                    })
+            else:
+                for rec in data.get("recordings", []):
+                    title = rec.get("title", "")
+                    if not title:
+                        continue
+                    ac = rec.get("artist-credit") or []
+                    r_artist = ac[0].get("name", "Unknown Artist") if ac else "Unknown Artist"
+                    # 'releases' and 'media' are LISTS in the recording payload,
+                    # and an entry may be missing 'media' entirely. Chaining
+                    # .get() straight through them raised AttributeError
+                    # ('list' object has no attribute 'get') and the whole
+                    # Tracks view silently returned zero rows.
+                    fmt = ""
+                    rels = rec.get("releases") or []
+                    if rels and isinstance(rels[0], dict):
+                        media = rels[0].get("media") or []
+                        if media and isinstance(media[0], dict):
+                            fmt = media[0].get("format", "") or ""
+                    out.append({
+                        "id": rec.get("id", ""), "title": title,
+                        "artist": r_artist,
+                        "length_ms": (rec.get("length") or 0),
+                        "format": fmt,
+                    })
+    except Exception as e:
+        print(f"[MUSICBRAINZ] {kind} search error: {e}")
+    search_cache.set(cache_key, out, ttl=3600)
     return out
 
 
@@ -1082,6 +1176,14 @@ def api_search():
     with NAV_LOCK:
         FAI_NAVIGATION['stats']['total_searches'] += 1
 
+    # Which of the three filter-strip tabs is asking. The authentic dialog has
+    # always shown Artists / Albums / Tracks; previously the strip was purely
+    # decorative, so clicking it did nothing. 'album' stays the default so every
+    # existing caller and test is unaffected.
+    view = (request.args.get("view", "album") or "album").lower()
+    if view not in ("album", "artist", "track"):
+        view = "album"
+
     artist_hint = ""
     album_hint = ""
     if " - " in q:
@@ -1099,12 +1201,15 @@ def api_search():
     totals = {"albums": None, "tracks": None, "artists": None,
               "albums_shown": 0, "tracks_shown": 0}
 
-    # iTunes, MusicBrainz and the exact-count lookups all run at once; four
-    # workers so the count round-trips never hold up the result rows.
+    # Parallel execution of iTunes, MusicBrainz and the exact-count lookups. Four
+    # workers so the count round-trips never hold up the result rows. The
+    # artist/track views are fetched lazily - only the tab that is open.
     with ThreadPoolExecutor(max_workers=4) as executor:
         f_itunes = executor.submit(search_itunes, q, limit=25)
         f_mb = executor.submit(search_musicbrainz, q, artist_hint=artist_hint, album_hint=album_hint, limit=15)
         f_cnt = executor.submit(count_search_totals, q, artist_hint, album_hint)
+        f_view = executor.submit(search_mb_entities, q, "artist" if view == "artist" else "recording",
+                                 artist_hint, album_hint, 20) if view != "album" else None
         try:
             itunes_results = f_itunes.result(timeout=6)
         except Exception as e:
@@ -1117,6 +1222,12 @@ def api_search():
             totals = f_cnt.result(timeout=10) or totals
         except Exception as e:
             print(f"[SEARCH] count task error: {e}")
+        view_rows = []
+        if f_view is not None:
+            try:
+                view_rows = f_view.result(timeout=9) or []
+            except Exception as e:
+                print(f"[SEARCH] {view} task error: {e}")
 
     # How many rows we render vs how many exist upstream. The lead-in needs
     # both: the total alone hides that only 25 are on screen.
@@ -1155,6 +1266,45 @@ def api_search():
             pass
         return resp
 
+    # ---- Artists / Tracks filter views -----------------------------------
+    # These tabs now do real work instead of sitting there as decoration.
+    if view != "album":
+        label = "Artists" if view == "artist" else "Tracks"
+        if not view_rows:
+            return _respond(
+                f'<div class="section-label">{label}</div>'
+                f'<div class="empty-msg">No matching {label.lower()} found. '
+                f'Try different search terms or check spelling.</div>')
+        out = [f'<div class="section-label">{label}</div>']
+        for row in view_rows:
+            if view == "artist":
+                nm = esc(row.get("name", "Unknown Artist"))
+                bits = [b for b in (row.get("type", ""), row.get("country", "")) if b]
+                sub = esc(" • ".join(bits))
+                out.append(
+                    f'<div class="album-item">'
+                    f'  <div class="album-meta">'
+                    f'    <div class="album-artist">{nm} <span class="badge badge-mb">MusicBrainz</span></div>'
+                    f'    <div class="album-sub">{sub}</div>'
+                    f'  </div>'
+                    f'</div>')
+            else:
+                ti = esc(row.get("title", "Unknown Track"))
+                ar = esc(row.get("artist", ""))
+                ms = row.get("length_ms") or 0
+                dur = f"{ms//60000}:{(ms%60000)//1000:02d}" if ms > 0 else ""
+                sub = esc(dur)
+                out.append(
+                    f'<div class="album-item">'
+                    f'  <div class="album-meta">'
+                    f'    <div class="album-artist">{ti} <span class="badge badge-mb">MusicBrainz</span></div>'
+                    f'    <div class="album-title">{ar}</div>'
+                    f'    <div class="album-sub">{sub}</div>'
+                    f'  </div>'
+                    f'</div>')
+        return _respond("".join(out))
+
+    # ---- Albums view (default) ------------------------------------------
     html_out = '<div class="section-label">Search Results</div>'
 
     if not itunes_results and not mb_results:
@@ -1303,6 +1453,9 @@ body { font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 9pt; line-
 .search-clear { position: absolute; right: 4px; top: 5px; width: 15px; height: 15px; padding: 0; font-size: 8pt; line-height: 13px; text-align: center; color: #6A7B8C; cursor: pointer; border: 1px solid #C3CFDA; background-color: #F1F4F8; }
 .filter-row { padding: 2px 0 6px 0; margin-bottom: 6px; font-size: 9pt; color: #1A1A1A; border-bottom: 1px solid #E4E9EF; }
 .filter-active { font-weight: 700; }
+/* The strip is now a real control: pointer + hover so it reads as clickable. */
+.filter-tab { cursor: pointer; padding: 1px 2px; }
+.filter-tab:hover { text-decoration: underline; }
 .filter-sep { margin: 0 5px; color: #9AA7B4; }
 /* Track rows on /confirm share the result row look: flat, hairline on
    hover, tinted field when the track is staged for writing. */
@@ -1400,7 +1553,7 @@ def unified_ui():
         <button class="search-clear" onclick="clearSearch();" title="Clear">X</button>
       </div>
       <div class="filter-row" id="filterRow">
-        <span class="link" id="cntArtists">Artists</span><span class="filter-sep">|</span><span class="link filter-active" id="cntAlbums">Albums</span><span class="filter-sep">|</span><span class="link" id="cntTracks">Tracks</span>
+        <span class="link filter-tab" id="tabArtists" onclick="switchView('artist');">Artists</span><span class="filter-sep">|</span><span class="link filter-active filter-tab" id="tabAlbums" onclick="switchView('album');">Albums</span><span class="filter-sep">|</span><span class="link filter-tab" id="tabTracks" onclick="switchView('track');">Tracks</span>
       </div>
       <div id="results_area">
         <div class="empty-msg">Searching metadata databases...</div>
@@ -1429,13 +1582,31 @@ def unified_ui():
   </script>
   <script>
     var SESSION_ID = "{{ session_id }}";
+    // The strip used to be inert decoration. These tabs now drive a real
+    // server-side view: artist | album | track.
+    var CURRENT_VIEW = 'album';
+    function setActiveTab(view) {
+      CURRENT_VIEW = view;
+      var ids = {artist: 'tabArtists', album: 'tabAlbums', track: 'tabTracks'};
+      for (var k in ids) {
+        var el = document.getElementById(ids[k]);
+        if (!el) { continue; }
+        var cls = 'link filter-tab';
+        if (k === view) { cls += ' filter-active'; }
+        el.className = cls;
+      }
+    }
+    function switchView(view) {
+      setActiveTab(view);
+      doSearch();
+    }
     function doSearch() {
       var query = document.getElementById('sq').value.trim();
       if (!query) return;
       var resultsDiv = document.getElementById('results_area');
       resultsDiv.innerHTML = '<div class="empty-msg">Searching Apple Music &amp; MusicBrainz...</div>';
       var xhr = new XMLHttpRequest();
-      xhr.open('GET', '/api_search?q=' + encodeURIComponent(query), true);
+      xhr.open('GET', '/api_search?q=' + encodeURIComponent(query) + '&view=' + CURRENT_VIEW, true);
       xhr.onreadystatechange = function() {
         if (xhr.readyState == 4) {
           resultsDiv.innerHTML = xhr.responseText;
@@ -1490,12 +1661,12 @@ def unified_ui():
                            + escHtml(query) + '&quot;.';
         }
       }
-      var aEl = document.getElementById('cntAlbums');
-      var tEl = document.getElementById('cntTracks');
-      var rEl = document.getElementById('cntArtists');
-      if (aEl) { aEl.innerHTML = 'Albums' + (albums === null ? '' : ' (' + groupDigits(albums) + ')'); }
+      var aEl = document.getElementById('tabArtists');
+      var tEl = document.getElementById('tabTracks');
+      var rEl = document.getElementById('tabAlbums');
+      if (aEl) { aEl.innerHTML = 'Artists' + (artists === null ? '' : ' (' + groupDigits(artists) + ')'); }
       if (tEl) { tEl.innerHTML = 'Tracks' + (tracks === null ? '' : ' (' + groupDigits(tracks) + ')'); }
-      if (rEl) { rEl.innerHTML = 'Artists' + (artists === null ? '' : ' (' + groupDigits(artists) + ')'); }
+      if (rEl) { rEl.innerHTML = 'Albums' + (albums === null ? '' : ' (' + groupDigits(albums) + ')'); }
     }
     // The in-field 'X' in the authentic dialog wipes the query and the list.
     function clearSearch() {
