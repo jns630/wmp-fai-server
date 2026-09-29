@@ -256,16 +256,42 @@ For library flows the XML is *retargeted*: `WMCollectionID`, `WMCollectionGroupI
 about, so the document describes the collection WMP is tracking.
 
 > **Never truthiness-test a COM member.** Inside the WMP dialog, host objects
+> report `typeof` as `"unknown"` and evaluate falsy, so a guard like
+> `if (window.external.WriteNamesEx)` silently skips the call. Invoke them
+> directly inside a `try`/`catch`.
+
 ### Keeping the dialog responsive
 
-WMP's dialog host is single-threaded. Two mistakes reliably hang `wmplayer`:
+WMP's dialog host is single-threaded. Three mistakes reliably hang `wmplayer`:
 
 - **Synchronous XHR.** Staging and beacon requests are all `async` (third argument
   `true`). A sync request wedges the UI thread and the dialog sits on
   "Applying…" forever.
+- **A timer before the redirect.** The navigation to `/done` must happen in the
+  *same tick* as the write. Routing it through `setTimeout` looks harmless and is
+  not: while the host is busy applying the write it never services the timer.
+  A real rip of *Sun Kil Moon – Tiny Cities* sat on "Applying…" for **2m25s**
+  after a write that had already succeeded —
+
+  ```text
+  12:37:41  [CLIENT] {"page":"finish","write":"WriteNamesEx-cdid-ok","applied":true}
+  12:40:06  [REQ] GET /done          <-- 2m25s later
+  ```
+
+  The Finish button is already disabled at that point, so the user is trapped
+  with no way out. `leaveDialog()` therefore navigates inline, and if the
+  navigation itself throws it re-enables the button and relabels it *Close*
+  rather than leaving a dead control on screen.
 - **Duplicate COM teardown.** Firing `ReturnToMainTask` twice — e.g. from a timer
   *and* a click — can deadlock the host. The completion page uses a single-shot
   `CLOSING` guard instead of a timer.
+
+Because that redirect is immediate, the in-flight beacon can be cancelled by the
+navigation it triggers. The confirm page therefore also stashes its diagnostic in
+`sessionStorage` under `fai_diag`, and `/done` replays it once on load
+(`replayed_from: "sessionStorage"`). The write outcome is the only record of which
+COM path ran — it is what identified the stall above — so a cancelled beacon must
+not be able to lose it.
 
 The dialog also installs `window.onerror`, which beacons failures to
 `/client_error` so JS errors are visible in `fai_server.log` rather than lost in a

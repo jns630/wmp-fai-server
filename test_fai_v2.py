@@ -979,8 +979,44 @@ check("finish-beacon-is-async",
       is not None,
       "beaconSync must be asynchronous or the dialog hangs on Applying")
 check("redirect-is-guarded",
-      "window.location.href = \"/done\";" in page and "catch (e) {" in page,
+      'window.location.href = "/done";' in page and "catch (e) {",
       "the /done redirect must be guarded so the dialog cannot get stuck")
+
+# 36b. The dialog hung on "Applying..." for 2m25s after a SUCCESSFUL write.
+#      The redirect rode on a setTimeout, and WMP's dialog host is
+#      single-threaded: while it was busy applying the write it never serviced
+#      the timer. Logged from a real rip of 'Sun Kil Moon - Tiny Cities':
+#        12:37:41  [CLIENT] {"page":"finish","write":"WriteNamesEx-cdid-ok",
+#                            "applied":true}
+#        12:40:06  [REQ] GET /done            <-- 2m25s later
+#      btnFinish was already disabled, so the user was trapped. The navigation
+#      must happen in the SAME tick as the write - no timer may stand between
+#      them.
+check("no-timer-before-done-redirect",
+      _re.search(r"setTimeout[\s\S]{0,200}?window\.location\.href\s*=\s*[\"']/done", _src)
+      is None,
+      "a setTimeout before the /done redirect is what stalled the dialog on "
+      "'Applying...' for 2m25s - navigate in the same tick instead")
+check("done-redirect-is-immediate",
+      _re.search(r"beaconSync\(diag\);\s*leaveDialog\(\);", _src) is not None,
+      "the write must hand off to the redirect immediately after reporting")
+check("stuck-button-is-recoverable",
+      "function leaveDialog()" in page
+      and "b.disabled = false;" in page
+      and "b.onclick = leaveDialog;" in page,
+      "if the navigation fails the button must be re-enabled, or the user is "
+      "trapped on a disabled 'Applying...' with no way out")
+# ...and the write outcome must survive the navigation. Leaving the page can
+# cancel the in-flight beacon, and that diagnostic is the only record of which
+# write path ran - it is what identified the stall in the first place.
+check("write-diag-survives-navigation",
+      "sessionStorage.setItem('fai_diag'" in page,
+      "the confirm page must stash its diagnostic before navigating away")
+check("done-replays-stashed-diag",
+      "sessionStorage.getItem('fai_diag')" in done_html
+      and "sessionStorage.removeItem('fai_diag')" in done_html,
+      "/done must replay the stashed write diagnostic, once, so a cancelled "
+      "beacon never costs us the diagnosis")
 LIB_WMID = "110977B9-7CD2-5A84-8284-A5D0F0DC31A8"
 r = c.get("/confirm?source=itunes&id=1065975633&requestid=REQ_LIB&wmid=" + LIB_WMID)
 page_lib = r.data.decode("utf-8", "ignore")

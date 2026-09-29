@@ -2684,18 +2684,45 @@ def confirm():
         xhrSync.send();
       } catch(e) {}
 
-      // 4. Report the outcome (non-blocking) before navigating
-      beaconSync(diag);
-
-      // 5. Redirect to confirmation. Guarded so the dialog can never be left
-      //    stuck on "Applying..." even if something above misbehaves.
+      // 4. Hand the diagnostic to /done, then leave in the SAME tick.
+      //
+      // A setTimeout used to drive this redirect, and the log shows precisely
+      // how that fails - a real rip of 'Sun Kil Moon - Tiny Cities':
+      //   12:37:41  [CLIENT] {"page":"finish","write":"WriteNamesEx-cdid-ok",
+      //                      "applied":true}
+      //   12:40:06  [REQ] GET /done          <-- 2m25s later
+      // The write returned and the beacon went out, yet the dialog sat on
+      // "Applying..." the whole time: WMP's dialog host is single-threaded and
+      // was busy applying the write, so it never serviced the timer. By then
+      // btnFinish was disabled and the user had no way out of the dialog at all.
+      //
+      // Navigating in the same tick cannot be delayed by the host. The beacon
+      // alone is not safe to rely on - leaving the page can cancel the
+      // in-flight XHR - so the diagnostic is stashed in sessionStorage and
+      // replayed from /done, which is a different page in the same origin.
       try {
-        setTimeout(function(){
-          window.location.href = "/done";
-        }, 500);
-      } catch (e) {
-        try { window.location.href = "/done"; } catch (x) {}
-      }
+        window.sessionStorage.setItem('fai_diag', JSON.stringify(diag));
+      } catch (e) { /* host policy may refuse storage; the beacon still stands */ }
+      beaconSync(diag);
+      leaveDialog();
+    }
+
+    // Get off the "Applying..." screen. Never leave the user trapped: if the
+    // navigation itself fails the button is handed back rather than staying
+    // permanently disabled with no way forward.
+    function leaveDialog() {
+      try {
+        window.location.href = "/done";
+        return;
+      } catch (e) { /* fall through and recover the button */ }
+      try {
+        var b = document.getElementById('btnFinish');
+        if (b) {
+          b.disabled = false;
+          b.innerHTML = 'Close';
+          b.onclick = leaveDialog;
+        }
+      } catch (e2) {}
     }
 
     window.onload = function() {
@@ -2976,6 +3003,24 @@ def done():
       }
       report(diag);
     }
+    // The confirm page stashes its write diagnostic here before navigating
+    // away. Its own beacon can be cancelled mid-flight by that navigation, and
+    // the write outcome is the single most useful thing in the log - it is what
+    // proved the 2m25s "Applying..." stall. Replay it on load so a cancelled
+    // beacon never costs us the diagnosis. One-shot: remove it immediately so a
+    // later visit to /done cannot re-report a stale write.
+    (function replayStagedDiag() {
+      var raw = '';
+      try { raw = window.sessionStorage.getItem('fai_diag') || ''; } catch (e) { return; }
+      if (!raw) return;
+      try { window.sessionStorage.removeItem('fai_diag'); } catch (e2) {}
+      var d;
+      try { d = JSON.parse(raw); } catch (e3) { return; }
+      if (!d || typeof d !== 'object') return;
+      d.page = 'finish';
+      d.replayed_from = 'sessionStorage';
+      report(d);
+    })();
     // NOTE: no setTimeout-driven ReturnToMainTask here. An automatic COM call
     // from a timer in WMP's dialog host was a deadlock suspect - the player
     // froze (AppHangB1) before ever loading a page. The user closes the dialog
