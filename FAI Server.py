@@ -286,6 +286,20 @@ def _remember_wmid(value):
         return val
     return ""
 
+def _request_names_a_disc():
+    """True when WMP is asking about a specific physical disc.
+
+    WMP re-prompts a disc by appending ?wmid=<collection> to the CD URL, so a
+    delivery request can carry BOTH ?cd= and ?wmid=. The wmid is incidental
+    there: the disc id is the authoritative subject, and the document must keep
+    describing the disc rather than being rewritten onto that collection.
+    """
+    for name in ('toc', 'TOC', 'mdq', 'cd', 'CD'):
+        if raw_query_arg(name).strip():
+            return True
+    return False
+
+
 def _stage_request_xml(xml, request_id="", toc="", wmid="", cd="",
                        claim_wmid=""):
     """Index staged XML by WMP request id / CD TOC / WMID / disc id (bounded FIFO).
@@ -1078,7 +1092,24 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
     # Use the WMID WMP itself supplied when it has one: that is the exact GUID
     # of the library collection being updated, so the document lines up with
     # WMP's own entry. Only generate a GUID when WMP gave us nothing.
-    album_guid = _remember_wmid(wmid) or guid(album_data.get("id", str(uuid.uuid4())))
+    #
+    # BUT a CD RIP MUST NOT BORROW IT. When WMP re-prompts a disc it appends
+    # ?wmid=<the collection it made for this disc last time> to the CD URL, so
+    # the dialog carries both ?cd= and ?wmid=. Stamping that collection id onto
+    # a document written back by disc content id makes WMP treat the write as
+    # metadata for an existing collection rather than a fresh rip, and it then
+    # never fetches the artwork. The correlation is exact across real sessions:
+    #   12:53:23  cd=4  wmid=-        -> [IMAGE] served 26131B  (artwork OK)
+    #   12:54:24  cd=B  wmid=B17CF884 -> no [IMAGE] at all
+    #   13:14:26  cd=B  wmid=B17CF884 -> no [IMAGE] at all
+    # A disc is written by content id, so its document must describe the disc.
+    if cd:
+        album_guid = guid(album_data.get("id") or cd)
+        if wmid:
+            log_line("CDGUID", f"CD flow: ignoring borrowed wmid "
+                               f"{str(wmid)[:8]}.., describing the disc instead")
+    else:
+        album_guid = _remember_wmid(wmid) or guid(album_data.get("id", str(uuid.uuid4())))
     provider = "iTunes" if album_data.get("source") == "itunes" else "MusicBrainz"
     content_ids = content_ids or {}
 
@@ -1347,7 +1378,14 @@ def mdr_post():
                     f"method={request.method} staged={'yes' if staged else 'no'} "
                     f"wmid={wmid_q or '-'}")
     if staged:
-        if wmid_q:
+        # Do NOT retarget a request that names a disc. WMP re-prompts a disc by
+        # appending ?wmid= to the CD URL, and rewriting the document onto that
+        # collection is what stopped the artwork being fetched for a rip:
+        #   13:14:30  /redir/getmdrcdbackground/?...&cd=B+96+...&wmid=B17CF884
+        #              -> serving album='Tiny Cities' (wmid=B17CF884), no [IMAGE]
+        # The disc id is the subject of the request; the wmid is incidental.
+        disc_request = _request_names_a_disc()
+        if wmid_q and not disc_request:
             staged = _retarget_collection_id(staged, wmid_q)
             # Remember this wmid -> document pairing: WMP re-fetches the same
             # collection moments later, and by then LAST_XML may have moved on.
@@ -1357,6 +1395,10 @@ def mdr_post():
             # ask would then be able to claim this same document, so a second
             # album would be served the first one's tags.
             _stage_request_xml(staged, wmid=wmid_q, claim_wmid=wmid_q)
+        elif wmid_q and disc_request:
+            log_line("MDR", "request names a disc; keeping the disc's own "
+                            "collection id rather than retargeting to "
+                            f"{wmid_q[:8]}..")
         # Log which album WMP is actually being served, so a mismatch between
         # the dialog selection and what WMP applied is visible in the log.
         m = re.search(r"<albumTitle>([^<]*)</albumTitle>", staged)

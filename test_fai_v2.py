@@ -1037,6 +1037,59 @@ check("delivery-preserves-an-existing-claim",
       "re-staging on delivery must preserve the claim, or the next collection "
       "to ask can claim a document that already belongs to another album")
 
+# 39. A CD RIP MUST NOT BORROW A COLLECTION ID. When WMP re-prompts a disc it
+#     appends ?wmid=<collection> to the CD URL, so the dialog carries both ?cd=
+#     and ?wmid=. Stamping that collection onto a document written back by disc
+#     content id made WMP treat the write as metadata for an existing
+#     collection, and it then never fetched the artwork. The correlation is
+#     exact across real sessions:
+#       12:53:23  cd=4  wmid=-         -> [IMAGE] served 26131B   (artwork OK)
+#       12:54:24  cd=B  wmid=B17CF884  -> no [IMAGE] at all
+#       13:14:26  cd=B  wmid=B17CF884  -> no [IMAGE] at all
+check("cd-flow-ignores-a-borrowed-wmid",
+      "if cd:" in _src and "CD flow: ignoring borrowed wmid" in _src,
+      "a CD document must describe the disc, not borrow a collection id - "
+      "borrowing one is what stopped WMP fetching the artwork for a rip")
+# ...and the delivery path must not put it straight back.
+check("disc-request-is-not-retargeted",
+      "disc_request = _request_names_a_disc()" in _src
+      and "if wmid_q and not disc_request:" in _src,
+      "a request naming a disc must not be retargeted onto the collection WMP "
+      "appended to the CD URL, or the borrowed id returns at delivery time")
+
+_cdxml = fai.build_wmp_xml(dict(album, title="Rip Album"), cd="AA+BB+CC",
+                           wmid="B17CF884-35B2-5D0B-B819-ED648F592A2B")
+check("cd-document-does-not-carry-the-borrowed-collection",
+      "B17CF884" not in _cdxml,
+      f"a CD document must not contain the borrowed wmid: {_cdxml[:300]!r}")
+check("cd-document-still-describes-the-album",
+      "Rip Album" in _cdxml and "<WMCollectionID>" in _cdxml,
+      "the CD document must still name the album and carry a collection id")
+# The library path is unchanged - there the wmid is the whole point.
+_libxml = fai.build_wmp_xml(dict(album, title="Lib Album"),
+                            wmid="B17CF884-35B2-5D0B-B819-ED648F592A2B")
+check("library-document-still-uses-the-wmid",
+      "B17CF884" in _libxml,
+      "a library update must still be stamped with the collection it updates")
+# A CD-URL request carrying a wmid must come back un-retargeted.
+fai.STAGED_REQUESTS.clear()
+fai.STAGED_AT.clear()
+fai.FRESH_WRITES.clear()
+fai.PENDING_WRITE.update({"xml": "", "at": 0.0, "wmid": ""})
+c.post("/store_staged_xml", data=json.dumps(
+    {"album": dict(album, title="Rip Album"),
+     "selected_tracks": [album["tracks"][0]],
+     "request_id": "", "session_id": "S", "toc": "",
+     "cd": "AA+BB+CC", "wmid": "B17CF884-35B2-5D0B-B819-ED648F592A2B",
+     "wmid_auth": "B17CF884-35B2-5D0B-B819-ED648F592A2B"}),
+    content_type="application/json")
+_served = c.get("/cdinfo/GetMDRCD.aspx?locale=409&CD=AA+BB+CC"
+                "&wmid=B17CF884-35B2-5D0B-B819-ED648F592A2B"
+                ).data.decode("utf-8", "ignore")
+check("disc-delivery-is-not-retargeted",
+      "Rip Album" in _served and "B17CF884" not in _served,
+      f"a disc delivery must stay stamped for the disc, got {_served[:260]!r}")
+
 # 35. Aero restyle must be CSS-only: no CSS3 without an IE7 fallback, and
 #     none of the working dialog logic may be disturbed.
 ui_html = c.get("/FAI/ui?artist=beatles&album=abbey+road").data.decode("utf-8", "ignore")
