@@ -50,3 +50,11 @@ local_settings.py
 _m.txt
 _msg.txt
 _mb.txt
+
+# Local WIP / backups. LIBRARY-WRITE-WIP.txt holds the unverified library-write
+# work that is deliberately NOT committed - see the commit message. These must
+# never be staged, and the parked file documents a known-broken write path, so
+# it would be wrong to publish it alongside the code it belongs to.
+LIBRARY-WRITE-WIP.txt
+all-work-backup.patch
+*.bak

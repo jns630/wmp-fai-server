@@ -2504,6 +2504,169 @@ check("two-way-interleave-unchanged",
       == ["itunes", "musicbrainz"],
       "the original two-provider contract must be byte-identical")
 
+# 51. A CD RIP told the user "No disc in the drive" while a disc was in it.
+#     A rip arrives with a TOC but NO requestid, so GetMDQByRequestID() cannot
+#     be asked, 'mdq' is empty BY CONSTRUCTION, and the panel fell through to
+#     its empty branch - which claimed an empty drive. From a real session
+#     (fai_server.log, 18:33:31): flow='disc', a 15-track TOC in the URL,
+#     has_request_id=false, mdq_len=0. The message was false precisely when
+#     the user was searching for the disc in front of them.
+#
+#     _disc above carries a requestid, which is NOT the failing shape. This
+#     reproduces the real one: a TOC and nothing else.
+_rip_no_rid = c.get("/FAI/ui?cd=A+96+362E+85B3+BC05").data.decode(
+    "utf-8", "ignore")
+check("disc-rip-without-requestid-is-still-a-disc-flow",
+      'var SEARCH_FLOW = "disc";' in _rip_no_rid,
+      "a TOC with no requestid is the real rip shape and must classify as disc")
+_disc_branch = ""
+_i = _rip_no_rid.find("SEARCH_FLOW === 'disc'")
+if _i >= 0:
+    # Scope to the disc branch ALONE. A fixed-width window would run past the
+    # 'else' and pick up the empty-drive string that legitimately follows it -
+    # that string is correct for the unknown flow and must stay.
+    _end = _rip_no_rid.find("} else {", _i)
+    _disc_branch = _rip_no_rid[_i:_end] if _end > _i else _rip_no_rid[_i:_i + 200]
+check("disc-rip-message-is-accurate",
+      "no stored tags yet" in _disc_branch,
+      f"a disc rip has no stored tags; say that rather than claiming no disc: "
+      f"{_disc_branch[:140]!r}")
+check("disc-rip-does-not-claim-an-empty-drive",
+      "No disc in the drive" not in _disc_branch,
+      "a rip must never be told the drive is empty when it is not")
+# The empty-drive claim must remain reachable for the flow that really has no
+# disc - removing it would be as wrong as always showing it.
+check("empty-drive-message-still-exists-for-the-unknown-flow",
+      "No disc in the drive" in _bare,
+      "genuinely no disc must still be reported as such")
+check("server-renders-a-disc-flow-source-line",
+      "flow == 'disc'" in _src,
+      "the server must render a distinct initial source line for a disc flow")
+# A library update is the case where WMP really did withhold the tags; that
+# message must not be reused for a rip.
+check("library-and-disc-messages-differ",
+      "did not report the current tags" in _lib
+      and "no stored tags yet" in _rip_no_rid,
+      "a library update and a fresh rip are different situations and must "
+      "not share one message")
+
+# 52. 'Existing Information' said "No existing information" about a disc that
+#     was sitting in the drive. WMP sends a TOC with the rip, and the TOC is a
+#     property of the PHYSICAL disc: it yields the track count and the running
+#     time of every track. Verified against the Course of Nature CD visible
+#     behind the dialog in the user's screenshot - all ten track lengths match
+#     what WMP shows (3:03 4:31 3:05 3:44 3:11 3:47 4:40 3:51 3:17 4:41).
+_RIP_TOC = "A+96+362E+85B3+BC05+FDB4+135B5+17844+1CA5D+20E1C+247F8+29A6F"
+_WMP_LEN = ["3:03", "4:31", "3:05", "3:44", "3:11", "3:47", "4:40", "3:51",
+            "3:17", "4:41"]
+_d = fai.parse_wmp_toc(_RIP_TOC)
+check("toc-parses-the-real-disc",
+      len(_d) == 10,
+      f"the Course of Nature disc has 10 audio tracks, got {len(_d)}")
+check("toc-durations-match-wmp-exactly",
+      [fai.format_duration(x) for x in _d] == _WMP_LEN,
+      f"TOC-derived lengths must agree with what WMP displays: "
+      f"{[fai.format_duration(x) for x in _d]} vs {_WMP_LEN}")
+check("toc-reports-a-total-running-time",
+      fai.format_duration(sum(_d)) == "37:50",
+      f"total: {fai.format_duration(sum(_d))} (WMP's own per-track times sum to "
+      f"38:50 only if the minute carry is added wrongly - the tracks are "
+      f"183+271+185+224+191+227+280+231+197+281 = 2270s = 37:50)")
+# A malformed TOC must not break the dialog.
+check("toc-survives-garbage",
+      fai.parse_wmp_toc("") == [] and fai.parse_wmp_toc(None) == []
+      and fai.parse_wmp_toc("garbage") == [] and fai.parse_wmp_toc("A+96") == [],
+      "a malformed TOC must yield nothing, never an exception")
+check("duration-formatting",
+      fai.format_duration(183000) == "3:03"
+      and fai.format_duration(61000) == "1:01"
+      and fai.format_duration(0) == ""
+      and fai.format_duration(3725000) == "1:02:05",
+      "M:SS under an hour, H:MM:SS over it, empty for zero")
+# The panel must use the TOC rather than claiming there is nothing to report.
+# Assert on the RENDERED panel, not the whole page: the JS fallback string
+# ships in every page regardless, because the client cannot know a TOC is
+# unreadable until the server has already told it.
+_toc_page = c.get("/FAI/ui?cd=" + _RIP_TOC).data.decode("utf-8", "ignore")
+
+
+def _panel(html):
+    out = {}
+    for _m in re.finditer(
+            r'id="existing(Title|Artist|Sub|Source)"[^>]*>(.*?)</div>', html, re.S):
+        out[_m.group(1)] = _m.group(2).strip()
+    return out
+
+
+_p = _panel(_toc_page)
+check("panel-reports-the-disc-from-its-toc",
+      "10 audio tracks" in _p.get("Title", "") and "37:50" in _p.get("Title", ""),
+      f"the panel must state the track count and length read from the TOC: "
+      f"{_p.get('Title')!r}")
+check("panel-does-not-claim-no-information",
+      "No existing information" not in _p.get("Title", ""),
+      f"a disc that yields 10 track lengths is not 'no existing information': "
+      f"{_p.get('Title')!r}")
+check("panel-explains-what-is-missing",
+      _p.get("Artist") == "Audio CD in the drive"
+      and "No album or artist tags" in _p.get("Sub", ""),
+      f"the panel must say what it does and does not know: {_p}")
+check("panel-still-handles-a-disc-with-no-toc",
+      "Disc in the drive" in _panel(
+          c.get("/FAI/ui?cd=garbage").data.decode("utf-8", "ignore")).get("Title", ""),
+      "an unreadable TOC must still name the disc rather than leaving the panel "
+      "stuck on 'Reading current information...', which never resolves")
+check("toc-summary-is-passed-to-the-client",
+      re.search(r'var DISC_SUMMARY = "[^"]*10 audio tracks[^"]*"', _toc_page)
+      is not None,
+      "the client re-renders this panel on load and must not blank it again")
+# A disc WITH tags must keep showing the tags, not the TOC summary.
+_tagged = c.get("/FAI/ui?cd=" + _RIP_TOC + "&artist=A&album=B&track=C").data.decode(
+    "utf-8", "ignore")
+check("toc-summary-never-overrides-real-tags",
+      "Currently stored by Windows Media Player." in _tagged,
+      "when WMP supplies tags they win; the TOC is only a fallback")
+
+# 53. The Finish & Apply path threw "applied is not defined" - and it was
+#     INVISIBLE to every test here, because the ReferenceError only surfaced in
+#     the FAI dialog host, where window.onerror reports it. Caught from a real
+#     session (fai_server.log): {"page":"onerror","msg":"'applied' is undefined",
+#     "line":888}. Present in b4c920e, before any of this work.
+#
+#     Cause: 'applied' was a `var` local to finishSync(), but applyMetadata() is
+#     a SEPARATE top-level function. It read a name that did not exist in its
+#     own scope, so every write path died with a ReferenceError BEFORE calling
+#     WMP - which is why a finish could silently do nothing. The flag now lives
+#     on `diag`, which is already threaded through every call.
+_am = _src.split("function applyMetadata(")[1].split("\n    function ")[0]
+_fs = _src.split("function finishSync(")[1].split("\n    function ")[0]
+check("applied-flag-is-not-function-local",
+      "diag.applied = false;" in _fs,
+      "'applied' is shared between finishSync() and the top-level "
+      "applyMetadata(); a function-local var is invisible to it")
+check("apply-metadata-has-no-bare-applied-read",
+      "var applied = !!(diag && diag.applied);" in _am,
+      "applyMetadata must read the shared flag off diag, not an undeclared name")
+check("apply-metadata-writes-back-to-diag",
+      _am.count("setApplied(true);") >= 4
+      and "if (diag) diag.applied = v;" in _am,
+      "each successful write must set the shared flag so later fallbacks are "
+      "skipped and the button state is truthful")
+# The decisive guard: applyMetadata must not reference `applied` before it is
+# defined in its own scope. This is the exact ReferenceError, statically.
+_first_read = min([i for i, l in enumerate(_am.split("\n"))
+                   if "if (!applied" in l] or [10 ** 6])
+_decl = min([i for i, l in enumerate(_am.split("\n"))
+             if "var applied =" in l] or [10 ** 6])
+check("applied-is-declared-before-first-use",
+      _decl < _first_read,
+      f"the first `if (!applied)` is at {_first_read} but the declaration is at "
+      f"{_decl}; a use before the declaration is the ReferenceError itself")
+check("mdq-is-never-an-unescaped-global-read",
+      "var mdq = RESOLVED_MDQ || '';" in _am,
+      "applyMetadata must resolve mdq from the shared RESOLVED_MDQ, matching "
+      "the fix for the companion \"'mdq' is undefined\" report")
+
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:

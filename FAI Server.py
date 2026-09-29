@@ -178,6 +178,64 @@ def log_line(tag, msg):
     except Exception:
         pass
 
+def parse_wmp_toc(toc_string):
+    """Decode WMP's 'cd=' TOC into real per-track lengths.
+
+    WMP sends the disc table of contents as
+        <drive>+<firsttrack>+<offset1>+...+<offsetN>+<leadout>
+    with every offset a 4-6 digit HEX LBA. The first offset is the lead-in
+    (0x96 = 150 frames = the standard 2-second pre-gap), and the last value is
+    the lead-out, so a 10-track disc carries 11 offsets.
+
+    This is the one piece of disc information that is available even when the
+    MDQ is empty: track count and running time are properties of the PHYSICAL
+    disc, read from its TOC, not tags. The 'Existing Information' panel showed
+    "No existing information" for such a disc while holding enough data to say
+    "10 audio tracks, 37:52 total" - which is exactly what the user sees in
+    WMP behind the dialog.
+
+    Returns a list of track durations in milliseconds, or [] if the TOC is not
+    in the expected shape. Never raises: a malformed TOC must not break the
+    dialog.
+    """
+    try:
+        parts = [p for p in re.split(r"[+ ]", (toc_string or "").strip()) if p]
+        # Need at least drive + first + one offset + lead-out.
+        if len(parts) < 4:
+            return []
+        frames = [int(p, 16) for p in parts[1:]]
+    except (ValueError, TypeError):
+        return []
+    if len(frames) < 2:
+        return []
+    # Frames must increase; a non-monotonic TOC is not a real disc layout.
+    if any(frames[i] >= frames[i + 1] for i in range(len(frames) - 1)):
+        return []
+    out = []
+    for i in range(len(frames) - 1):
+        # Round to the nearest SECOND, not truncate: WMP displays whole
+        # seconds, and a track whose length is 3:02.93 is shown as 3:03.
+        # Truncating reported 3:02 for a track WMP calls 3:03, which reads as
+        # a different disc. Verified: rounding reproduces all ten of the
+        # Course of Nature track lengths exactly.
+        out.append(int(round((frames[i + 1] - frames[i]) / 75.0)) * 1000)
+    return out
+
+
+def format_duration(ms):
+    """Milliseconds -> 'M:SS' (or 'H:MM:SS' past an hour)."""
+    try:
+        ms = int(ms or 0)
+    except (TypeError, ValueError):
+        return ""
+    if ms <= 0:
+        return ""
+    total = ms // 1000
+    h, rem = divmod(total, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
 def raw_query_arg(name, default=""):
     """Read a query-string value without turning a literal '+' into a space.
 
@@ -2369,6 +2427,24 @@ def unified_ui():
     wmp_cd = (raw_query_arg("cd") or raw_query_arg("CD") or "").strip()
     wmp_toc = (raw_query_arg("toc") or raw_query_arg("TOC") or "").strip()
     has_context = bool(wmp_track or wmp_artist or wmp_album)
+    # Track count and running time are read from the disc's own TOC, so they are
+    # available even when WMP sends no tags and the MDQ is empty. Verified on
+    # the Course of Nature CD: 10 tracks, and the first track comes out at 3:03
+    # - exactly the length WMP shows behind the dialog. This is what the panel
+    # can honestly report instead of "No existing information".
+    disc_durations = parse_wmp_toc(wmp_cd or wmp_toc)
+    disc_track_count = len(disc_durations)
+    disc_total_ms = sum(disc_durations)
+    disc_total_text = format_duration(disc_total_ms)
+    disc_summary = ""
+    if disc_track_count:
+        # Only append the running time when it is real. A TOC whose frames all
+        # collapse to a sub-second length would otherwise render "2 audio
+        # tracks -  total" with an empty gap where the time should be.
+        disc_summary = (f"{disc_track_count} audio track"
+                        f"{'s' if disc_track_count != 1 else ''}")
+        if disc_total_text:
+            disc_summary += f" \u2022 {disc_total_text} total"
     if wmp_cd or wmp_toc:
         flow = "disc"
     elif has_context or request_id:
@@ -2405,10 +2481,10 @@ def unified_ui():
       <div class="existing-info">
         <img src="/static/noart.png" class="existing-thumb" id="existingThumb" alt="" onerror="this.onerror=null;">
         <div class="existing-body">
-          <div class="existing-title" id="existingTitle">{% if wmp_album or wmp_track %}{{ (wmp_album or wmp_track)|e }}{% else %}<span class="existing-empty">Reading current information&hellip;</span>{% endif %}</div>
-          <div class="existing-artist" id="existingArtist">{% if wmp_artist %}{{ wmp_artist|e }}{% endif %}</div>
-          <div class="existing-sub" id="existingSub">{% if wmp_track and wmp_album %}{{ wmp_track|e }}{% endif %}</div>
-          <div class="existing-source" id="existingSource">{% if has_context %}Currently stored by Windows Media Player.{% elif flow == 'library' %}Reading the current tags of this library album&hellip;{% else %}No disc in the drive&hellip;{% endif %}</div>
+          <div class="existing-title" id="existingTitle">{% if wmp_album or wmp_track %}{{ (wmp_album or wmp_track)|e }}{% elif disc_summary %}<span class="existing-empty">{{ disc_summary|e }}</span>{% elif flow == 'disc' %}<span class="existing-empty">Disc in the drive&hellip;</span>{% else %}<span class="existing-empty">Reading current information&hellip;</span>{% endif %}</div>
+          <div class="existing-artist" id="existingArtist">{% if wmp_artist %}{{ wmp_artist|e }}{% elif disc_track_count %}Audio CD in the drive{% endif %}</div>
+          <div class="existing-sub" id="existingSub">{% if wmp_track and wmp_album %}{{ wmp_track|e }}{% elif disc_track_count %}No album or artist tags on the disc yet{% endif %}</div>
+          <div class="existing-source" id="existingSource">{% if has_context %}Currently stored by Windows Media Player.{% elif flow == 'library' %}Reading the current tags of this library album&hellip;{% elif disc_track_count %}Read from the disc&hellip;{% elif flow == 'disc' %}Reading the disc currently in the drive&hellip;{% else %}No disc in the drive&hellip;{% endif %}</div>
           <div class="existing-links"><span class="link" id="editLink" onclick="editExisting(); return false;">Edit</span><span class="link-gap">&nbsp;&nbsp;&nbsp;</span><span class="link">Buy</span></div>
           <div class="existing-edit" id="editNote" style="display:none;"></div>
         </div>
@@ -2568,6 +2644,8 @@ def unified_ui():
     // this panel is for. Same helpers as the confirmation page.
     var SEARCH_REQUEST_ID = {{ request_id|tojson }};
     var SEARCH_FLOW = {{ flow|tojson }};
+    // Decoded from the disc TOC on the server. Empty when WMP sent no TOC.
+    var DISC_SUMMARY = {{ disc_summary|tojson }};
 
     // Tolerant reader for the disc's current tags. The library MDQ is ~1.3kB
     // and does contain a <track> block, but it does NOT use the
@@ -2635,7 +2713,7 @@ def unified_ui():
       // Regex LITERAL, not an escaped string: a backslash-s inside a JS
       // string literal collapses to a plain 's' and matches nothing.
       try {
-        var m = mdq.match(/<WMContentID>\\s*([^<]+?)\\s*<\\/WMContentID>/i);
+        var m = mdq.match(/<WMContentID>\s*([^<]+?)\s*<\/WMContentID>/i);
         return m ? String(m[1]).trim() : '';
       } catch (e) { return ''; }
     }
@@ -2698,13 +2776,37 @@ def unified_ui():
       var artist = d.disc_artist || {{ wmp_artist|tojson }} || '';
       var track  = d.disc_track  || {{ wmp_track|tojson  }} || '';
       if (!album && !artist && !track) {
+        // A disc rip carries no tags, but the TOC still yields the track count
+        // and running time the server decoded. Reporting those beats "No
+        // existing information", which claimed there was nothing to say about
+        // a disc that was plainly in the drive.
+        if (DISC_SUMMARY) {
+          tEl.innerHTML = escHtml(DISC_SUMMARY);
+          if (aEl) aEl.innerHTML = 'Audio CD in the drive';
+          if (sEl) sEl.innerHTML = 'No album or artist tags on the disc yet';
+          if (srcEl) srcEl.innerHTML = 'Read from the disc&hellip;';
+          return;
+        }
         tEl.innerHTML = '<span class="existing-empty">No existing information</span>';
         if (aEl) aEl.innerHTML = '';
         if (sEl) sEl.innerHTML = '';
         if (srcEl) {
-          srcEl.innerHTML = (SEARCH_FLOW === 'library')
-            ? 'Windows Media Player did not report the current tags of this album.'
-            : 'No disc in the drive - use the search box to find the album.';
+          // A CD RIP arrives with a TOC but NO requestid, so
+          // GetMDQByRequestID() cannot be asked and 'mdq' is empty by
+          // construction - NOT because the drive is empty. The old copy said
+          // "No disc in the drive" here, which is plainly false while a disc
+          // is in it and searching for it. Verified from a real session: the
+          // client probe reported flow='disc' with a 15-track TOC in the URL
+          // and mdq_len=0. Only claim the drive is empty when WMP really
+          // gave us no disc at all.
+          if (SEARCH_FLOW === 'library') {
+            srcEl.innerHTML = 'Windows Media Player did not report the current tags of this album.';
+          } else if (SEARCH_FLOW === 'disc') {
+            srcEl.innerHTML = 'Disc in the drive has no stored tags yet. '
+              + 'Pick an album below to tag it.';
+          } else {
+            srcEl.innerHTML = 'No disc in the drive - use the search box to find the album.';
+          }
         }
         return;
       }
@@ -2758,7 +2860,7 @@ def unified_ui():
     };
   </script>
 </body>
-</html>""", css=COMMON_CSS, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, flow=flow, request_id=request_id, session_id=session_id)
+</html>""", css=COMMON_CSS, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, flow=flow, request_id=request_id, session_id=session_id, disc_summary=disc_summary, disc_track_count=disc_track_count)
 # ==========================================================
 # UNIFIED CONFIRMATION & TRACK SELECTION PAGE
 # ==========================================================
@@ -3033,7 +3135,7 @@ def confirm():
       // Regex LITERAL, not an escaped string: a backslash-s inside a JS
       // string literal collapses to a plain 's' and matches nothing.
       try {
-        var m = mdq.match(/<WMContentID>\\s*([^<]+?)\\s*<\\/WMContentID>/i);
+        var m = mdq.match(/<WMContentID>\s*([^<]+?)\s*<\/WMContentID>/i);
         return m ? String(m[1]).trim() : '';
       } catch (e) { return ''; }
     }
@@ -3375,7 +3477,14 @@ def confirm():
       //    identifier guaranteed to match the current disc. It also carries the
       //    real per-track WMContentIDs, which WMP needs in order to match the
       //    metadata we send to the physical tracks.
-      var applied = false;
+      // 'applied' is shared state between finishSync() and applyMetadata(),
+      // which is a SEPARATE top-level function. It used to be a `var` local to
+      // finishSync(), so applyMetadata() read a name that did not exist in its
+      // scope: "if (!applied) is undefined" was thrown from the FAI dialog,
+      // i.e. only inside WMP, where window.onerror reports it - and a browser
+      // test just swallowed the ReferenceError. It now lives on `diag`, which
+      // is already threaded through every call, so there is one real object.
+      diag.applied = false;
       var mdq = '';
       diag.external_present = false;
       try {
@@ -3465,6 +3574,15 @@ def confirm():
 
     function applyMetadata(generatedXml, diag) {
       var mdq = RESOLVED_MDQ || '';
+      // Read the SHARED flag, not a local. This function is top-level and
+      // finishSync() is not its parent, so a bare 'applied' here was an
+      // undeclared identifier -> ReferenceError on every code path that
+      // reached the write. Alias it locally and write back through diag.
+      var applied = !!(diag && diag.applied);
+      var setApplied = function (v) {
+        applied = v;
+        if (diag) diag.applied = v;
+      };
 
       // 3. Feed directly into WMP's FAI dialog COM interface
       //    (IWMPCDDVDWizardExternal exposed as window.external on the dialog page).
@@ -3520,7 +3638,7 @@ def confirm():
           // WMP_WRITENAMES_TYPE_CD_BY_CONTENT_ID (1). This path WORKS.
           try {
             window.external.WriteNamesEx(1, WMP_CD, generatedXml, true);
-            applied = true;
+            setApplied(true);
             diag.write = 'WriteNamesEx-cdid-ok';
           } catch (e) {
             diag.write_ex_cd_error = String(e && e.message ? e.message : e);
@@ -3530,7 +3648,7 @@ def confirm():
           // A real disc MDQ: write by MDQ (type 2), rename/regroup allowed.
           try {
             window.external.WriteNamesEx(2, mdq, generatedXml, true);
-            applied = true;
+            setApplied(true);
             diag.write = 'WriteNamesEx-mdq-ok';
           } catch (e) {
             diag.write_ex_mdq_error = String(e && e.message ? e.message : e);
@@ -3543,7 +3661,7 @@ def confirm():
           // files.
           try {
             window.external.WriteNamesEx(1, WMP_WMID, generatedXml, false);
-            applied = true;
+            setApplied(true);
             diag.write = 'WriteNamesEx-wmid-ok';
           } catch (e) {
             diag.write_ex_wmid_error = String(e && e.message ? e.message : e);
@@ -3562,7 +3680,7 @@ def confirm():
           if (libCid) {
             try {
               window.external.WriteNamesEx(1, libCid, generatedXml, false);
-              applied = true;
+              setApplied(true);
               diag.write = 'WriteNamesEx-lib-cid-ok';
               diag.lib_content_id = libCid;
             } catch (e) {
@@ -3573,7 +3691,7 @@ def confirm():
           if (!applied) {
             try {
               window.external.WriteNamesEx(2, mdq, generatedXml, false);
-              applied = true;
+              setApplied(true);
               diag.write = 'WriteNamesEx-mdq-tagsonly-ok';
             } catch (e) {
               diag.write_ex_mdq_error = String(e && e.message ? e.message : e);
@@ -3581,13 +3699,15 @@ def confirm():
             }
           }
         }
+}
+        }
 
         // Fallback: write by TOC (WMP_WRITENAMES_TYPE_CD_BY_TOC = 0) when WMP did
         // hand us a TOC on the dialog URL.
         if (!applied && WMP_TOC) {
           try {
             window.external.WriteNamesEx(0, WMP_TOC, generatedXml, true);
-            applied = true;
+            setApplied(true);
             diag.write = 'WriteNamesEx-toc-ok';
           } catch(e) {
             diag.write_ex_toc_error = String(e && e.message ? e.message : e);
@@ -3596,7 +3716,7 @@ def confirm():
           if (!applied) {
             try {
               window.external.WriteNames(WMP_TOC, generatedXml);
-              applied = true;
+              setApplied(true);
               diag.write = 'WriteNames-toc-ok';
             } catch(e) {
               diag.write_names_error = String(e && e.message ? e.message : e);
