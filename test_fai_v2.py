@@ -1715,6 +1715,101 @@ check("row-id-is-escaped",
       "rid = esc(item.get(\"id\"))" in _src,
       "the release id goes into onclick='...', so it must be HTML-escaped")
 
+# 41. 'Existing Information' must report what WMP CURRENTLY holds, not the album
+#     that is about to be applied. It used to render details.title / artist /
+#     year / genre, so the incoming tags looked like tags already on the disc -
+#     which is the opposite of what the panel is for, and misleading precisely
+#     when a fresh rip genuinely has nothing stored yet.
+_ctx = c.get("/confirm?source=itunes&id=1065975633&requestid=REQ_EXIST"
+             "&artist=Some+Artist&album=Old+Album&track=Track+One"
+             ).data.decode("utf-8", "ignore")
+check("existing-panel-shows-current-not-matched",
+      'id="existingTitle">Old Album<' in _ctx
+      and 'id="existingArtist">Some Artist<' in _ctx
+      and "The Wall" not in _ctx.split('id="existingTitle"')[1][:200],
+      "the panel must show the state WMP holds, not the matched album")
+check("existing-panel-says-where-it-came-from",
+      'id="existingSource"' in _ctx and "Currently stored by Windows Media Player." in _ctx,
+      "the panel must state its source so current and incoming are not conflated")
+check("matched-album-is-labelled-separately",
+      "is what <b>Finish &amp; Apply</b> will write." in _ctx,
+      "the album that will be applied must be named outside the existing panel")
+# ...and with no WMP context at all it must say so rather than inventing a state.
+_ctx0 = c.get("/confirm?source=itunes&id=1065975633&requestid=REQ_EXIST0"
+              ).data.decode("utf-8", "ignore")
+check("existing-panel-has-an-empty-state",
+      'class="existing-empty"' in _ctx0 or "No existing information" in _src,
+      "a dialog with no disc context must show an explicit empty state")
+check("existing-renderer-handles-empty",
+      "No existing information" in _src and "renderExistingInfo" in _src,
+      "renderExistingInfo() must state when nothing is stored")
+check("existing-prefers-disc-over-query-context",
+      "d.disc_album  || WMP_CTX_ALBUM" in _src,
+      "the MDQ describes the real disc and must outrank the query arguments")
+# The context reaches the page, JSON-quoted so it cannot break out of the script.
+check("wmp-context-is-json-quoted",
+      "var WMP_CTX_ALBUM  = {{ wmp_album|tojson }};" in _src
+      and 'var WMP_CTX_ALBUM  = "Old Album";' in _ctx,
+      "WMP-supplied album/artist/track must be embedded with tojson, not raw")
+# The renderer is actually invoked, with and without an MDQ.
+check("existing-info-renders-on-load",
+      "renderExistingInfo(CACHED_MDQ);" in _src,
+      "the panel must be populated on load, not left on its server placeholder")
+check("existing-info-escapes-values",
+      "function escHtml(s)" in _src and "escHtml(album || track)" in _src,
+      "disc-supplied strings are written via innerHTML and must be escaped")
+
+# 42. The Edit link was an inert <span> with no handler on both pages. It now
+#     tries WMP's own metadata editor first and falls back to an inline editor.
+for _name, _pg in (("confirm", page), ("ui", ui_html)):
+    check("edit-link-is-wired-%s" % _name,
+          'onclick="editExisting(); return false;">Edit<' in _pg,
+          f"the Edit link on /{_name} must actually do something")
+    check("edit-panel-exists-%s" % _name,
+          'id="existingEdit"' in _pg or 'id="editNote"' in _pg,
+          f"/{_name} needs a target for the editor to open into")
+check("edit-tries-the-host-editor-first",
+      "window.external.EditMetadata()" in _src,
+      "the authentic action is WMP's own metadata editor - try it before ours")
+check("edit-never-truthiness-tests-a-com-member",
+      _re.search(r"if \(window\.external && window\.external\.EditMetadata\)\s*\{"
+                 r"\s*window\.external\.EditMetadata\(\);", _src) is not None,
+      "the COM member must be invoked inside the guarded block, never skipped "
+      "by a falsy host object")
+check("edit-writes-into-the-applied-album",
+      "ALBUM_DETAILS.title = t;" in _src and "ALBUM_DETAILS.artist = a;" in _src,
+      "an edit must change the object POSTed to /store_staged_xml, not just "
+      "what is displayed")
+check("edit-cannot-empty-the-album",
+      "if (!t && !a) {" in _src and "alert(" in _src,
+      "saving with no title and no artist must be refused")
+check("edit-is-reversible",
+      "function closeExistingEdit()" in _src and "onclick=\"closeExistingEdit();\"" in _src,
+      "the inline editor needs a Cancel")
+check("edit-fields-are-escaped",
+      "escHtml(value)" in _src,
+      "album values are interpolated into a value=\"...\" attribute and must "
+      "be escaped")
+# The new styling must survive the IE7 host like everything else.
+for _cls in (".existing-source", ".existing-empty", ".existing-edit",
+             ".edit-input", ".edit-label", ".edit-note"):
+    check("ie7-safe-styling-%s" % _cls.strip("."),
+          _cls in _src and "flex" not in _cls,
+          f"{_cls} must exist in the shared stylesheet")
+check("new-inputs-reset-border-radius",
+      ".edit-input" in _src.split("lt IE 8")[1][:2000],
+      "the IE7 conditional block must reset the new inputs too")
+
+# 43. Nothing above may disturb the write path. The payload is still the same
+#     object, and the editor is display + data only.
+check("write-payload-unchanged-by-edit-feature",
+      "album: ALBUM_DETAILS," in _src and "cd: WMP_CD," in _src
+      and "wmid: WMP_WMID," in _src and "wmid_auth: WMP_WMID_AUTH" in _src,
+      "the staging payload must still carry the same fields as before")
+check("edit-does-not-rewrite-track-rows",
+      "ALL_TRACKS" in _src and "ALL_TRACKS[i].id" in _src,
+      "per-track selection must be untouched by the album editor")
+
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:

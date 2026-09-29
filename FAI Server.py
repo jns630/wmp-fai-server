@@ -1811,6 +1811,19 @@ body { font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 9pt; line-
 .existing-links { margin-top: 5px; font-size: 9pt; }
 /* FAI hyperlink blue, underlined only on hover. */
 .link { color: #0B5AA6; cursor: pointer; text-decoration: none; }
+/* Where the panel's values came from. The panel reports what WMP HOLDS, and
+   the matched album is a different thing entirely - labelling it stops the two
+   being read as the same information. */
+.existing-source { margin-top: 4px; font-size: 8pt; color: #5A6B7B; }
+.existing-empty { font-size: 9pt; color: #5A6B7B; font-style: italic; }
+/* Inline editor behind the Edit link. Floats and plain block layout only - the
+   dialog host is an IE7-era engine and must not be handed flexbox. */
+.existing-edit { margin-top: 8px; padding-top: 8px; border-top: 1px solid #E4E9EF; }
+.edit-field { margin-bottom: 6px; }
+.edit-label { display: block; font-size: 8pt; color: #404A55; margin-bottom: 2px; }
+.edit-input { width: 200px; padding: 2px 4px; font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 9pt; color: #1A1A1A; border: 1px solid #ADADBD; background-color: #FFFFFF; }
+.edit-actions { margin-top: 6px; }
+.edit-note { margin-top: 6px; font-size: 8pt; color: #5A6B7B; }
 .link:hover { text-decoration: underline; }
 .link-gap { color: #0B5AA6; }
 .empty-msg { padding: 18px 8px; font-size: 9pt; color: #7F7F7F; text-align: center; }
@@ -1900,7 +1913,7 @@ body { display: block; height: auto; overflow: auto; }
 .btn[disabled] { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F6F6F6', endColorstr='#E6E6E6', type='0'); }
 .album-item:hover, .track-row:hover { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#DCEAF9', type='0'); }
 .album-item.sel, .track-row.selected { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#E4EFFA', endColorstr='#E4EFFA', type='0'); }
-.btn, .search-input, .search-clear, .album-item, .track-row, .existing-info, .section-label, .filter-row, .results-scroll { border-radius: 0; }
+.btn, .search-input, .search-clear, .album-item, .track-row, .existing-info, .section-label, .filter-row, .results-scroll, .edit-input, .existing-edit { border-radius: 0; }
 .track-row, .album-item, .footer, .main-container, .existing-info, .results-scroll { zoom: 1; }
 <![endif]-->
 """
@@ -1946,7 +1959,8 @@ def unified_ui():
           <div class="existing-title">{{ (wmp_album or wmp_track)|e }}</div>
           {% if wmp_artist %}<div class="existing-artist">{{ wmp_artist|e }}</div>{% endif %}
           {% if wmp_track and wmp_album %}<div class="existing-sub">{{ wmp_track|e }}</div>{% endif %}
-          <div class="existing-links"><span class="link">Edit</span><span class="link-gap">&nbsp;&nbsp;&nbsp;</span><span class="link">Buy</span></div>
+          <div class="existing-links"><span class="link" id="editLink" onclick="editExisting(); return false;">Edit</span><span class="link-gap">&nbsp;&nbsp;&nbsp;</span><span class="link">Buy</span></div>
+          <div class="existing-edit" id="editNote" style="display:none;"></div>
         </div>
       </div>
       {% else %}
@@ -2099,6 +2113,25 @@ def unified_ui():
       if (el.value.replace(/^\\s+|\\s+$/g, '')) {
         doSearch();
       }
+    }
+    // Edit on the search page. There is no matched album here yet, so the
+    // authentic action is WMP's own metadata editor. When the host does not
+    // expose it the link must still say something useful rather than sit
+    // inert - editing happens on the confirmation page, once an album is picked.
+    function editExisting() {
+      try {
+        if (window.external && window.external.EditMetadata) {
+          window.external.EditMetadata();
+          return;
+        }
+      } catch (e) { /* not available in this host - explain instead */ }
+      var note = document.getElementById('editNote');
+      if (!note) return;
+      if (note.style.display !== 'none') { note.style.display = 'none'; return; }
+      note.style.display = 'block';
+      note.innerHTML = '<div class="edit-note">Pick an album from the results '
+        + 'first &mdash; on the next screen you can edit its title, artist, year '
+        + 'and genre before applying.</div>';
     }
     function pick(source, id) {
       var url = "/confirm?source=" + encodeURIComponent(source) + "&id=" + encodeURIComponent(id) + "&" + window.location.search.substring(1);
@@ -2284,14 +2317,17 @@ def confirm():
     <div class="left-pane">
       <div class="section-label">Existing Information</div>
       <div class="existing-info">
-        <img src="{{ details.art_url }}" class="existing-thumb" alt="" onerror="this.src='/static/noart.png';this.onerror=null;">
+        <img src="/static/noart.png" class="existing-thumb" id="existingThumb" alt="" onerror="this.src='/static/noart.png';this.onerror=null;">
         <div class="existing-body">
-          <div class="existing-title">{{ details.title|e }}</div>
-          <div class="existing-artist">{{ details.artist|e }}</div>
-          <div class="existing-sub">{{ details.year|e }} &bull; {{ details.genre|e }}</div>
-          <div class="existing-links"><span class="link">Edit</span><span class="link-gap">&nbsp;&nbsp;&nbsp;</span><span class="link">Buy</span></div>
+          <div class="existing-title" id="existingTitle">{% if wmp_album or wmp_track %}{{ (wmp_album or wmp_track)|e }}{% else %}<span class="existing-empty">Reading current information&hellip;</span>{% endif %}</div>
+          <div class="existing-artist" id="existingArtist">{% if wmp_artist %}{{ wmp_artist|e }}{% endif %}</div>
+          <div class="existing-sub" id="existingSub">{% if wmp_track and wmp_album %}{{ wmp_track|e }}{% endif %}</div>
+          <div class="existing-source" id="existingSource">{% if wmp_album or wmp_artist or wmp_track %}Currently stored by Windows Media Player.{% else %}Checking the disc and your library&hellip;{% endif %}</div>
+          <div class="existing-links"><span class="link" id="editLink" onclick="editExisting(); return false;">Edit</span><span class="link-gap">&nbsp;&nbsp;&nbsp;</span><span class="link">Buy</span></div>
         </div>
+        <div class="existing-edit" id="existingEdit" style="display:none;"></div>
       </div>
+      <div class="existing-source" style="margin-top:6px;">The matched album <b>{{ details.title|e }}</b>{% if details.artist %} by {{ details.artist|e }}{% endif %} is what <b>Finish &amp; Apply</b> will write.</div>
 
       <div class="section-label" style="margin-top:16px;">Tracks to update</div>
       <div style="margin-bottom:8px;">
@@ -2375,6 +2411,140 @@ def confirm():
     function norm(s) {
       return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
     }
+
+    // ---- 'Existing Information': what WMP currently holds -------------------
+    // The panel used to show the MATCHED album, which made the incoming tags
+    // look like tags already on the disc. It now reports the disc/library's
+    // own state, and says so plainly when there is none - which is the common
+    // case for a fresh rip and is exactly what the user needs to know.
+    var WMP_CTX_ALBUM  = {{ wmp_album|tojson }};
+    var WMP_CTX_ARTIST = {{ wmp_artist|tojson }};
+    var WMP_CTX_TRACK  = {{ wmp_track|tojson }};
+
+    function escHtml(s) {
+      return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+
+    function renderExistingInfo(mdq) {
+      var tEl = document.getElementById('existingTitle');
+      if (!tEl) return;
+      var aEl = document.getElementById('existingArtist');
+      var sEl = document.getElementById('existingSub');
+      var srcEl = document.getElementById('existingSource');
+      var img = document.getElementById('existingThumb');
+      var d = parseDiscIdentity(mdq);
+      // The MDQ is the disc as WMP sees it and outranks the query arguments.
+      var album  = d.disc_album  || WMP_CTX_ALBUM  || '';
+      var artist = d.disc_artist || WMP_CTX_ARTIST || '';
+      var track  = d.disc_track  || WMP_CTX_TRACK  || '';
+      if (img) { img.src = '/static/noart.png'; img.onerror = null; }
+      if (!album && !artist && !track) {
+        tEl.innerHTML = '<span class="existing-empty">No existing information</span>';
+        if (aEl) aEl.innerHTML = '';
+        if (sEl) sEl.innerHTML = d.track_count ? (d.track_count + ' untagged track(s)') : '';
+        if (srcEl) srcEl.innerHTML = 'Nothing is stored for this disc yet - every field will be written.';
+        return;
+      }
+      tEl.innerHTML = escHtml(album || track);
+      if (aEl) aEl.innerHTML = artist ? escHtml(artist) : '';
+      if (sEl) {
+        sEl.innerHTML = (album && track) ? escHtml(track)
+                    : (d.track_count ? (d.track_count + ' track(s)') : '');
+      }
+      if (srcEl) {
+        srcEl.innerHTML = d.track_count
+          ? ('Currently on the disc (' + d.track_count + ' track(s)).')
+          : 'Currently stored by Windows Media Player.';
+      }
+    }
+
+    // ---- Edit ---------------------------------------------------------------
+    // Try WMP's own metadata editor first - that is what the authentic dialog
+    // does, and the host exposes it on window.external. Never truthiness-test a
+    // COM member (see the notes further down): call it inside try/catch and
+    // fall back to the inline editor so the link is never dead.
+    function editExisting() {
+      var panel = document.getElementById('existingEdit');
+      try {
+        if (window.external && window.external.EditMetadata) {
+          window.external.EditMetadata();
+          return;
+        }
+      } catch (e) { /* not available in this host - use the inline editor */ }
+      if (panel && panel.style.display !== 'none') { closeExistingEdit(); return; }
+      openExistingEdit();
+    }
+
+    function fieldHtml(id, label, value) {
+      return '<div class="edit-field"><label class="edit-label" for="' + id + '">'
+           + label + '</label><input type="text" class="edit-input" id="'
+           + id + '" value="' + escHtml(value) + '"></div>';
+    }
+
+    function openExistingEdit() {
+      var panel = document.getElementById('existingEdit');
+      if (!panel) return;
+      panel.innerHTML =
+          '<div style="font-size:8.5pt;font-weight:700;margin-bottom:6px;">'
+        + 'Edit the album before applying</div>'
+        + fieldHtml('editTitle', 'Album', ALBUM_DETAILS.title || '')
+        + fieldHtml('editArtist', 'Artist', ALBUM_DETAILS.artist || '')
+        + fieldHtml('editYear', 'Year', ALBUM_DETAILS.year || '')
+        + fieldHtml('editGenre', 'Genre', ALBUM_DETAILS.genre || '')
+        + '<div class="edit-actions">'
+        + '<button class="btn" onclick="saveExistingEdit();">Save</button>'
+        + '&nbsp;&nbsp;<button class="btn" onclick="closeExistingEdit();">Cancel</button>'
+        + '</div>'
+        + '<div class="edit-note">Changes the album that <b>Finish &amp; Apply</b> '
+        + 'writes. Per-track titles are not changed.</div>';
+      panel.style.display = 'block';
+    }
+
+    function closeExistingEdit() {
+      var panel = document.getElementById('existingEdit');
+      if (!panel) return;
+      panel.style.display = 'none';
+      panel.innerHTML = '';
+    }
+
+    // Writes straight into ALBUM_DETAILS - the object POSTed to
+    // /store_staged_xml - so an edit genuinely reaches the applied document
+    // rather than only changing what is displayed.
+    function saveExistingEdit() {
+      function val(id) {
+        var el = document.getElementById(id);
+        return el ? String(el.value).replace(/^\\s+|\\s+$/g, '') : '';
+      }
+      var t = val('editTitle'), a = val('editArtist'),
+          y = val('editYear'), g = val('editGenre');
+      if (!t && !a) {
+        alert('Enter at least an album title or an artist.');
+        return;
+      }
+      if (t) ALBUM_DETAILS.title = t;
+      if (a) ALBUM_DETAILS.artist = a;
+      if (y) ALBUM_DETAILS.year = y;
+      if (g) ALBUM_DETAILS.genre = g;
+      // Keep the lead-in honest about what is about to be written.
+      try {
+        var hdr = document.getElementsByTagName('*');
+        for (var i = 0; i < hdr.length; i++) {
+          if (hdr[i].className === 'header-text') {
+            hdr[i].innerHTML = 'Found the album &quot;'
+              + escHtml(ALBUM_DETAILS.title) + '&quot; by '
+              + escHtml(ALBUM_DETAILS.artist) + '.';
+            break;
+          }
+        }
+      } catch (e2) {}
+      beacon({page: 'existing_edit_saved', title: ALBUM_DETAILS.title,
+              artist: ALBUM_DETAILS.artist, year: ALBUM_DETAILS.year,
+              genre: ALBUM_DETAILS.genre, href: String(window.location.href)});
+      closeExistingEdit();
+    }
+
     function showDiscBanner(mdq) {
       var banner = document.getElementById('discBanner');
       if (!banner) return;
@@ -2855,6 +3025,11 @@ def confirm():
           if (CACHED_MDQ) showDiscBanner(CACHED_MDQ);
         } catch (e) {}
       }
+      // 'Existing Information' reports what WMP CURRENTLY holds, which is a
+      // different thing from the album about to be applied. The MDQ is the best
+      // source when there is one; a CD rip sends no requestid, so the query
+      // context the dialog was opened with is the fallback. Runs in both cases.
+      try { renderExistingInfo(CACHED_MDQ); } catch (e2) {}
     };
   </script>
 </body>
@@ -2867,6 +3042,12 @@ def confirm():
       details_json=json.dumps(details),
       request_id=request_id,
       session_id=session_id,
+      # Rendered server-side so 'Existing Information' shows WMP's CURRENT state
+      # even before (or without) any script running. renderExistingInfo() refines
+      # this from the disc MDQ once it has been fetched.
+      wmp_album=wmp_album,
+      wmp_artist=wmp_artist,
+      wmp_track=wmp_track,
       wmp_toc_json=json.dumps(wmp_toc),
       wmp_cd_json=json.dumps(wmp_cd),
       wmp_wmid_json=json.dumps(wmp_wmid),

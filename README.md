@@ -483,6 +483,17 @@ The legacy `submittoc` / `GetMDRCD.asp` / `QueryTOC.asp` routes are
 - **Dialog styling** reproduces the authentic Microsoft FAI layout. On the
   verified platforms the host reports `documentMode` **11**; the stylesheet also
   carries IE7 fallbacks and avoids CSS the older engine cannot parse.
+- **Existing Information reports the current state** — what WMP actually holds for
+  the disc or collection, read from the disc MDQ and falling back to the context
+  the dialog was opened with. The matched album is labelled separately, so
+  incoming tags are never mistaken for tags already written. When nothing is
+  stored (the usual case for a fresh rip) it says so instead of inventing a
+  state.
+- **A working Edit link** on both dialog pages. It tries WMP's own
+  `EditMetadata` host first, and otherwise opens an inline editor for the album
+  title, artist, year and genre. Saving writes into the object that is POSTed to
+  `/store_staged_xml`, so the correction reaches the applied document rather
+  than only changing what is displayed.
 
 ## What does not work
 
