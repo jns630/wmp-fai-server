@@ -559,9 +559,33 @@ a track's `WMContentID`) into a slot the interface defines as a *disc* content
 ID. The call is type-correct and WMP accepts it — the logs show
 `WriteNamesEx-wmid-ok` and `WriteNamesEx-lib-cid-ok` — but **WMP accepting a
 call is not WMP applying it**, and the two cannot be told apart from in-page
-code. Treat library writes as best-effort. If tags still fail to land after this,
-the next step is `EditMetadata()` (disp 10011), which hands off to WMP's own
-metadata editor, not another `WriteNamesEx` variant.
+code.
+
+#### The library handoff
+
+Because of that, a library flow makes a second attempt through the one member
+that *can* apply a library album: `EditMetadata` (disp 10011), which opens
+WMP's own metadata editor. It is gated on `IsMetadataAvailableForEdit`
+(disp 10010) and runs only when the flow is a library update — a CD rip has a
+real `WriteNamesEx` path and must not be interrupted.
+
+Two things about this path are easy to get wrong:
+
+- **`EditMetadata` takes no arguments.** It does not receive our XML. It shows
+  whatever WMP has already *staged* for the request, so the background fetch to
+  `/redir/getmdrcdbackground/` is fired first, and the document must already
+  have been POSTed to `/store_staged_xml`. Calling it earlier opens the editor
+  against the previous album's tags.
+- **The page must not navigate afterwards.** WMP's editor is a dialog layered
+  over this page; jumping to `/done` in the same tick tears the page out from
+  under it. The handoff path returns early and leaves the button on *Waiting
+  for WMP…* so the user can still leave if they want to. This is the same class
+  of fault as the 2m25s *Applying…* hang.
+
+The user then presses **OK** in WMP's own dialog, which is the authentic way
+WMP applies library metadata. The diagnostic records `edit_handoff` and
+`metadata_editable` so a run says whether the editor actually opened or WMP
+reported the metadata as not editable.
 
 ### Keeping the dialog responsive
 
@@ -782,7 +806,7 @@ python test_fai_v2.py
 Expected result:
 
 ```
-==== 424 passed, 0 failed ====
+==== 426 passed, 0 failed ====
 ```
 
 The suite covers, among other things:

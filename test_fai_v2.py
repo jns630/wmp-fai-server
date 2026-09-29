@@ -1195,8 +1195,21 @@ check("no-timer-before-done-redirect",
       "a setTimeout before the /done redirect is what stalled the dialog on "
       "'Applying...' for 2m25s - navigate in the same tick instead")
 check("done-redirect-is-immediate",
-      _re.search(r"beaconSync\(diag\);\s*leaveDialog\(\);", _src) is not None,
-      "the write must hand off to the redirect immediately after reporting")
+      # No timer may stand between the beacon and the redirect - that is what
+      # stalled the dialog on "Applying..." for 2m25s. The one legitimate
+      # exception is the library EditMetadata guard, which has to run first so
+      # it can return without navigating (a navigation would destroy the editor
+      # WMP just opened). Between the beacon and leaveDialog() there must be no
+      # statement other than that guard, so this checks the code with comments
+      # stripped rather than allowing an arbitrary character window.
+      (lambda _s: _re.search(r"beaconSync\(diag\);\s*"
+                             r"(?:if\s*\(diag\.edit_handoff === 'EditMetadata-ok'\)\s*\{"
+                             r"[\s\S]*?return;\s*\}\s*)?"
+                             r"leaveDialog\(\);", _s) is not None)(
+          _re.sub(r"//[^\n]*", "", _re.sub(r"/\*.*?\*/", "", _src, flags=_re.S))),
+      "the write must hand off to the redirect immediately after reporting - "
+      "nothing but the library EditMetadata early-return may sit between the "
+      "beacon and leaveDialog(), and never a timer")
 check("stuck-button-is-recoverable",
       "function leaveDialog()" in page
       and "b.disabled = false;" in page
@@ -2782,6 +2795,47 @@ check("close-is-never-called",
       "external.Close(" not in _src_code and "external.Finish(" not in _src_code,
       "IWMPCDDVDWizardExternal has no Close/Finish. ReturnToMainTask (disp "
       "10002) is the only way to dismiss the wizard.")
+
+# 58. LIBRARY HANDOFF TO WMP'S OWN EDITOR. WMP_WRITENAMES_TYPE has no library
+#     member (see the README table), so WriteNamesEx has no way to name a
+#     library album. EditMetadata (disp 10011) is the alternative: it opens
+#     WMP's own metadata editor, which applies the document WMP has STAGED.
+#
+#     Two ordering facts make this work, and both are easy to get wrong:
+#       - EditMetadata takes NO arguments. It does not receive our XML. It shows
+#         whatever WMP has already fetched, so it can only be called AFTER
+#         /store_staged_xml has run and the background fetch has been fired.
+#       - Navigating to /done immediately afterwards would tear the page out
+#         from under the editor WMP just opened, leaving the user with nothing.
+#         This is the same class of bug as the 2m25s "Applying..." hang, so the
+#         handoff path must return early instead of calling leaveDialog().
+_am_handoff = _src_code.split("function applyMetadata(")[1].split("\n    function ")[0]
+check("library-handoff-uses-the-capability-check",
+      "IsMetadataAvailableForEdit()" in _am_handoff and "EditMetadata()" in _am_handoff,
+      "the library handoff must gate on IsMetadataAvailableForEdit (disp "
+      "10010) before opening the editor, and must actually call EditMetadata "
+      "(disp 10011) - the only interface member that can write a library album")
+check("library-handoff-fetches-before-editing",
+      _am_handoff.index("/redir/getmdrcdbackground/") < _am_handoff.index("EditMetadata()"),
+      "WMP's editor shows the document WMP has STAGED, so the background fetch "
+      "must be fired BEFORE EditMetadata() opens the editor - otherwise the "
+      "editor renders against the previous album's tags")
+check("library-handoff-does-not-navigate-away",
+      (lambda _i: "return;" in _src_code[_i:_src_code.index("leaveDialog();", _i)])(
+          _src_code.index("if (diag.edit_handoff === 'EditMetadata-ok')")),
+      "after handing off to WMP's editor the page must NOT navigate to /done - "
+      "that would destroy the editor WMP just opened. The handoff block must "
+      "return before reaching leaveDialog(), and let WMP's own OK/Cancel close "
+      "the wizard.")
+check("library-handoff-is-library-only",
+      "if (isLibrary) {" in _am_handoff,
+      "the handoff must be limited to library flows. A CD rip has a real "
+      "WriteNamesEx path (CD_BY_CONTENT_ID) that works, and opening an editor "
+      "over a successful rip would be a regression.")
+check("library-handoff-reports-instead-of-pretending",
+      "diag.metadata_editable" in _am_handoff and "not-editable" in _am_handoff,
+      "when WMP reports the metadata is not editable the diagnostic must say so; "
+      "silently continuing would report a write that never happened")
 
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
