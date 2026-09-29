@@ -387,7 +387,7 @@ python test_fai_v2.py
 Expected result:
 
 ```
-==== 149 passed, 0 failed ====
+==== 166 passed, 0 failed ====
 ```
 
 The suite covers, among other things:
@@ -579,6 +579,47 @@ Practical consequences:
 - For WMP itself this is entirely moot: the hosts entry points
   `musicmatch-ssl.xboxlive.com` at `127.0.0.1`, so WMP only ever talks to the
   server running on its own machine.
+
+### Result counts
+
+The dialog's lead-in used to read a hardcoded **`Found 500+ Album(s)`** no matter
+what you searched for. It now reports real numbers, both in the lead-in and in
+the `Artists | Albums | Tracks` strip.
+
+MusicBrainz returns an exact `count` for any search regardless of `limit`, so one
+extra request per entity gives the true figure. The search and the count share a
+single `_build_lucene_query()` helper, because a loose query is meaningless as a
+headline:
+
+| Query | Loose | Scoped (what we use) |
+|---|---|---|
+| `kind of blue miles` | 523,001 | 0 |
+| `pink floyd` | 12,837 | 90 |
+| `pink floyd the wall` | 1,198,797 | 154 |
+
+A loose `kind of blue miles` is an OR over every word, so it matches half the
+MusicBrainz catalogue. Counting that form advertised **over half a million
+albums for a single album search**.
+
+The lead-in distinguishes three states:
+
+- **Exact total** — `Found 154 Album(s) containing "…"`
+- **Exact total, more behind the list** — `Found 154 Album(s) … - showing the top 40.`
+- **Total not available** — `Found at least 25 Album(s) …`
+
+That last case is real: the album total counts MusicBrainz releases, so when
+MusicBrainz has nothing but iTunes still returns rows, the total is floored at the
+number shown and labelled *"at least"*. It never claims fewer albums than are
+visible on screen.
+
+**The counts are MusicBrainz figures.** iTunes exposes only `resultCount`, which
+is capped by the requested limit (200 max) and is therefore not a total, so iTunes
+results are only ever counted as *shown*, never as a total.
+
+The artist and track counts cannot reuse the release-scoped query — `artist:"X"
+AND release:"Y"` has no `release` field on those entities and returns 0 — so they
+are scoped to the artist term alone, which is the honest question: how many
+artists or recordings match the artist part of what you typed.
 
 ### Composer credits
 

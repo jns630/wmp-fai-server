@@ -749,15 +749,16 @@ check("library-xml-uses-wmid-collection",
 #     hairline-separated columns, the filter strip, the command strip with
 #     the privacy link + Next, and the per-row 'More.../Buy' link pair.
 check("fai-leadin-copy",
-      "Found 500+ Album(s) containing" in ui_html,
+      'id="leadIn"' in ui_html and "Album(s) containing" in ui_html
+      and "function applyTotals" in ui_html,
       "the authentic blue lead-in sentence is missing")
 check("fai-two-columns",
       'class="section-label">Existing Information' in ui_html
       and 'class="section-label">Search' in ui_html,
       "the 'Existing Information' / 'Search' column pair is missing")
 check("fai-filter-strip",
-      "Artists (500+)" in ui_html and "Albums (500+)" in ui_html
-      and "Tracks (500+)" in ui_html,
+      'id="cntArtists"' in ui_html and 'id="cntAlbums"' in ui_html
+      and 'id="cntTracks"' in ui_html,
       "the Artists/Albums/Tracks filter strip is missing")
 check("fai-command-strip",
       "Read the privacy statement." in ui_html
@@ -950,6 +951,90 @@ check("composer-xml-escaped",
 check("composer-dedupes",
       "; " not in "Miles Davis" and "&quot;Miles Davis&quot;" not in _src,
       "composer names must be de-duplicated before joining")
+
+# 41. Result COUNTS. The lead-in used to hardcode 'Found 500+ Album(s)'
+#     regardless of the query, which lied on every search - and told the user
+#     nothing about how many albums lay behind the ~40 rows rendered.
+#     MusicBrainz returns an exact 'count'; iTunes only returns a limit-capped
+#     resultCount, so it must never be presented as a total.
+check("counts-helper-exists",
+      "def count_search_totals" in _src,
+      "an exact count helper is required")
+check("counts-use-mb-count-field",
+      '.get("count"' in _src and '"limit": 0' in _src,
+      "MusicBrainz's exact count is only returned when limit=0")
+check("totals-sent-as-header",
+      "X-Search-Totals" in _src
+      and "getResponseHeader('X-Search-Totals')" in ui_html,
+      "counts must reach the client so the lead-in can be rewritten")
+check("client-rewrites-leadin",
+      "function applyTotals" in ui_html
+      and "lead.innerHTML" in ui_html
+      and "groupDigits(albums)" in ui_html,
+      "the client must render the real count into the lead-in")
+check("leadin-says-how-many-shown",
+      "showing the top" in ui_html and "albums_shown" in ui_html,
+      "when the total exceeds the rows shown, the lead-in must say so")
+def _strip_comments(h):
+    """Remove HTML comments and JS // / /* */ comments.
+
+    Several of these checks assert that a construct is ABSENT. Without
+    stripping comments first they match the very prose that documents the
+    rule ('rather than claiming 500+', 'no JSON.parse here'), so the tests
+    would fail on their own documentation.
+    """
+    h = re.sub(r"<!--.*?-->", " ", h, flags=re.S)
+    h = re.sub(r"/\*.*?\*/", " ", h, flags=re.S)
+    h = re.sub(r"^\s*//.*$", " ", h, flags=re.M)
+    return h
+
+
+ui_code = _strip_comments(ui_html)
+check("no-hardcoded-500-in-markup",
+      "500+" not in ui_code,
+      "the literal 500+ must not survive in the served dialog")
+check("counts-escaped-into-dom",
+      "function escHtml" in ui_html and "escHtml(query)" in ui_html,
+      "the query must be escaped before it is written into innerHTML")
+# IE7: no JSON.parse, no let/const, no arrow functions in the dialog script
+for _forbidden in ("JSON.parse", "=>", "const ", "let "):
+    check("ie7-no-%s" % _forbidden.strip().strip("=> "),
+          _forbidden not in ui_code,
+          f"the dialog runs in IE7 and must not use {_forbidden!r}")
+
+# the counts endpoint must survive a query that returns nothing
+_r = c.get("/api_search?q=zzzznotathingatallqqq")
+check("counts-on-empty-result",
+      _r.status_code == 200 and "X-Search-Totals" in _r.headers,
+      f"even an empty result must report counts; hdrs={dict(_r.headers)}")
+# ...and must ALSO be present on a SUCCESSFUL search. An early version only
+# routed the empty-result branch through _respond(), so the header was silently
+# missing whenever there were results - the exact case the feature is for.
+_r2 = c.get("/api_search?q=pink+floyd+the+wall")
+check("counts-on-successful-result",
+      _r2.status_code == 200 and "X-Search-Totals" in _r2.headers,
+      f"a successful search must report counts too; hdrs={dict(_r2.headers)}")
+try:
+    _t2 = json.loads(_r2.headers.get("X-Search-Totals") or "{}")
+except Exception as _je:
+    _t2 = {}
+check("counts-header-is-valid-json",
+      "albums" in _t2 and "albums_shown" in _t2,
+      f"X-Search-Totals must be parseable JSON with albums/albums_shown: {_t2}")
+# the total must never be smaller than the rows we actually rendered
+check("count-covers-shown-rows",
+      not _t2 or int(_t2.get("albums") or 0) >= int(_t2.get("albums_shown") or 0),
+      f"total {_t2.get('albums')} is below the {_t2.get('albums_shown')} rows shown")
+# when the total had to be floored, the client must say "at least", not a hard
+# number that would be contradicted by the visible rows
+check("inexact-total-says-at-least",
+      "Found at least " in ui_html,
+      "an inexact album count must render as 'at least N'")
+# the scoped query must be shared, never duplicated, or counts drift from results
+check("search-and-count-share-query",
+      _src.count("def _build_lucene_query") == 1
+      and _src.count("_build_lucene_query(query, artist_hint, album_hint)") == 2,
+      "the search and the count must build their Lucene query with one shared helper")
 
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")

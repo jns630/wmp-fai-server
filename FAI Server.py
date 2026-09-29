@@ -427,6 +427,88 @@ def get_itunes_album_details(collection_id):
         print(f"[ITUNES] Details error for {collection_id}: {e}")
         return None
 
+def _build_lucene_query(query, artist_hint=None, album_hint=None):
+    """Build the Lucene query used for BOTH the search and the count.
+
+    These two MUST stay identical or the headline number is meaningless. A
+    loose 'kind of blue miles' is an OR over every word and matches 523,001
+    releases in MusicBrainz; the scoped 'artist:"kind of" AND release:"blue
+    miles"' matches 0, and a realistic 'artist:"pink floyd" AND
+    release:"the wall"' matches 154. Counting the loose form advertised over
+    half a million albums for a single album search.
+    """
+    if artist_hint and album_hint:
+        clean_art = re.sub(r'[\'"+]', ' ', artist_hint).strip()
+        clean_alb = re.sub(r'[\'"+]', ' ', album_hint).strip()
+        if clean_art and clean_alb:
+            return f'artist:"{clean_art}" AND release:"{clean_alb}"'
+    return re.sub(r'[\'"+]', ' ', query or "").strip()
+
+
+def _build_entity_queries(query, artist_hint=None, album_hint=None):
+    """Per-entity Lucene queries for the three counts.
+
+    The album count must mirror the RELEASE search exactly (see
+    _build_lucene_query). The artist and track counts cannot reuse that string:
+    'artist:"X" AND release:"Y"' is a release-scoped clause, and asking the
+    artist or recording endpoint with it returns 0, because those entities have
+    no 'release' field. They are therefore scoped to the artist term alone,
+    which is the honest question: how many artists / recordings match the
+    artist part of what you typed.
+    """
+    base = _build_lucene_query(query, artist_hint, album_hint)
+    artist_q = re.sub(r'[\'"+]', ' ', query or "").strip()
+    if artist_hint and album_hint:
+        ca = re.sub(r'[\'"+]', ' ', artist_hint).strip()
+        if ca:
+            artist_q = f'artist:"{ca}"'
+    return {"release": base, "recording": artist_q, "artist": artist_q}
+
+
+def count_search_totals(query, artist_hint=None, album_hint=None):
+    """Return the REAL number of matches, not the number of rows we render.
+
+    The dialog's lead-in used to read a hardcoded 'Found 500+ Album(s)', which
+    lies on every search and says nothing about how many albums sit behind the
+    ~25 rows actually shown.
+
+    MusicBrainz returns an exact 'count' for a search regardless of 'limit', so
+    one cheap extra request per entity gives the true figure. iTunes exposes
+    only 'resultCount', which is capped by the limit we request (200 max) and is
+    therefore NOT a total - iTunes is only ever reported as 'shown'.
+    """
+    queries = _build_entity_queries(query, artist_hint, album_hint)
+    empty = {"albums": None, "tracks": None, "artists": None,
+             "albums_shown": 0, "tracks_shown": 0}
+    if not queries.get("release"):
+        return empty
+
+    def _count(kind):
+        try:
+            resp = session.get(MUSICBRAINZ_BASE_URL + kind,
+                               params={"query": queries[kind], "fmt": "json",
+                                       "limit": 0},
+                               headers={"User-Agent": MUSICBRAINZ_USER_AGENT},
+                               timeout=6)
+            if resp.status_code != 200:
+                return None
+            return int(resp.json().get("count", 0))
+        except Exception:
+            return None
+
+    out = dict(empty)
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        futures = (("albums", ex.submit(_count, "release")),
+                   ("tracks", ex.submit(_count, "recording")),
+                   ("artists", ex.submit(_count, "artist")))
+        for key, fut in futures:
+            try:
+                out[key] = fut.result(timeout=9)
+            except Exception:
+                out[key] = None
+    return out
+
+
 def search_musicbrainz(query, artist_hint=None, album_hint=None, limit=10):
     cache_key = f"mb_search_{query.lower().strip()}_{artist_hint}_{album_hint}_{limit}"
     cached = search_cache.get(cache_key)
@@ -436,13 +518,9 @@ def search_musicbrainz(query, artist_hint=None, album_hint=None, limit=10):
     results = []
     try:
         search_url = MUSICBRAINZ_BASE_URL + "release"
-        if artist_hint and album_hint:
-            clean_art = re.sub(r'[\'\"+]', ' ', artist_hint).strip()
-            clean_alb = re.sub(r'[\'\"+]', ' ', album_hint).strip()
-            lucene_q = f'artist:"{clean_art}" AND release:"{clean_alb}"'
-        else:
-            clean_q = re.sub(r'[\'\"+]', ' ', query).strip()
-            lucene_q = clean_q
+        # Same builder as count_search_totals, so the headline count always
+        # describes the very set of results rendered underneath it.
+        lucene_q = _build_lucene_query(query, artist_hint, album_hint)
 
         params = {
             "query": lucene_q,
@@ -1018,11 +1096,15 @@ def api_search():
 
     itunes_results = []
     mb_results = []
+    totals = {"albums": None, "tracks": None, "artists": None,
+              "albums_shown": 0, "tracks_shown": 0}
 
-    # Parallel execution of iTunes and MusicBrainz search
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    # iTunes, MusicBrainz and the exact-count lookups all run at once; four
+    # workers so the count round-trips never hold up the result rows.
+    with ThreadPoolExecutor(max_workers=4) as executor:
         f_itunes = executor.submit(search_itunes, q, limit=25)
         f_mb = executor.submit(search_musicbrainz, q, artist_hint=artist_hint, album_hint=album_hint, limit=15)
+        f_cnt = executor.submit(count_search_totals, q, artist_hint, album_hint)
         try:
             itunes_results = f_itunes.result(timeout=6)
         except Exception as e:
@@ -1031,6 +1113,30 @@ def api_search():
             mb_results = f_mb.result(timeout=7)
         except Exception as e:
             print(f"[SEARCH] MusicBrainz task error: {e}")
+        try:
+            totals = f_cnt.result(timeout=10) or totals
+        except Exception as e:
+            print(f"[SEARCH] count task error: {e}")
+
+    # How many rows we render vs how many exist upstream. The lead-in needs
+    # both: the total alone hides that only 25 are on screen.
+    totals["albums_shown"] = len(itunes_results) + len(mb_results)
+    totals["tracks_shown"] = sum(
+        int(i.get("track_count") or 0) for i in itunes_results) or 0
+    for key in ("albums", "tracks", "artists"):
+        totals[key + "_exact"] = totals.get(key) is not None
+        if totals.get(key) is None:
+            totals[key] = 0          # unknown, but never blank / never fake
+    # A MusicBrainz total of 0 while iTunes still returned rows would render as
+    # 'Found 0 Album(s)' above 25 visible albums. The albums total counts only
+    # MusicBrainz releases, so floor it at the number of rows actually shown and
+    # flag it, so the client can say 'at least N' instead of a false 0.
+    if totals["albums"] < totals["albums_shown"]:
+        totals["albums"] = totals["albums_shown"]
+        totals["albums_exact"] = False
+    log_line("SEARCH", f"q={q!r} albums={totals['albums']} "
+                       f"tracks={totals['tracks']} artists={totals['artists']} "
+                       f"shown={totals['albums_shown']}")
 
     with NAV_LOCK:
         if itunes_results:
@@ -1038,11 +1144,23 @@ def api_search():
         if mb_results:
             FAI_NAVIGATION['stats']['musicbrainz_hits'] += len(mb_results)
 
+    def _respond(body):
+        # Counts ride along in a header so the payload stays a plain HTML
+        # fragment (the client assigns it straight to innerHTML) while the
+        # lead-in can still be rewritten from the real numbers.
+        resp = Response(body, mimetype="text/html")
+        try:
+            resp.headers["X-Search-Totals"] = json.dumps(totals)
+        except Exception:
+            pass
+        return resp
+
     html_out = '<div class="section-label">Search Results</div>'
 
     if not itunes_results and not mb_results:
-        html_out += '<div class="empty-msg">No matching albums found. Try different search terms or check spelling.</div>'
-        return Response(html_out, mimetype="text/html")
+        return _respond(
+            '<div class="section-label">Search Results</div>'
+            '<div class="empty-msg">No matching albums found. Try different search terms or check spelling.</div>')
 
     # Render iTunes results (fast, high-res artwork)
     for item in itunes_results:
@@ -1099,7 +1217,7 @@ def api_search():
   </div>
 </div>'''
 
-    return Response(html_out, mimetype="text/html")
+    return _respond(html_out)
 # ==========================================================
 # UNIFIED MODERN FAI UI (HTML/CSS/JS)
 # ==========================================================
@@ -1256,7 +1374,7 @@ def unified_ui():
 </head>
 <body>
   <div class="header-area">
-    <div class="header-text">Found 500+ Album(s) containing &quot;{{ rip_name|e }}&quot;.</div>
+    <div class="header-text" id="leadIn">Searching for &quot;{{ rip_name|e }}&quot;...</div>
   </div>
   <div class="main-container">
     <div class="left-pane">
@@ -1281,8 +1399,8 @@ def unified_ui():
         <input type="text" id="sq" class="search-input" value="{{ q|e }}" onkeydown="if(event.keyCode==13) doSearch();">
         <button class="search-clear" onclick="clearSearch();" title="Clear">X</button>
       </div>
-      <div class="filter-row">
-        <span class="link">Artists (500+)</span><span class="filter-sep">|</span><span class="link filter-active">Albums (500+)</span><span class="filter-sep">|</span><span class="link">Tracks (500+)</span>
+      <div class="filter-row" id="filterRow">
+        <span class="link" id="cntArtists">Artists</span><span class="filter-sep">|</span><span class="link filter-active" id="cntAlbums">Albums</span><span class="filter-sep">|</span><span class="link" id="cntTracks">Tracks</span>
       </div>
       <div id="results_area">
         <div class="empty-msg">Searching metadata databases...</div>
@@ -1321,9 +1439,63 @@ def unified_ui():
       xhr.onreadystatechange = function() {
         if (xhr.readyState == 4) {
           resultsDiv.innerHTML = xhr.responseText;
+          applyTotals(xhr.getResponseHeader('X-Search-Totals'), query);
         }
       };
       xhr.send();
+    }
+    // Render the REAL number of matches instead of a hardcoded '500+'.
+    // The server sends MusicBrainz's exact totals in X-Search-Totals; when it
+    // cannot, we fall back to the number of rows on screen instead of
+    // inventing a figure. IE7-safe: no JSON.parse, no let/const, no arrows,
+    // and no toLocaleString (absent in older engines).
+    function escHtml(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+                      .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    }
+    function toNum(v) {
+      if (v === null || v === undefined || v === '') { return null; }
+      v = parseInt(v, 10);
+      return isNaN(v) ? null : v;
+    }
+    function groupDigits(n) {
+      if (n === null) { return ''; }
+      var s = String(n), out = '', c = 0, i;
+      for (i = s.length - 1; i >= 0; i--) {
+        out = s.charAt(i) + out;
+        c++;
+        if (c % 3 === 0 && i > 0) { out = ',' + out; }
+      }
+      return out;
+    }
+    function applyTotals(header, query) {
+      var t = null, lead = document.getElementById('leadIn');
+      try { if (header) { t = eval('(' + header + ')'); } } catch (e) { t = null; }
+      if (!t) {
+        if (lead) { lead.innerHTML = 'Results for &quot;' + escHtml(query) + '&quot;'; }
+        return;
+      }
+      var albums = toNum(t.albums), tracks = toNum(t.tracks), artists = toNum(t.artists);
+      var shown = toNum(t.albums_shown) || 0;
+      var exact = (t.albums_exact === true);
+      if (lead) {
+        if (albums === null || !exact) {
+          lead.innerHTML = 'Found at least ' + shown + ' Album(s) containing &quot;'
+                           + escHtml(query) + '&quot;.';
+        } else if (albums > shown) {
+          lead.innerHTML = 'Found ' + groupDigits(albums) + ' Album(s) containing &quot;'
+                           + escHtml(query) + '&quot; - showing the top ' + shown + '.';
+        } else {
+          lead.innerHTML = 'Found ' + groupDigits(albums) + ' Album(s) containing &quot;'
+                           + escHtml(query) + '&quot;.';
+        }
+      }
+      var aEl = document.getElementById('cntAlbums');
+      var tEl = document.getElementById('cntTracks');
+      var rEl = document.getElementById('cntArtists');
+      if (aEl) { aEl.innerHTML = 'Albums' + (albums === null ? '' : ' (' + groupDigits(albums) + ')'); }
+      if (tEl) { tEl.innerHTML = 'Tracks' + (tracks === null ? '' : ' (' + groupDigits(tracks) + ')'); }
+      if (rEl) { rEl.innerHTML = 'Artists' + (artists === null ? '' : ' (' + groupDigits(artists) + ')'); }
     }
     // The in-field 'X' in the authentic dialog wipes the query and the list.
     function clearSearch() {
