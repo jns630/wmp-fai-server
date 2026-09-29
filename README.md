@@ -379,7 +379,8 @@ FAI server sends. The proxy remains as the fallback in case an upstream host tur
 out to refuse WMP. `[STAGED] … art=direct|proxy` records which shape produced each
 document, so a log always says what WMP was actually offered.
 
-But that was only half of it. The confirming sequence:
+But the confirming sequence is what it took to see it, and only because the user
+renewed WMP's database files and the art appeared:
 
 ```text
 16:13:37  [STAGED] "Prospekt's March - EP"  xml_bytes=4075  art=direct
@@ -390,8 +391,15 @@ But that was only half of it. The confirming sequence:
 
 `73.9 s` before 16:14:51 is 16:13:37, so the document WMP took was exactly the
 direct-mode one. The 16:13 apply was correct on the server and **was never
-fetched**; renewing WMP's database files made it re-request the metadata, and the
-art arrived with it. Two operational rules follow, both learned the hard way:
+fetched**; renewing the database files made WMP re-request the metadata, and the art
+arrived with it.
+
+**The direct URL was the fix. The database renewal was not part of it** — that only
+caused the request to happen at all. Renewing the DB exposed a fix that was already
+in place; it did not supply one. Nothing suggests the proxied document would have
+attached had it been fetched, given 62 fetches and 0 attachments through it.
+
+Two operational rules follow, both learned the hard way:
 
 - **A staged document that is never fetched is not a failure.** Look for the
   `[MDR] -> serving` line before concluding that an apply did nothing. The 16:13
@@ -399,10 +407,23 @@ art arrived with it. Two operational rules follow, both learned the hard way:
 - **Renewing WMP's database files is a legitimate diagnostic**, not a workaround.
   When a rip appears to do nothing, the metadata may be staged and unfetched.
 
-Worth recording honestly: three commits were spent chasing server-side causes
-after the server side was already correct, and the 16:13 apply — the first in
-direct mode — was never fetched, so it could not have confirmed anything on its
-own. Both halves were needed.
+### The diagnostic rule this thread should have followed
+
+**A mechanism with N failures and no successes, alongside an untried alternative,
+is a conclusion — not a hypothesis to hedge.**
+
+The proxy had 62 fetches and 0 attachments. The direct URL had 0 fetches. That
+asymmetry was the answer from the moment the user-agent counts were taken, and it
+was available well before the change was made. Instead the change shipped labelled
+"a diagnostic, not a proven fix", with a fallback plan for "the remainder is inside
+WMP" — which points the next person at exactly the wrong place, at the cost of
+three commits re-deriving what the log already said.
+
+The supporting evidence was no weaker: a loopback `http://` URL inside a document
+fetched over `https`, from a proxy that existed only to work around a `quote()` bug
+that had already been fixed. When the evidence points at one mechanism, say so, and
+say what the odds are. Hedging a well-supported conclusion is not caution — it just
+defers the conclusion to a more expensive test.
 
 `XML_LOCK` is an `RLock` because `store_staged_xml()` holds it while calling
 `_stage_request_xml()`, which takes it again. A plain `Lock` self-deadlocks

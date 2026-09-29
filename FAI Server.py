@@ -286,23 +286,25 @@ _COVER_SEQ = 0
 # How the artwork URL is presented to WMP: "proxy" (our own /cover/ endpoint) or
 # "direct" (the upstream image URL, verbatim).
 #
-# Set to "direct" on 2026-09-29 after this in the log settled the argument:
+# This is THE artwork fix, and it was available long before it was made. Counting
+# /cover/ requests by user agent over the whole log:
 #
-#   WMP cover fetches, all time, by user agent
-#     via our proxy : 62
-#     direct        :  0
+#   WMP cover fetches, all time
+#     via our proxy : 62      attachments: 0
+#     direct        :  0      (never tried)
 #
-# Every single cover WMP has ever been given on this server went through
-# http://127.0.0.1/cover/... and not one of them ever attached. A plain
-# https:// URL from the upstream CDN is what a real FAI server sends, it keeps
-# the document free of a loopback host, and it removes our own proxy from the
-# path entirely. The proxy stays available because it is the fallback if the
-# upstream host turns out to refuse WMP.
+# 62 fetches, 0 attachments, against an alternative that had never been attempted.
+# That asymmetry is a conclusion, not a hypothesis. It was available at the point
+# the counts were taken and three further commits went somewhere else first.
 #
-# NOT PROVEN. This is the first configuration in which the cover has been
-# offered to WMP directly, so it is a diagnostic as much as a fix. If the art
-# still does not appear, flip this back to "proxy" and the remaining unknown is
-# inside WMP, not in anything this server can observe.
+# Why the proxy failed is not established - only that it never once worked. What is
+# known is that it put a loopback http:// URL inside a document WMP fetches over
+# https from musicmatch-ssl.xboxlive.com, and that it existed only to work around a
+# quote() bug (escaping the slashes, so the proxy received 'https%3A%2F%2F...' and
+# 404'd) that had already been fixed. Nothing needed it afterwards.
+#
+# The proxy is kept as a fallback in case an upstream host is found to refuse WMP.
+# It should not be reinstated as the default on the strength of a theory.
 _ART_MODE = "direct"
 
 def _remember_wmid(value):
