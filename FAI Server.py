@@ -2137,14 +2137,60 @@ def unified_ui():
     var SEARCH_REQUEST_ID = {{ request_id|tojson }};
     var SEARCH_FLOW = {{ flow|tojson }};
 
-    function mqText(xml, tag, prefix) {
+    // Tolerant reader for the disc's current tags. The library MDQ is ~1.3kB
+    // and does contain a <track> block, but it does NOT use the
+    // <tag><text>value</text></tag> shape everywhere - a prefix-free
+    // <title>...<text> match came back empty in EVERY logged session, so the
+    // element names differ from the obvious guess. Try each candidate name in
+    // each shape rather than assuming one.
+    function mqField(mdq, names, prefix) {
+      if (!mdq) return '';
+      for (var n = 0; n < names.length; n++) {
+        var name = names[n], re, m;
+        try {
+          if (prefix) {
+            re = new RegExp('(?:<' + prefix + '>)\\s*<' + name +
+                            '>\\s*([\\s\\S]*?)\\s*</' + name + '>', 'i');
+            m = mdq.match(re);
+            if (m && m[1]) return String(m[1]).replace(/<[^>]*>/g, '').trim();
+            re = new RegExp('(?:<' + prefix + '>)\\s*<' + name +
+                            '>[\\s\\S]*?<text>\\s*([\\s\\S]*?)\\s*</text>', 'i');
+            m = mdq.match(re);
+            if (m && m[1]) return String(m[1]).trim();
+          }
+          re = new RegExp('<' + name + '>\\s*([\\s\\S]*?)\\s*</' + name + '>', 'i');
+          m = mdq.match(re);
+          if (m && m[1]) {
+            var inner = String(m[1]).replace(/<[^>]*>/g, '').trim();
+            if (inner) return inner;
+          }
+          re = new RegExp('<' + name + '>[\\s\\S]*?<text>\\s*([\\s\\S]*?)\\s*</text>', 'i');
+          m = mdq.match(re);
+          if (m && m[1]) return String(m[1]).trim();
+        } catch (e) {}
+      }
+      return '';
+    }
+
+    // One-shot probe. The MDQ's element names are not guessable from the first
+    // 120 characters the log keeps, and guessing at them has already cost a
+    // wrong fix, so report the real inventory once and parse against fact.
+    function mdqTags(mdq) {
+      var out = {}, m, re = /<\\/?([A-Za-z0-9_:-]+)/g;
+      while (mdq && (m = re.exec(mdq)) !== null) { out[m[1]] = 1; }
+      var names = [], k;
+      for (k in out) { if (out.hasOwnProperty(k)) names.push(k); }
+      names.sort();
+      return names;
+    }
+
+    function reportExisting(payload) {
       try {
-        var re = new RegExp((prefix ? '(?:' + prefix + ')\\s*' : '') +
-                            '<' + tag + '>\\s*[\\s\\S]*?<text>\\s*([\\s\\S]*?)\\s*</text>',
-                            'i');
-        var m = xml.match(re);
-        return m ? m[1] : '';
-      } catch (e) { return ''; }
+        var b = new XMLHttpRequest();
+        b.open('POST', '/client_error', true);
+        b.setRequestHeader('Content-Type', 'application/json');
+        b.send(JSON.stringify(payload));
+      } catch (e) {}
     }
 
     function renderExistingInfo(mdq) {
@@ -2157,11 +2203,29 @@ def unified_ui():
       if (mdq) {
         try {
           d.track_count = (mdq.match(/<track>[\\s\\S]*?<\\/track>/g) || []).length;
-          d.disc_track = mqText(mdq, 'title', '');
-          d.disc_artist = mqText(mdq, 'artist', '');
-          d.disc_album = mqText(mdq, 'title', '<album>');
+          d.disc_album = mqField(mdq, ['albumTitle'], '')
+                      || mqField(mdq, ['title', 'album'], 'album');
+          d.disc_artist = mqField(mdq, ['artist', 'trackArtist', 'albumArtist']);
+          // Strip the <album> block before looking for the track title. A lazy
+          // <title>...</title> otherwise matches the ALBUM's nested title first
+          // and the panel shows the album name as the track name - verified
+          // against a nested MDQ, which returned 'The Blue Room' for a track
+          // called 'See You Soon'.
+          d.disc_track = mqField(
+            String(mdq).replace(/<album>[\\s\\S]*?<\\/album>/gi, ''),
+            ['trackTitle', 'title']);
         } catch (e) {}
       }
+      reportExisting({
+        page: 'existing_info_probe', flow: SEARCH_FLOW,
+        has_request_id: !!SEARCH_REQUEST_ID,
+        mdq_len: mdq ? mdq.length : 0,
+        mdq_tags: mdqTags(mdq).join(','),
+        mdq_head: mdq ? mdq.substr(0, 400) : '',
+        found_album: d.disc_album, found_artist: d.disc_artist,
+        found_track: d.disc_track,
+        href: String(window.location.href)
+      });
       var album  = d.disc_album  || {{ wmp_album|tojson  }} || '';
       var artist = d.disc_artist || {{ wmp_artist|tojson }} || '';
       var track  = d.disc_track  || {{ wmp_track|tojson  }} || '';

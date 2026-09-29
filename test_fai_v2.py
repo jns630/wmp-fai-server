@@ -1854,6 +1854,27 @@ check("no-false-searching-indicator",
       "the 'Searching...' placeholder must only appear when a search is "
       "actually going to run")
 
+# 45. The MDQ does not use the <tag><text>value</text></tag> shape everywhere.
+#     A prefix-free <title>...<text> match returned EMPTY in every logged
+#     session even though the document is ~1.3kB and contains a <track> block,
+#     so the reader now tries several element names and shapes rather than one
+#     assumption - and reports the real tag inventory so the parser can be
+#     settled from evidence instead of another guess.
+check("mdq-reader-is-shape-tolerant",
+      "function mqField(mdq, names, prefix)" in _src
+      and "['albumTitle']" in _src and "'trackArtist'" in _src
+      and "'albumArtist'" in _src,
+      "the MDQ reader must try candidate element names, not one hard-coded shape")
+check("mdq-reader-probes-the-real-schema",
+      "function mdqTags(mdq)" in _src and "existing_info_probe" in _src
+      and "mdq_tags:" in _src and "mdq_head:" in _src,
+      "report the MDQ's element inventory and head once - guessing the schema "
+      "has already cost one wrong fix")
+check("track-title-is-not-the-album-title",
+      "replace(/<album>[\\\\s\\\\S]*?<\\\\/album>/gi, '')" in _src,
+      "the <album> block must be stripped before the track title is read, or a "
+      "lazy <title> match returns the ALBUM name as the track name")
+
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:
