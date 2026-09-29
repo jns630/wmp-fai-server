@@ -229,6 +229,33 @@ query string had none — the query carries WMP's fresh id, but the body may
 repeat the original `mdqRequestID` that we did stage under, which is an exact
 match.
 
+#### Indexing a document is not the same as claiming it
+
+Two distinct operations, and conflating them made a library update hand WMP the
+**previously applied album**:
+
+| Operation | Scope | Set by |
+|---|---|---|
+| **Index** (`STAGED_REQUESTS[wmid]`) | this document answers for that collection | the *write target* — `WMP_WMID`, `LAST_WMID` fallback included |
+| **Claim** (`PENDING_WRITE['wmid']`) | no *other* collection may take this document | only a wmid WMP really put in the dialog URL (`WMP_WMID_AUTH`) |
+
+The dialog therefore sends both. WMP opens a library dialog with only
+`?requestid=`, so `WMP_WMID` is often the `LAST_WMID` fallback and
+`WMP_WMID_AUTH` is empty. Sending only the latter meant the new document was
+never indexed under the collection being written, so WMP's follow-up fetch
+resolved to the older one:
+
+```text
+12:56:29  [WMID] dialog had no wmid; using last seen collection 'B17CF884' as the write target
+12:56:44  [MDR] -> serving album='Mylo Xyloto' (wmid=-)      <- document had a generated GUID
+12:56:52  [MDR] -> serving album='Tiny Cities'  (wmid=B17CF884)   <- the PREVIOUS album
+```
+
+Delivery re-stages the document to remember the wmid pairing, and that call must
+pass `claim_wmid=wmid_q` too. A re-stage otherwise counts as a new document,
+resets the claim to `''`, and lets the next unrelated collection claim a document
+that already belongs to another album.
+
 `XML_LOCK` is an `RLock` because `store_staged_xml()` holds it while calling
 `_stage_request_xml()`, which takes it again. A plain `Lock` self-deadlocks
 there, and no XML is ever staged — every write then silently does nothing.

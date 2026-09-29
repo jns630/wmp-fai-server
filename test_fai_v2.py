@@ -943,6 +943,100 @@ check("wmid-claim-is-recorded",
       "the collection a pending document is committed to must be tracked, or "
       "the same document could be claimed by unrelated collections")
 
+# 34e. REGRESSION. Indexing a document under a collection and pre-claiming it
+#      are different things, and conflating them made a library update serve
+#      the PREVIOUS album back to WMP. Logged from a real session:
+#        12:54:25  [STAGED] album='Tiny Cities'   (CD flow, wmid=B17CF884)
+#        12:56:29  [WMID] dialog had no wmid; using last seen collection
+#                   'B17CF884' as the write target
+#        12:56:44  [MDR] -> serving album='Mylo Xyloto' (wmid=-)
+#        12:56:52  [MDR] -> serving album='Tiny Cities'  (wmid=B17CF884)
+#      The client sent only the AUTHORITATIVE wmid, which was empty for a
+#      dialog opened with nothing but ?requestid=. So the new document was
+#      never indexed under B17CF884, and WMP's follow-up fetch for the very
+#      collection it had just been told to write to resolved to the older
+#      document - which is the one bug class this whole path exists to prevent.
+#      The document must be indexed under the WRITE TARGET (WMP_WMID, fallback
+#      included) while only a URL-authoritative wmid may pre-claim it.
+check("client-sends-write-target-and-auth-separately",
+      "wmid: WMP_WMID," in page and "wmid_auth: WMP_WMID_AUTH" in page,
+      "the dialog must send the collection it writes to (WMP_WMID) separately "
+      "from the one WMP actually put in the URL (WMP_WMID_AUTH)")
+check("server-binds-write-target",
+      'wmid_target = str(data.get("wmid", "") or "").strip()' in _src
+      and "wmid=wmid_target" in _src,
+      "the document must describe the collection it is written to, or WMP's own "
+      "follow-up fetch by wmid resolves to the previously applied album")
+check("guess-does-not-pre-claim",
+      "claim_wmid" in _src and "if claim_wmid:" in _src,
+      "only a URL-authoritative wmid may pre-claim the pending document; a "
+      "LAST_WMID guess must still leave it claimable by the real collection")
+
+# Replay the real sequence end to end: a CD document bound to a collection,
+# then a library update that writes to that same collection via the fallback.
+fai.STAGED_REQUESTS.clear()
+fai.STAGED_AT.clear()
+fai.FRESH_WRITES.clear()
+fai.PENDING_WRITE.update({'xml': '', 'at': 0.0, 'wmid': ''})
+COLL = "B17CF884-35B2-5D0B-B819-ED648F592A2B"
+fai.LAST_WMID = COLL
+# 1. the earlier CD rip, written with a wmid WMP really supplied
+c.post("/store_staged_xml", data=json.dumps(
+    {"album": dict(album, title="Tiny Cities"),
+     "selected_tracks": [album["tracks"][0]],
+     "request_id": "", "session_id": "S", "toc": "", "cd": "AA+BB",
+     "wmid": COLL, "wmid_auth": COLL}),
+    content_type="application/json")
+# 2. the library update: dialog opened with ?requestid= only, so WMP_WMID is
+#    the LAST_WMID fallback and WMP_WMID_AUTH is empty.
+c.post("/store_staged_xml", data=json.dumps(
+    {"album": dict(album, title="Mylo Xyloto"),
+     "selected_tracks": [album["tracks"][0]],
+     "request_id": "REQ_MYLO", "session_id": "S", "toc": "", "cd": "",
+     "wmid": COLL, "wmid_auth": ""}),
+    content_type="application/json")
+# The fallback guess must NOT have pre-claimed it at STAGING time: a genuinely
+# different collection still has to be able to claim the pending document. This
+# is asserted before the fetch below, because that fetch legitimately DOES claim
+# it - WMP asked for this collection by name and was given the document.
+check("fallback-guess-left-the-document-claimable",
+      fai.PENDING_WRITE.get("wmid", "") == "",
+      "a LAST_WMID fallback must not pre-claim the pending document, or a "
+      "different collection can never claim it")
+# 3. WMP fetches the collection it was just told to write to
+_after = c.get("/cdinfo/GetMDRCD.aspx?wmid=" + COLL).data.decode("utf-8", "ignore")
+check("library-update-is-not-served-the-previous-album",
+      "Mylo Xyloto" in _after and "Tiny Cities" not in _after,
+      f"a library update must not leave the previous album bound to the "
+      f"collection, got {_after[:200]!r}")
+check("write-target-is-in-the-document",
+      COLL in _after,
+      "the delivered document must carry the write target's WMCollectionID so "
+      "WMP recognises it as metadata for the collection it is updating")
+# Having been served, the collection owns the document - a repeat fetch is exact
+# and no other collection may take it.
+check("served-collection-now-owns-the-document",
+      fai.PENDING_WRITE.get("wmid", "") == COLL,
+      "after serving a collection its document, that collection must own it")
+_other = c.get("/cdinfo/GetMDRCD.aspx?wmid=EEEE1111-FFFF-2222-AAAA-333344445555"
+               ).data.decode("utf-8", "ignore")
+check("no-other-collection-can-take-a-served-document",
+      "Mylo Xyloto" not in _other,
+      "a document already served to one collection must never be handed to "
+      "another, or a second album inherits the first one's tags")
+
+# 34f. A SECOND bug the 34e work exposed, in the delivery path itself. Serving a
+#      document re-stages it so the wmid pairing is remembered, but that call
+#      passed no claim_wmid. A re-stage counts as a new document, so it reset
+#      PENDING_WRITE['wmid'] to '' and the claim a collection had just made was
+#      thrown away - the very next unrelated collection could then claim the
+#      same document. Reproduced in isolation: after collection A claimed the
+#      pending document, a fetch by collection D was served A's album.
+check("delivery-preserves-an-existing-claim",
+      "_stage_request_xml(staged, wmid=wmid_q, claim_wmid=wmid_q)" in _src,
+      "re-staging on delivery must preserve the claim, or the next collection "
+      "to ask can claim a document that already belongs to another album")
+
 # 35. Aero restyle must be CSS-only: no CSS3 without an IE7 fallback, and
 #     none of the working dialog logic may be disturbed.
 ui_html = c.get("/FAI/ui?artist=beatles&album=abbey+road").data.decode("utf-8", "ignore")

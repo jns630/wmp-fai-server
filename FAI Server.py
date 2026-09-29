@@ -286,11 +286,18 @@ def _remember_wmid(value):
         return val
     return ""
 
-def _stage_request_xml(xml, request_id="", toc="", wmid="", cd=""):
+def _stage_request_xml(xml, request_id="", toc="", wmid="", cd="",
+                       claim_wmid=""):
     """Index staged XML by WMP request id / CD TOC / WMID / disc id (bounded FIFO).
 
     'cd' is WMP's real-CD-flow identifier (?cd=<hex>+<hex>...); 'wmid' is the
     library collection GUID. WMP looks the document up by whichever it knows.
+
+    'wmid' and 'claim_wmid' are deliberately different. Indexing under a wmid
+    only makes THIS document answer for that collection. Pre-claiming
+    (PENDING_WRITE['wmid']) additionally stops any other collection from ever
+    claiming the pending document, so it is reserved for a wmid WMP really put
+    in the dialog's URL - never for a LAST_WMID fallback guess.
     """
     keys = [str(request_id).strip(), str(toc).strip(),
             str(wmid).strip(), str(cd).strip()]
@@ -309,14 +316,15 @@ def _stage_request_xml(xml, request_id="", toc="", wmid="", cd=""):
     # Which collection this document is committed to. Empty means UNCLAIMED,
     # and the FIRST wmid that fetches this document claims it.
     #
-    # Only an id the dialog itself was opened with pre-claims it. LAST_WMID is
-    # deliberately NOT used here: it is a guess about the previous album, and
-    # pre-binding to it would stop a genuinely different collection from ever
-    # claiming this document - which is the bug this whole path exists to fix.
+    # Only an id the dialog itself was opened with pre-claims it
+    # (claim_wmid). The write target is NOT enough: it may be the LAST_WMID
+    # fallback, and pre-binding to a guess would stop a genuinely different
+    # collection from ever claiming this document - which is the bug this whole
+    # path exists to fix.
     if prev_xml is not xml:
         PENDING_WRITE['wmid'] = ''
-    if wmid:
-        PENDING_WRITE['wmid'] = wmid
+    if claim_wmid:
+        PENDING_WRITE['wmid'] = claim_wmid
     # A fresh library-write id we remembered was paired with the PREVIOUS
     # document, so it must not survive this staging.
     FRESH_WRITES.clear()
@@ -1343,7 +1351,12 @@ def mdr_post():
             staged = _retarget_collection_id(staged, wmid_q)
             # Remember this wmid -> document pairing: WMP re-fetches the same
             # collection moments later, and by then LAST_XML may have moved on.
-            _stage_request_xml(staged, wmid=wmid_q)
+            # claim_wmid=wmid_q PRESERVES the existing claim. Without it a new
+            # document is seen here (prev_xml is not xml), which resets
+            # PENDING_WRITE['wmid'] to '' - and the next unrelated collection to
+            # ask would then be able to claim this same document, so a second
+            # album would be served the first one's tags.
+            _stage_request_xml(staged, wmid=wmid_q, claim_wmid=wmid_q)
         # Log which album WMP is actually being served, so a mismatch between
         # the dialog selection and what WMP applied is visible in the log.
         m = re.search(r"<albumTitle>([^<]*)</albumTitle>", staged)
@@ -2515,7 +2528,21 @@ def confirm():
         toc: WMP_TOC,
         mdq: mdq,
         cd: WMP_CD,
-        wmid: WMP_WMID_AUTH
+        // The collection this document is actually being WRITTEN to. WMP_WMID
+        // may be the server's LAST_WMID fallback, but it is what step 3 hands
+        // to WriteNamesEx, so the document must describe THAT collection -
+        // otherwise its WMCollectionID is a generated GUID WMP does not
+        // recognise, and WMP's own follow-up fetch by wmid gets served the
+        // previously applied album instead. Logged from a real library update:
+        //   12:56:29  [WMID] dialog had no wmid; using last seen collection
+        //              'B17CF884' as the write target
+        //   12:56:44  [MDR] -> serving album='Mylo Xyloto' (wmid=-)   <- no retarget
+        //   12:56:52  [MDR] -> serving album='Tiny Cities' (wmid=B17CF884)
+        wmid: WMP_WMID,
+        // Only a wmp that WMP actually put in THIS dialog's URL. A fallback
+        // guess must not pre-claim the pending document, or a genuinely
+        // different collection can never claim it.
+        wmid_auth: WMP_WMID_AUTH
       });
 
       var xhr = new XMLHttpRequest();
@@ -2802,18 +2829,31 @@ def store_staged_xml():
         # LAST_XML, which by then may hold a completely different album.
         toc_val = str(data.get("toc", "") or "").strip()
         cd_val = str(data.get("cd", "") or "").strip()
+        # The collection the dialog is writing TO. The client sends WMP_WMID,
+        # which may be the server's LAST_WMID fallback rather than something
+        # WMP put in this dialog's URL. The document must still describe that
+        # collection - it is what WriteNamesEx is handed - otherwise its
+        # WMCollectionID stays a generated GUID and WMP's own follow-up fetch
+        # by wmid is answered with whatever album was applied BEFORE this one:
+        #   12:56:29  [WMID] using last seen collection 'B17CF884' as write target
+        #   12:56:44  [MDR] -> serving album='Mylo Xyloto' (wmid=-)   <- no retarget
+        #   12:56:52  [MDR] -> serving album='Tiny Cities' (wmid=B17CF884)
+        # wmid_auth is the stricter value: only a wmid WMP really put in THIS
+        # dialog's URL. Only that one may pre-claim the pending document,
+        # because a fallback guess must not stop a genuinely different
+        # collection from ever claiming it.
+        wmid_target = str(data.get("wmid", "") or "").strip()
+        wmid_auth = str(data.get("wmid_auth", "") or "").strip()
         xml = build_wmp_xml(album, selected_tracks=selected_tracks,
                             request_id=req_id, content_ids=content_ids,
-                            wmid=str(data.get("wmid", "") or ""),
+                            wmid=wmid_target,
                             cd=cd_val)
         with XML_LOCK:
             LAST_XML = xml
-            # Bind only to a wmid WMP put in THIS dialog's URL. LAST_WMID is a
-            # guess about some earlier album, and pre-binding to it would stop
-            # the genuine collection from ever claiming this document - which
-            # is exactly why the first FAI run of a session used to tag nothing.
-            _stage_request_xml(xml, req_id, toc_val,
-                               str(data.get("wmid", "") or "").strip())
+            # Index under the collection we are writing to, so the delivery
+            # lookup resolves exactly instead of reaching a stale binding.
+            _stage_request_xml(xml, req_id, toc_val, wmid_target,
+                               claim_wmid=wmid_auth)
             if cd_val:
                 # WMP fetches by ?cd=... after the dialog closes; bind the
                 # staged document to that id so the lookup hits directly.
