@@ -2667,6 +2667,70 @@ check("mdq-is-never-an-unescaped-global-read",
       "applyMetadata must resolve mdq from the shared RESOLVED_MDQ, matching "
       "the fix for the companion \"'mdq' is undefined\" report")
 
+# 56. A JS SYNTAX ERROR KILLS THE WHOLE DIALOG, and the Python suite never saw
+#     it. An unbalanced brace introduced while parking the library work shipped
+#     in ba8cbd1; the confirm page then failed to parse, so every handler was
+#     gone and WMP reported BOTH of these from the same fault:
+#         Line 940  Char 7   Error: Syntax error
+#         Line 211  Char 62  Error: 'toggleRow' is undefined
+#     401 Python tests passed the whole time. Python only checks Python.
+#     If node is available, PARSE every served script - the only check that
+#     would have caught this before it reached a live dialog.
+def _js_parses(html, label):
+    m = re.search(r"<script[^>]*>(.*?)</script>", html, re.S | re.I)
+    if not m:
+        return None, "no <script> block found"
+    path = os.path.join(_DIR, "_syntaxcheck_%s.js" % label)
+    try:
+        with open(path, "w", encoding="utf-8") as _f:
+            _f.write(m.group(1))
+    except OSError as e:
+        return None, str(e)
+    try:
+        import subprocess
+        _r = subprocess.run(["node", "--check", path],
+                            capture_output=True, text=True, timeout=60)
+        return _r.returncode == 0, (_r.stderr or _r.stdout or "")[:400]
+    except FileNotFoundError:
+        return None, "node not installed"
+    except Exception as e:
+        return None, str(e)
+
+
+_JS_PAGES = (("confirm", "/confirm?source=itunes&id=1065975633&requestid=T"),
+             ("search", "/FAI/ui?cd=A+96+362E+85B3"),
+             ("library", "/FAI/ui?requestid=D86F70C1-08E2-4219-8F86-7FE6A1C98974"))
+_node_ok = False
+for _label, _url in _JS_PAGES:
+    _ok, _err = _js_parses(c.get(_url).data.decode("utf-8", "ignore"), _label)
+    if _ok is None:
+        continue
+    _node_ok = True
+    check("served-%s-script-parses" % _label, _ok,
+          f"the {_label} dialog's JavaScript must PARSE. A syntax error removes "
+          f"every handler at once ('toggleRow' is undefined) and the WMP dialog "
+          f"stops working entirely: {_err}")
+    # Brace balance runs even without node, and is the cheapest early warning
+    # for the exact way this breaks: an edit that unbalances the write path.
+    _m = re.search(r"<script[^>]*>(.*?)</script>",
+                   c.get(_url).data.decode("utf-8", "ignore"), re.S | re.I)
+    if _m:
+        _js = _m.group(1)
+        check("served-%s-braces-balance" % _label,
+              _js.count("{") == _js.count("}"),
+              f"unbalanced braces in the {_label} script: "
+              f"{{ ={_js.count('{')} }} ={_js.count('}')}")
+
+# The handlers the CONFIRM page's inline onclick attributes depend on. A syntax
+# error makes all of these vanish at once; that is the visible symptom in WMP.
+# doSearch is deliberately NOT here: it belongs to the search page, not this one.
+for _fn in ("toggleRow", "syncRow", "selectAll", "selectNone", "finishSync",
+            "applyMetadata"):
+    check("confirm-exposes-%s" % _fn,
+          ("function %s(" % _fn) in page,
+          f"the confirm page's inline onclick handlers call {_fn}(), so it must "
+          f"exist; if it is undefined the dialog is dead on arrival")
+
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:

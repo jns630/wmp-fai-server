@@ -3699,8 +3699,6 @@ def confirm():
             }
           }
         }
-}
-        }
 
         // Fallback: write by TOC (WMP_WRITENAMES_TYPE_CD_BY_TOC = 0) when WMP did
         // hand us a TOC on the dialog URL.
