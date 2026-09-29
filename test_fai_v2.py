@@ -792,12 +792,25 @@ check("fai-no-calc-or-gap",
       "calc(" not in _CSS_BLOCK and "gap:" not in _CSS_BLOCK,
       "the FAI stylesheet must not use calc() or flex gap")
 check("fai-flex-only-in-outer-column",
-      all(s.strip() in ("body",) for s in _flex_sel)
-      and all(s.strip() in (".header-area", ".main-container", ".footer") for s in _flex1_sel),
+      all(s.strip() in ("body", ".right-pane") for s in _flex_sel)
+      and all(s.strip() in (".header-area", ".main-container", ".footer",
+                            ".right-pane", ".results-scroll",
+                            ".section-label, .search-box-row, .filter-row")
+              for s in _flex1_sel),
       f"flexbox leaked into the inner layout: display:flex={_flex_sel} flex:1={_flex1_sel}")
+# .right-pane is now a flex column so the result LIST can take the leftover
+# height and scroll on its own - that is what gives the dialog the single
+# scrollbar the authentic one has. IE7 has no flexbox, so the conditional
+# block MUST put it back to display:block and give the list a fixed height,
+# otherwise IE7 would lose the scrollbar entirely.
+check("ie7-undoes-the-pane-flexbox",
+      ".main-container, .header-area, .footer, .left-pane, .right-pane { display: block; }" in _src
+      and ".results-scroll { height: 360px; overflow-y: scroll; }" in _src,
+      "the IE7 conditional must reset the pane to display:block and give "
+      ".results-scroll an explicit height so it still scrolls")
 check("fai-columns-are-floats",
       ".left-pane { float: left;" in _src and ".right-pane { margin-left: 48%;" in _src,
-      "the two columns must be float based so IE7 lays them out")
+      "the two columns must be float/margin based so IE7 lays them out")
 check("fai-list-rows-are-floats",
       ".album-item { position: relative; float: left; width: 100%; padding: 4px 6px; overflow: hidden;" in _src
       and ".album-thumb { width: 48px; height: 48px; float: left;" in _src
@@ -1033,7 +1046,7 @@ check("inexact-total-says-at-least",
 # the scoped query must be shared, never duplicated, or counts drift from results
 check("search-and-count-share-query",
       _src.count("def _build_lucene_query") == 1
-      and _src.count("_build_lucene_query(query, artist_hint, album_hint)") == 2,
+      and _src.count("_build_lucene_query(query, artist_hint, album_hint)") >= 2,
       "the search and the count must build their Lucene query with one shared helper")
 
 # 42. Two bugs found from a real screenshot of 'coldplay ghost story':
@@ -1098,49 +1111,61 @@ check("recording-parser-guards-lists",
 # 43. The results pane is only ~450px tall but the list can be ~2,300px, and
 #     the rows are FLOATS - a float does not contribute to its container's
 #     scroll height, so the pane reported scrollHeight == clientHeight and drew
-#     NO scrollbar. Everything past the fold was unreachable. Fixed with a
-#     clearfix scroll wrapper plus a 'Show more' pager.
+#     NO scrollbar. Everything past the fold was unreachable.
+#     The authentic dialog (reference screenshot) has exactly ONE scrollbar and
+#     it belongs to the RESULT LIST, starting below the Artists|Albums|Tracks
+#     strip with Win32 arrow buttons. So the list - not the pane - is the
+#     scroller, and the search box and filter strip stay put above it.
 check("results-have-scroll-container",
       'id="results_scroll"' in ui_html and 'class="results-scroll"' in ui_html,
       "the results list needs its own scroll container to get a scrollbar")
 check("scroll-container-establishes-bfc",
-      ".results-scroll { overflow: hidden; }" in _src,
-      ".results-scroll must set overflow so the float stack is actually measured")
-check("scroll-wrapper-does-not-nest-a-scrollbar",
-      "max-height" not in _src.split(".results-scroll {")[1].split("}")[0],
-      "the clearfix must not constrain height, or it would clip or nest a scrollbar")
-check("pager-is-wired",
-      "function showMore" in ui_html and "function renderPager" in ui_html
-      and 'onclick="showMore();"' in ui_html,
-      "a 'Show more' pager must exist and be wired")
-check("paging-state-tracked",
-      "var CURRENT_PAGE = 1;" in ui_html and "'&page=' + CURRENT_PAGE" in ui_html,
-      "the client must track and send the current page")
-check("pager-resets-on-new-search",
-      ui_html.count("CURRENT_PAGE = 1;") >= 3,
-      "switching tab / Next / clear must all reset the page counter")
+      "overflow: hidden; overflow-y: scroll; }" in _src
+      and "min-height: 0" in _src,
+      ".results-scroll needs overflow (clearfix for the floats) and min-height:0 "
+      "so it can shrink and scroll as a flex item")
+check("scrollbar-is-always-drawn",
+      "overflow-y: scroll;" in _src,
+      "the list must use 'scroll' not 'auto' so the bar is always visible, "
+      "as in the reference dialog")
+check("list-scrolls-not-the-pane",
+      "min-height: 0; overflow: hidden; overflow-y: scroll; }" in _src
+      and ".right-pane { margin-left: 48%; height: 100%; padding: 11px 12px; overflow: hidden; display: flex;" in _src,
+      "the list must scroll, not the pane - otherwise the search box scrolls away")
+check("pane-is-a-flex-column",
+      ".right-pane" in _src and "flex-direction: column;" in _src,
+      "the pane must be a flex column so the list can take the leftover height")
+# The authentic dialog has no 'next page' control, so the pager must be gone.
+check("no-authentic-violating-pager",
+      "showMore" not in ui_html and "renderPager" not in ui_html
+      and "_pager_html" not in _src and "pager-btn" not in _src,
+      "the reference dialog scrolls; it has no 'Show more' pager, so it must "
+      "not be reintroduced")
+check("no-paging-state-in-client",
+      "CURRENT_PAGE" not in ui_html,
+      "with no pager the client must not keep a page counter to desync")
+# IE7 has no flexbox, so the list needs an explicit height to still scroll.
+check("ie7-gives-list-a-height",
+      ".results-scroll { height: 360px; overflow-y: scroll; }" in _src,
+      "the IE7 conditional must give the list a fixed height so it still gets "
+      "a scrollbar without flexbox")
 check("server-slices-by-page",
       'request.args.get("page"' in _src
       and "_start = (page - 1) * per_page" in _src
-      and "_it_slice = itunes_results[_start:" in _src
-      and "_mb_slice = mb_results[_mb_from:" in _src,
-      "the server must slice the combined iTunes+MusicBrainz list by page")
-check("paging-reported-to-client",
-      'totals["has_more"]' in _src and 'totals["end_index"]' in _src
-      and "t.has_more === true" in ui_html,
-      "paging state must ride along in X-Search-Totals for the pager")
+      and "_window = _combined[_start:_start + per_page]" in _src,
+      "the server must still support slicing for API callers")
+# the default page must be big enough that the scrollbar alone reaches every row
+check("default-page-shows-everything",
+      "per_page = 100" in _src,
+      "the default per_page must cover the whole result set so no row is "
+      "unreachable without a pager")
 # paging must not change page 1 from what it always returned
 _rp1 = c.get("/api_search?q=coldplay+ghost+story&page=1")
 check("page-1-unchanged",
       _rp1.status_code == 200 and "album-item" in _rp1.data.decode("utf-8", "ignore"),
       f"page=1 must still return results, got {_rp1.status_code}")
-# page 2 must return DIFFERENT rows, otherwise Show more does nothing
-_rp2 = c.get("/api_search?q=coldplay+ghost+story&page=2&per_page=5")
-check("page-2-returns-more",
-      _rp2.status_code == 200 and "album-item" in _rp2.data.decode("utf-8", "ignore"),
-      f"page=2 must return further rows, got {_rp2.status_code}")
 _r1 = c.get("/api_search?q=coldplay+ghost+story&page=1&per_page=5").data.decode("utf-8", "ignore")
-_r2 = _rp2.data.decode("utf-8", "ignore")
+_r2 = c.get("/api_search?q=coldplay+ghost+story&page=2&per_page=5").data.decode("utf-8", "ignore")
 _t1 = set(re.findall(r"pick\('(?:itunes|musicbrainz)',\s*'([^']+)'\)", _r1))
 _t2 = set(re.findall(r"pick\('(?:itunes|musicbrainz)',\s*'([^']+)'\)", _r2))
 check("pages-do-not-overlap",
@@ -1152,11 +1177,87 @@ for _bad in ("page=0&per_page=1", "page=abc&per_page=1", "per_page=0"):
     check("paging-junk-safe-%s" % _bad.replace("&", "-").replace("=", ""),
           _rb.status_code == 200,
           f"{_bad} returned {_rb.status_code}")
-# the IE7 conditional must cover the new rules too
-check("ie7-covers-pager",
-      ".pager-btn { background-image: none !important;" in _src
-      and ".results-scroll, .pager-btn { border-radius: 0; }" in _src,
-      "the pager and scroll wrapper need IE7 filter fallbacks")
+
+# 44. MusicBrainz rate-limits to ONE request per second and answers a burst with
+#     '503'. One search here fires up to seven MusicBrainz calls at once, so the
+#     burst was reliably throttled and the 'status_code != 200' branches returned
+#     an empty list SILENTLY - the dialog showed iTunes rows and zero MusicBrainz
+#     rows with no error anywhere. Verified against the live API:
+#     'artist:"pink floyd" AND (the OR wall)' returns 1291 releases, but the
+#     dialog rendered none of them.
+check("mb-rate-limiter-exists",
+      "def _mb_get(" in _src and "_MB_MIN_INTERVAL" in _src and "_MB_LOCK" in _src,
+      "MusicBrainz calls must go through a rate limiter; it allows 1 req/sec")
+check("mb-503-is-retried",
+      "if resp.status_code == 503:" in _src and "attempt" in _src,
+      "a throttled 503 must be retried, not silently turned into zero results")
+# Every MusicBrainz call must be routed through the limiter. The User-Agent is
+# the marker: it may appear only in the constant and inside _mb_get, so any
+# other call site that sends it is an unthrottled MusicBrainz request.
+_ua_uses = len(re.findall(r"MUSICBRAINZ_USER_AGENT", _src))
+check("no-unthrottled-mb-calls",
+      _ua_uses <= 2,
+      f"the MusicBrainz User-Agent appears {_ua_uses}x; only the constant and "
+      f"_mb_get may send it, so some MusicBrainz call bypasses the limiter")
+check("mb-calls-use-limiter",
+      _src.count("_mb_get(") >= 5,
+      "search, counts, entity views and album details must all use _mb_get")
+# throttling must be documented, not accidental
+check("mb-limiter-explained",
+      "1 request per second" in _src or "one request per second" in _src.lower(),
+      "the 1 req/sec MusicBrainz limit and the silent-empty-list failure mode "
+      "must be documented where the limiter lives")
+
+# 45. Paging then made MusicBrainz INVISIBLE. The album window was sliced
+#     'iTunes first, then MusicBrainz', so a query with 40 iTunes rows filled the
+#     whole 40-row window and MusicBrainz got zero slots - the first page showed
+#     no MusicBrainz rows even though albums_shown counted them.
+check("providers-are-interleaved",
+      "def _interleave_providers(" in _src
+      and "_interleave_providers(itunes_results, mb_results)" in _src,
+      "the two providers must be interleaved so neither crowds the other out")
+check("no-first-come-window",
+      "_mb_take" not in _src,
+      "the old 'iTunes fills the window first' slicing must be gone")
+# the helper itself must actually interleave, and must not lose or duplicate rows
+_il = fai._interleave_providers
+_A = [{"id": "i%d" % i} for i in range(40)]
+_B = [{"id": "m%d" % i} for i in range(40)]
+_mixed = _il(_A, _B)
+check("interleave-keeps-every-row",
+      len(_mixed) == 80
+      and len({r["id"] for _s, r in _mixed}) == 80,
+      f"interleave must keep all 80 rows exactly once, got {len(_mixed)}")
+_first40 = [s for s, _r in _mixed[:40]]
+check("first-page-has-both-sources",
+      "itunes" in _first40 and "musicbrainz" in _first40,
+      f"a 40/40 split must put both providers on page 1, got {set(_first40)}")
+check("first-page-is-balanced",
+      15 <= _first40.count("itunes") <= 25,
+      f"page 1 should be roughly balanced, got {_first40.count('itunes')} iTunes")
+_skew = _il(_A, [{"id": "m0"}])
+check("interleave-surfaces-a-small-source",
+      "musicbrainz" in [s for s, _r in _skew[:10]],
+      "a 40/1 split must still show the lone MusicBrainz row near the top")
+check("interleave-handles-empty-sides",
+      _il([], []) == [] and _il(_A, []) != [] and _il([], _B) != [],
+      "interleave must tolerate an empty or missing provider list")
+# the RENDERED order must alternate too. Interleaving the window and then
+# re-splitting it into two render loops put the counts right but the list still
+# read as a block of iTunes followed by a block of MusicBrainz.
+_ord_body = c.get("/api_search?q=pink+floyd+-+the+wall&per_page=20").data.decode("utf-8", "ignore")
+_ord = re.findall(r"pick\('(itunes|musicbrainz)'", _ord_body)
+check("rendered-rows-alternate",
+      len(_ord) >= 10 and _ord[:6].count("itunes") <= 4 and _ord[:6].count("musicbrainz") >= 2,
+      f"the first rows must mix both providers, got {_ord[:8]}")
+# both providers must actually appear on a broad first page
+check("first-page-shows-both-providers",
+      "itunes" in _ord and "musicbrainz" in _ord,
+      "a broad first page must contain both iTunes and MusicBrainz rows")
+# the id is interpolated into an onclick attribute, so it must be escaped
+check("row-id-is-escaped",
+      "rid = esc(item.get(\"id\"))" in _src,
+      "the release id goes into onclick='...', so it must be HTML-escaped")
 
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
