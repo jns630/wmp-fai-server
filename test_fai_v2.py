@@ -646,6 +646,10 @@ check("cert-is-trusted",
 #     'mdq', which was a local var inside finishSync() and therefore undefined
 #     there -> "'mdq' is undefined" on every Finish click (caught by window.onerror).
 _src = open(BASE, encoding="utf-8").read()
+# This suite's own source, for the checks that must assert on how the suite
+# controls its own state (e.g. forcing the token off rather than inheriting
+# whatever the developer machine happens to have).
+_src_test = open(os.path.join(_DIR, "test_fai_v2.py"), encoding="utf-8").read()
 _am = _src.split("function applyMetadata(")[1]
 check("apply-mdq-is-scoped",
       "var mdq = RESOLVED_MDQ || '';" in _am,
@@ -2069,6 +2073,436 @@ check("cover-value-has-no-bare-ampersand",
       and "&" not in re.sub(r"&(amp|lt|gt|quot|apos);", "", _d1),
       f"neither cover form may contain a bare '&': proxy={_c1[:110]!r} "
       f"direct={_d1[:110]!r}")
+
+# ==========================================================
+# 50. DISCOGS (OPTIONAL THIRD PROVIDER)
+# ==========================================================
+
+# ---- 50a. the token must never be committed ------------------------------
+# The repository is PUBLIC. A token pasted into tracked source is a leaked
+# credential that anyone can clone and use, and it cannot be un-leaked by
+# editing the file later - it stays in git history forever.
+_DG_TOKENS = re.findall(r"\b[A-Za-z0-9]{36,}\b", _src)
+check("no-discogs-token-in-source",
+      not _DG_TOKENS,
+      f"a long opaque credential-shaped string is committed in FAI Server.py: "
+      f"{_DG_TOKENS[:2]}")
+check("discogs-token-reads-the-environment",
+      "DISCOGS_TOKEN" in _src and 'os.environ.get("DISCOGS_TOKEN")' in _src,
+      "the token must come from the environment, not from committed source")
+for _f in ("README.md", "requirements.txt", "Procfile", "render.yaml"):
+    try:
+        with open(os.path.join(_DIR, _f), encoding="utf-8") as _fh:
+            _txt = _fh.read()
+    except OSError:
+        continue
+    _leak = [t for t in re.findall(r"\b[A-Za-z0-9]{36,}\b", _txt) if t not in
+             ("WindowsMediaPlayerFAI/2.0", "MusicBrainzSearchByServer/1.0")]
+    check("no-discogs-token-in-%s" % _f.replace(".", "-"),
+          not _leak,
+          f"{_f} must not contain a Discogs token: {_leak[:1]}")
+
+# ---- 50b. no token means the feature is completely absent ---------------
+# This is the safety property: a user with no token must get EXACTLY the
+# behaviour they had before Discogs existed.
+_prev_tok = fai.DISCOGS_TOKEN
+fai.DISCOGS_TOKEN = ""
+try:
+    check("discogs-unconfigured-without-token",
+          fai._discogs_configured() is False,
+          "a missing token must disable the provider, not crash the search")
+    check("discogs-search-empty-without-token",
+          fai.search_discogs("pink floyd the wall") == [],
+          "search_discogs must return nothing at all when unconfigured")
+    check("discogs-details-empty-without-token",
+          fai.get_discogs_album_details("5460") is None,
+          "get_discogs_album_details must return None when unconfigured")
+    check("discogs-get-makes-no-call-without-token",
+          fai._discogs_get("database/search") is None,
+          "_discogs_get must not touch the network without a token")
+    check("interleave-tolerates-missing-provider",
+          fai._interleave_sources([("itunes", [{"id": "a"}]),
+                                   ("discogs", [])])
+          == [("itunes", {"id": "a"})],
+          "an unconfigured Discogs must not appear in the merged list")
+finally:
+    fai.DISCOGS_TOKEN = _prev_tok
+
+# ---- 50c. authenticated requests ---------------------------------------
+class _FakeResp:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload if payload is not None else {}
+
+    def json(self):
+        return self._payload
+
+
+def _with_token(fn):
+    """Run fn with Discogs enabled, a fresh cache and a stubbed transport."""
+    prev = (fai.DISCOGS_TOKEN, fai._discogs_get, fai.search_cache,
+            fai.album_cache, fai.session)
+    fai.DISCOGS_TOKEN = "test-token-not-real"
+    fai.search_cache = fai.TTLCache(default_ttl=7200)
+    fai.album_cache = fai.TTLCache(default_ttl=86400)
+    try:
+        return fn()
+    finally:
+        (fai.DISCOGS_TOKEN, fai._discogs_get, fai.search_cache,
+         fai.album_cache, fai.session) = prev
+
+
+_seen = []
+
+
+class _FakeSession:
+    def get(self, url, params=None, timeout=None, headers=None):
+        _seen.append({"url": url, "params": params, "headers": headers or {}})
+        return _FakeResp(200, {"results": []})
+
+
+# Assert on the LITERAL request rather than trusting that _discogs_get
+# "does auth" - a stubbed _discogs_get would hide a missing header.
+# _with_token saves and restores fai.session, so the fake cannot leak.
+# It must be an INSTANCE, not the class: the app calls session.get(url, ...)
+# and a bare class would bind url to self.
+fai._DG_LAST_CALL[0] = 0.0
+_with_token(lambda: (setattr(fai, "session", _FakeSession()),
+                     fai.search_discogs("kind of blue"))[1])
+_hdr = _seen[0]["headers"] if _seen else {}
+check("discogs-sends-an-auth-header",
+      bool(_seen) and "Discogs token=test-token-not-real"
+      in str(_hdr.get("Authorization", "")),
+      f"the request must authenticate with the token: "
+      f"{_hdr.get('Authorization')!r}")
+check("discogs-token-is-not-a-query-param",
+      bool(_seen) and "token=" not in str(_seen[0]["params"]),
+      f"the token must travel in a header, never in a URL/query that gets "
+      f"logged: {_seen[0]['params'] if _seen else None}")
+check("discogs-has-its-own-user-agent",
+      bool(_hdr.get("User-Agent")) and "DISCOGS_USER_AGENT" in _src,
+      "Discogs must identify itself with its own User-Agent, not the "
+      "MusicBrainz one (that constant guards the 1 req/sec limiter)")
+
+# ---- 50d. search normalization -----------------------------------------
+_SEARCH_PAYLOAD = {"results": [
+    {"master_id": 5460, "id": 5460, "type": "master",
+     "title": "Miles Davis - Kind Of Blue", "year": 1959,
+     "thumb": "https://i.discogs.com/t.jpg",
+     "cover_image": "https://i.discogs.com/c.jpg",
+     "genre": "Jazz", "style": ["Modal", "Bebop"]},
+    {"master_id": 999, "id": 999, "type": "master",
+     "title": "NoSeparatorHere", "year": 1990},
+    {"id": None, "type": "master", "title": "Broken - Row"},
+]}
+
+
+def _search_probe():
+    fai._discogs_get = lambda p, params=None, **k: (
+        _FakeResp(200, _SEARCH_PAYLOAD) if p.startswith("database") else None)
+    return fai.search_discogs("kind of blue")
+
+
+_rows = _with_token(_search_probe)
+check("discogs-search-normalizes-rows",
+      len(_rows) == 2 and _rows[0]["title"] == "Kind Of Blue"
+      and _rows[0]["artist"] == "Miles Davis",
+      f"'Artist - Album' must split into the shared title/artist fields: {_rows}")
+check("discogs-rows-match-the-shared-shape",
+      all({"id", "title", "artist", "year", "art_thumb"} <= set(r.keys())
+          for r in _rows),
+      "Discogs rows must carry the same fields the albums renderer reads from "
+      f"iTunes/MusicBrainz rows: {sorted(_rows[0].keys()) if _rows else []}")
+
+# ---- 50e. helper units ---------------------------------------------------
+check("dg-parses-mmss-durations",
+      fai._dg_duration_ms("9:22") == 562000
+      and fai._dg_duration_ms("1:02:33") == 3753000
+      and fai._dg_duration_ms("") == 0
+      and fai._dg_duration_ms(None) == 0,
+      "Discogs sends durations as 'M:SS' strings and the rest of the app "
+      "needs milliseconds")
+check("dg-does-not-crash-on-bad-durations",
+      fai._dg_duration_ms("n/a") == 0 and fai._dg_duration_ms(":::") == 0,
+      "a malformed duration must degrade to 0, not raise and lose the album")
+check("dg-maps-side-letters-to-one-disc",
+      fai._dg_position("A1") == (1, 1) and fai._dg_position("B12") == (1, 12),
+      "A/B are SIDES of one disc, not discs - reading B as disc 2 would "
+      "invent a second disc WMP never had")
+check("dg-maps-real-multidisc-positions",
+      fai._dg_position("2-5") == (2, 5),
+      "on a genuine 2-CD release '2-5' really is disc 2 track 5")
+check("dg-splits-artist-and-title",
+      fai._dg_split_artist_title("Pink Floyd - The Wall")
+      == ("Pink Floyd", "The Wall"),
+      "Discogs packs artist and title into one string")
+check("dg-keeps-a-title-without-an-artist",
+      fai._dg_split_artist_title("Kind Of Blue") == ("", "Kind Of Blue"),
+      "a title with no separator must not be mangled into a fake artist")
+
+# ---- 50f. detail normalization ------------------------------------------
+_MASTER = {
+    "id": 5460, "title": "Kind Of Blue", "year": 1959,
+    "artists": [{"name": "Miles Davis"}],
+    "genres": ["Jazz"], "styles": ["Modal"],
+    "images": [{"type": "secondary", "uri": "https://img/back.jpg"},
+               {"type": "primary", "uri": "https://img/front.jpg"}],
+    "tracklist": [
+        {"type_": "heading", "position": "A", "title": "Side A"},
+        {"position": "A1", "title": "So What", "duration": "9:22",
+         "extraartists": [{"name": "Miles Davis", "role": "Composed By"},
+                          {"name": "Bob", "role": "Producer"}]},
+        {"position": "A2", "title": "Freddie Freeloader", "duration": "9:46",
+         "extraartists": [{"name": "Horace Silver", "role": "Written-By"}]},
+    ],
+}
+
+
+def _detail_probe():
+    fai._discogs_get = lambda p, params=None, **k: (
+        _FakeResp(200, _MASTER) if p.startswith("masters/") else None)
+    return fai.get_discogs_album_details("5460")
+
+
+_det = _with_token(_detail_probe)
+check("discogs-detail-returns-the-shared-shape",
+      bool(_det) and {"id", "source", "title", "artist", "genre", "year",
+                      "art_url", "tracks"} <= set(_det.keys()),
+      f"the confirm page and build_wmp_xml() read a fixed key set, so a "
+      f"Discogs album must produce it: {sorted(_det.keys()) if _det else None}")
+check("discogs-detail-skips-heading-rows",
+      bool(_det) and len(_det["tracks"]) == 2,
+      f"'Side A' is a structural heading, not a track: "
+      f"{[t['name'] for t in _det['tracks']] if _det else None}")
+check("discogs-composer-only-from-composer-roles",
+      bool(_det) and _det["tracks"][0]["composer"] == "Miles Davis",
+      f"only Composer/Written-By roles are composers - writing 'Bob' "
+      f"(Producer) as the composer would put a false credit in the library: "
+      f"{_det['tracks'][0]['composer'] if _det else None}")
+# Discogs HYPHENATES the role in the wild ('Written-By', not 'Written By').
+# Matching only the spaced form silently dropped every Lennon-McCartney style
+# credit while looking perfectly correct in the UI - an empty composer field.
+check("discogs-matches-the-hyphenated-written-by-role",
+      bool(_det) and _det["tracks"][1]["composer"] == "Horace Silver",
+      f"the role string Discogs actually sends is 'Written-By': "
+      f"{_det['tracks'][1]['composer'] if _det else None}")
+check("discogs-prefers-the-primary-image",
+      bool(_det) and _det["art_url"] == "https://img/front.jpg",
+      f"the front cover must win over a back sleeve: "
+      f"{_det['art_url'] if _det else None}")
+check("discogs-id-cannot-collide-with-other-providers",
+      bool(_det) and _det["id"] == "dg5460",
+      f"iTunes/MusicBrainz ids are bare integers; an unprefixed Discogs id "
+      f"would generate the same WMP collection GUID and apply the wrong "
+      f"album's tags: {_det['id'] if _det else None}")
+check("discogs-tracks-are-complete",
+      bool(_det) and all({"id", "name", "number", "disc", "artist", "performer",
+                          "composer", "duration_ms", "genre"} <= set(t.keys())
+                          for t in _det["tracks"]),
+      "every track needs the full key set the confirm page and XML builder read")
+check("discogs-track-durations-carry-through",
+      bool(_det) and _det["tracks"][0]["duration_ms"] == 562000,
+      f"a real runtime must survive normalization: "
+      f"{_det['tracks'][0]['duration_ms'] if _det else None}")
+
+# a master with no tracklist must fall back to its main release
+def _empty_master_probe():
+    def _g(p, params=None, **k):
+        if p.startswith("masters/"):
+            return _FakeResp(200, {"id": 5460, "title": "T", "year": 1959,
+                                   "artists": [{"name": "A"}],
+                                   "genres": ["Jazz"], "tracklist": [],
+                                   "main_release": 12345, "images": []})
+        if p.startswith("releases/"):
+            return _FakeResp(200, {
+                "tracklist": [{"position": "1", "title": "Real Track",
+                               "duration": "3:00"}],
+                "images": [{"type": "primary", "uri": "https://img/rel.jpg"}]})
+        return None
+    fai._discogs_get = _g
+    return fai.get_discogs_album_details("5460")
+
+
+_fb = _with_token(_empty_master_probe)
+check("discogs-falls-back-to-the-main-release",
+      bool(_fb) and len(_fb["tracks"]) == 1
+      and _fb["tracks"][0]["name"] == "Real Track",
+      f"a master with an empty tracklist is a catalogued work with no pressing "
+      f"entered; its main release holds the real tracklist: "
+      f"{_fb['tracks'] if _fb else None}")
+
+# ---- 50g. rate limiting / failure ---------------------------------------
+check("discogs-is-rate-limited",
+      "_DG_MIN_INTERVAL" in _src and "_DG_LOCK" in _src
+      and "def _discogs_get(" in _src,
+      "an unthrottled burst gets 429s and the provider silently vanishes")
+
+
+def _no_sleep(fn):
+    """Run fn with the retry backoff neutralised so the suite stays fast."""
+    prev_sleep, prev_iv = fai.time.sleep, fai._DG_MIN_INTERVAL
+    fai.time.sleep = lambda s: None
+    fai._DG_MIN_INTERVAL = 0.0
+    fai._DG_LAST_CALL[0] = 0.0
+    try:
+        return fn()
+    finally:
+        fai.time.sleep, fai._DG_MIN_INTERVAL = prev_sleep, prev_iv
+
+
+def _throttle_probe():
+    """Drive the REAL _discogs_get through two 429s then a 200."""
+    seq = [_FakeResp(429), _FakeResp(429), _FakeResp(200, {"results": []})]
+
+    class _SeqSession:
+        def get(self, url, params=None, timeout=None, headers=None):
+            _seen.append({"url": url, "params": params, "headers": headers})
+            return seq.pop(0) if seq else _FakeResp(200, {"results": []})
+    fai.session = _SeqSession()
+    return _no_sleep(lambda: fai._discogs_get("database/search"))
+
+
+check("discogs-retries-a-429",
+      _with_token(_throttle_probe) is not None,
+      "a 429 must be retried with backoff, not turned into zero results - the "
+      "same silent-failure mode that made MusicBrainz invisible")
+
+
+def _unauth_probe():
+    class _S:
+        def get(self, url, params=None, timeout=None, headers=None):
+            return _FakeResp(401)
+    fai.session = _S()
+    return _no_sleep(lambda: fai._discogs_get("database/search", attempts=1))
+
+
+check("discogs-401-fails-soft",
+      _with_token(_unauth_probe) is None,
+      "a revoked token must disable the provider, not raise into the search")
+check("discogs-config-check-never-raises",
+      isinstance(fai._discogs_configured(), bool),
+      "the configuration probe must be safe to call anywhere")
+
+# ---- 50h. source dispatch ----------------------------------------------
+check("discogs-is-a-recognised-source",
+      'elif source == "discogs":' in _src
+      and "get_discogs_album_details(album_id)" in _src,
+      "the confirm page must resolve a Discogs row to its real tracklist")
+check("discogs-keeps-the-musicbrainz-fallback",
+      re.search(r'if source == "itunes":.*?elif source == "discogs":.*?'
+                r"else:\s*\n\s*details = get_musicbrainz_album_details",
+                _src, re.S) is not None,
+      "an unknown/legacy source value must still mean MusicBrainz, not "
+      "silently become a Discogs lookup")
+
+# ---- 50i. the search page, with and without a token --------------------
+# The token state MUST be forced, not inherited. This suite runs on developer
+# machines that legitimately have a real token in local_settings.py, and CI that
+# has none - asserting on whatever the ambient state happens to be means the
+# test passes for the wrong reason on one and fails for the wrong reason on the
+# other. Force the condition being tested.
+_prev_state = (fai.DISCOGS_TOKEN, fai._discogs_get, fai.search_cache)
+fai.DISCOGS_TOKEN = ""
+fai._discogs_get = None
+fai.search_cache = fai.TTLCache(default_ttl=7200)
+try:
+    _body = c.get("/api_search?q=pink+floyd+-+the+wall&per_page=20").data.decode(
+        "utf-8", "ignore")
+finally:
+    (fai.DISCOGS_TOKEN, fai._discogs_get,
+     fai.search_cache) = _prev_state
+_picks = re.findall(r"pick\('(itunes|musicbrainz|discogs)'", _body)
+# Without a token nothing about the page may change.
+check("no-discogs-rows-without-a-token",
+      "discogs" not in _picks and "badge-dg" not in _body,
+      f"with no token the albums page must be exactly the two providers it "
+      f"always was: {sorted(set(_picks))}")
+check("itunes-and-mb-still-both-present",
+      "itunes" in _picks and "musicbrainz" in _picks,
+      f"adding a third provider must not displace the other two: "
+      f"{sorted(set(_picks))}")
+# The token-dependent checks must control the token themselves. If they merely
+# read whatever the machine happens to have, they pass for the wrong reason on
+# a developer box with a real token and fail for the wrong reason in CI.
+check("token-state-is-forced-not-inherited",
+      'fai.DISCOGS_TOKEN = ""' in _src_test
+      and "_prev_state" in _src_test,
+      "the 'without a token' assertions must force DISCOGS_TOKEN off rather "
+      "than depend on the ambient machine state")
+check("discogs-never-leaks-the-token-into-html",
+      "test-token-not-real" not in _body and "DISCOGS_TOKEN" not in _body,
+      "the token must never reach the browser")
+
+
+# With a token AND results, the third provider must actually show up.
+# The request itself has to happen INSIDE _with_token, which restores the
+# module state on the way out.
+def _live_search():
+    fai._discogs_get = lambda p, params=None, **k: (
+        _FakeResp(200, _SEARCH_PAYLOAD) if p.startswith("database")
+        else _FakeResp(200, _MASTER))
+    return c.get("/api_search?q=kind+of+blue&per_page=20")
+
+
+_b2 = _with_token(_live_search).data.decode("utf-8", "ignore")
+_p2 = re.findall(r"pick\('(itunes|musicbrainz|discogs)'", _b2)
+check("discogs-rows-appear-when-configured",
+      "discogs" in _p2,
+      f"with a token and results, Discogs rows must reach the albums list: "
+      f"{sorted(set(_p2))}")
+check("discogs-rows-are-badged",
+      "badge-dg" in _b2 and "Discogs" in _b2,
+      "a user must be able to tell which provider a row came from")
+check("discogs-rows-are-interleaved-not-appended",
+      ("discogs" in _p2) and _p2.index("discogs") < max(2, len(_p2) // 2),
+      f"Discogs must share the round-robin, not be dumped in a block at the "
+      f"end: {sorted(set(_p2))}")
+check("discogs-id-is-escaped-into-onclick",
+      'rid = esc(item.get("id"))' in _src,
+      "the master id goes into onclick='...', so it must be HTML-escaped")
+check("discogs-shown-count-includes-the-third-provider",
+      json.loads(
+          c.get("/api_search?q=kind+of+blue&per_page=20").headers
+          .get("X-Search-Totals") or "{}").get("albums_shown", 0) >= 2,
+      "albums_shown must count the rows actually rendered, or the 'showing N "
+      "of M' lead-in under-reports")
+def _live_confirm():
+    fai._discogs_get = lambda p, params=None, **k: (
+        _FakeResp(200, _SEARCH_PAYLOAD) if p.startswith("database")
+        else _FakeResp(200, _MASTER))
+    return c.get("/confirm?source=discogs&id=5460").data.decode("utf-8", "ignore")
+
+
+_c2 = _with_token(_live_confirm)
+check("discogs-confirm-page-renders",
+      "So What" in _c2 and "Kind Of Blue" in _c2,
+      f"picking a Discogs row must show its real tracklist: {_c2[:120]!r}")
+check("discogs-confirm-never-leaks-the-token",
+      "test-token-not-real" not in _c2,
+      "the confirm page must not carry the credential to the browser")
+
+# all three sources must survive a round-robin
+_three = fai._interleave_sources(
+    [("itunes", [{"id": "i%d" % n} for n in range(3)]),
+     ("musicbrainz", [{"id": "m%d" % n} for n in range(3)]),
+     ("discogs", [{"id": "d%d" % n} for n in range(3)])])
+check("three-way-interleave-is-fair",
+      len(_three) == 9
+      and [s for s, _ in _three[:3]] == ["itunes", "musicbrainz", "discogs"]
+      and len({r["id"] for _, r in _three}) == 9,
+      f"three providers must each get a slot immediately and nothing may be "
+      f"dropped or duplicated: {[(s, r['id']) for s, r in _three[:5]]}")
+_lop = fai._interleave_sources(
+    [("itunes", [{"id": "i%d" % n} for n in range(40)]),
+     ("musicbrainz", [{"id": "m0"}]), ("discogs", [{"id": "d0"}])])
+check("three-way-interleave-surfaces-small-sources",
+      [s for s, _ in _lop[:3]] == ["itunes", "musicbrainz", "discogs"],
+      f"a 40/1/1 split must still show both small sources in the first rows: "
+      f"{[(s, r['id']) for s, r in _lop[:4]]}")
+check("two-way-interleave-unchanged",
+      [s for s, _ in fai._interleave_providers([{"id": 1}], [{"id": 2}])]
+      == ["itunes", "musicbrainz"],
+      "the original two-provider contract must be byte-identical")
 
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")

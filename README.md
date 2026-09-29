@@ -173,6 +173,52 @@ http://127.0.0.1/FAI/ui?artist=The+Beatles&album=Abbey+Road
 4. Search, pick, and press **Finish & Apply**. In library mode the tags are written
    **without** asking WMP to rename or regroup files on disk.
 
+### Optional: Discogs as a third provider
+
+By default the Albums list is built from **iTunes** and **MusicBrainz**. If you
+have a [Discogs personal access token](https://www.discogs.com/settings/developers),
+Discogs joins as a **third** provider in the same list, with its own purple
+**Discogs** badge on every row. Each provider gets a slot in a round-robin, so a
+broad search shows all three near the top of page 1 rather than burying one.
+
+Discogs is worth having because it is the most precise of the three about
+physical releases: real tracklists, side/disc positions, runtimes, and
+composer credits read from the *Written By* / *Composed By* roles. Nothing else
+about the app changes — the Artists and Tracks filters stay MusicBrainz-only
+(Discogs has no equivalent), and a Discogs album flows through the same
+confirmation page, track selection, XML generation and WMP write as any other.
+
+To enable it, set the token **before** you start the server:
+
+```powershell
+$env:DISCOGS_TOKEN = 'your-discogs-token'
+.\start_fai.bat
+```
+
+Or create a `local_settings.py` next to `FAI Server.py` containing:
+
+```python
+DISCOGS_TOKEN = 'your-discogs-token'
+```
+
+`local_settings.py` is git-ignored, so the token is never committed.
+
+> **The token is a secret.** This repository is public, so a token pasted into
+> `FAI Server.py`, the README, or a commit message is compromised for everyone
+> who clones it — and editing it out later does not remove it from git history.
+> Put it in the environment or in `local_settings.py`, and revoke and reissue it
+> at <https://www.discogs.com/settings/developers> if it has ever been shared
+> outside your machine.
+
+**Without a token Discogs is completely absent** — no request is made, no badge
+is rendered, and the Albums list is exactly the two-provider list it always was.
+A missing, expired or revoked token therefore degrades quietly rather than
+breaking search; an invalid token logs one `401` line to the console.
+
+Requests are rate-limited (60/minute authenticated), retried with backoff on
+`429`/`503`, and cached on the same two-hour / 24-hour TTLs as the other
+providers.
+
 ### Choosing which tracks to write
 
 On the confirmation page:

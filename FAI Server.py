@@ -226,6 +226,91 @@ def client_error():
     return Response("OK", mimetype="text/plain")
 
 
+# ---- Discogs (OPTIONAL third provider) ---------------------------------------
+# Discogs needs a personal access token, so it is OFF unless one is configured.
+# The token is read from the environment or from local_settings.py, which is
+# git-ignored - it is never written into this file, which is committed to a
+# PUBLIC repository. A token pasted into tracked source is a leaked credential.
+#
+#   PowerShell:  $env:DISCOGS_TOKEN = 'your-token'   (then start the server)
+#   or create local_settings.py containing:  DISCOGS_TOKEN = 'your-token'
+#
+# Without a token every Discogs code path returns empty and the dialog behaves
+# exactly as it did before Discogs existed - that is the whole point of gating
+# it, so a missing credential can never break search.
+DISCOGS_BASE_URL = "https://api.discogs.com/"
+# Discogs asks for a descriptive User-Agent identifying the app and a contact
+# URL. It deliberately does NOT reuse the MusicBrainz User-Agent constant: that
+# constant is the guard for 'every MusicBrainz call goes through _mb_get()', and
+# spending it on a non-MusicBrainz request would both misidentify the client and
+# blur that guard.
+DISCOGS_USER_AGENT = "WMPFaiServer/2.0 +https://github.com/jns630/wmp-fai-server"
+DISCOGS_TOKEN = ""
+try:
+    import local_settings  # git-ignored
+    DISCOGS_TOKEN = (getattr(local_settings, "DISCOGS_TOKEN", "") or "").strip()
+except Exception:
+    pass
+DISCOGS_TOKEN = (os.environ.get("DISCOGS_TOKEN") or DISCOGS_TOKEN or "").strip()
+# Authenticated Discogs allows 60 requests/minute. A single search here fires one
+# Discogs call, so the limiter only matters across consecutive cold searches,
+# but an unthrottled burst gets 429s and the provider silently disappears from
+# the list - the same failure mode as the MusicBrainz 503s above.
+_DG_MIN_INTERVAL = 1.1
+_DG_LOCK = threading.Lock()
+_DG_LAST_CALL = [0.0]
+
+
+def _discogs_configured():
+    return bool(DISCOGS_TOKEN)
+
+
+def _discogs_get(path, params=None, timeout=8, attempts=3):
+    """Rate-limited Discogs GET. Returns the response, or None.
+
+    Returns None - never raises - when Discogs is unconfigured, throttled or
+    failing. A provider that is absent must not be able to fail a search.
+    """
+    if not _discogs_configured():
+        return None
+    url = path if path.startswith("http") else DISCOGS_BASE_URL + path.lstrip("/")
+    delay = 1.5
+    for attempt in range(1, attempts + 1):
+        with _DG_LOCK:
+            gap = _DG_MIN_INTERVAL - (time.time() - _DG_LAST_CALL[0])
+            if gap > 0:
+                time.sleep(gap)
+            _DG_LAST_CALL[0] = time.time()
+        try:
+            resp = session.get(
+                url, params=params, timeout=timeout,
+                headers={"Authorization": f"Discogs token={DISCOGS_TOKEN}",
+                         "User-Agent": DISCOGS_USER_AGENT,
+                         "Accept": "application/json"})
+        except Exception as e:
+            print(f"[DISCOGS] {attempt}/{attempts} transport error: {e}")
+            time.sleep(delay)
+            delay *= 1.6
+            continue
+        if resp.status_code == 200:
+            return resp
+        if resp.status_code in (429, 503):
+            print(f"[DISCOGS] throttled ({resp.status_code}) on attempt "
+                  f"{attempt}/{attempts}, retrying in {delay:.1f}s")
+            time.sleep(delay)
+            delay *= 1.6
+            continue
+        # 401 means the token is bad or revoked. Retrying cannot fix that, and
+        # saying so once is far more useful than silently returning no results.
+        if resp.status_code == 401:
+            print("[DISCOGS] 401 Unauthorized - DISCOGS_TOKEN is invalid or "
+                  "revoked; Discogs results are disabled until it is fixed")
+        else:
+            print(f"[DISCOGS] HTTP {resp.status_code} for {url}")
+        return None
+    return None
+
+
 # ==========================================================
 # GLOBAL STATE & NAVIGATION TRACKING
 # ==========================================================
@@ -745,8 +830,8 @@ def _build_entity_queries(query, artist_hint=None, album_hint=None):
     return {"release": base, "recording": rec_q, "artist": artist_q}
 
 
-def _interleave_providers(itunes_results, mb_results):
-    """Merge the two provider lists so neither can crowd the other out.
+def _interleave_sources(groups):
+    """Round-robin merge of any number of (source_name, rows) groups.
 
     The album list used to be 'all iTunes, then all MusicBrainz'. Once paging
     was added that was actively harmful: iTunes returned 40 rows for a broad
@@ -754,25 +839,36 @@ def _interleave_providers(itunes_results, mb_results):
     2 or beyond - so a first page could contain no MusicBrainz rows at all
     even though albums_shown counted them.
 
-    Round-robin the two sources strictly, so both are visible immediately: a
+    Round-robin the sources strictly, so all of them are visible immediately: a
     40/40 split alternates down page 1, and a 40/1 split still puts the single
     MusicBrainz row second rather than burying it at position 41. Order within
     each source is preserved, which is what the providers use for relevance
     ranking, and no row is ever dropped or repeated.
+
+    Accepting a LIST of groups rather than a fixed pair is what lets Discogs
+    join the same rotation without anyone having to re-derive the fairness rule.
     """
-    a = list(itunes_results or [])
-    b = list(mb_results or [])
+    lists = [(name, list(rows or [])) for name, rows in groups]
     out = []
-    ia = ib = 0
-    na, nb = len(a), len(b)
-    while ia < na or ib < nb:
-        if ia < na:
-            out.append(("itunes", a[ia]))
-            ia += 1
-        if ib < nb:
-            out.append(("musicbrainz", b[ib]))
-            ib += 1
+    idx = [0] * len(lists)
+    lens = [len(rows) for _, rows in lists]
+    while any(idx[i] < lens[i] for i in range(len(lists))):
+        for i, (name, rows) in enumerate(lists):
+            if idx[i] < lens[i]:
+                out.append((name, rows[idx[i]]))
+                idx[i] += 1
     return out
+
+
+def _interleave_providers(itunes_results, mb_results):
+    """Two-provider wrapper kept for the iTunes/MusicBrainz contract.
+
+    All the merging logic lives in _interleave_sources(); this preserves the
+    original two-argument call so the existing behaviour - and the existing
+    tests that pin it - are untouched.
+    """
+    return _interleave_sources([("itunes", itunes_results),
+                                ("musicbrainz", mb_results)])
 
 
 def count_search_totals(query, artist_hint=None, album_hint=None):
@@ -1045,6 +1141,245 @@ def get_musicbrainz_album_details(release_id):
     except Exception as e:
         print(f"[MUSICBRAINZ] Details error for {release_id}: {e}")
         return None
+
+
+# ==========================================================
+# DISCOGS SEARCH & NORMALIZATION
+# ==========================================================
+# Discogs is the strongest of the three providers on release-level detail
+# (accurate tracklists, positions, formats, runtimes, credits) but it is
+# strictly OPTIONAL: it needs a token, so every entry point below short-circuits
+# to empty when _discogs_configured() is False. With no token the Albums list is
+# exactly the iTunes/MusicBrainz list it always was.
+
+def _dg_split_artist_title(title):
+    """Discogs packs 'Artist - Album' into one 'title' field.
+
+    The search endpoint does not separate them, so split on the first
+    ' - ' with a space on both sides, which is Discogs' own separator. A title
+    with no separator keeps the whole string as the title rather than guessing.
+    """
+    raw = (title or "").strip()
+    for sep in (" - ", " – ", " — "):
+        if sep in raw:
+            artist, _, rest = raw.partition(sep)
+            if artist.strip() and rest.strip():
+                return artist.strip(), rest.strip()
+    return "", raw
+
+
+def _dg_duration_ms(duration):
+    """'4:21' or '1:02:33' -> milliseconds. Discogs durations are strings."""
+    if not duration:
+        return 0
+    try:
+        parts = str(duration).strip().split(":")
+        if not all(p.strip().isdigit() for p in parts):
+            return 0
+        ms = 0
+        for n in parts:                      # right-fold: 4 -> 4, 4:21 -> 261
+            ms = ms * 60 + int(n)
+        return ms * 1000
+    except Exception:
+        return 0
+
+
+def _dg_position(position):
+    """Discogs 'position' ('A1', 'B2', '1', '2-7') -> (disc, number).
+
+    The letters are Discogs' side markers, not disc numbers: on a 2-CD set it
+    runs A1..D12, and reading that as disc 4 on a 2-disc album would invent
+    discs WMP never had. Letters therefore all map to disc 1; a real multi-disc
+    release comes back with '1-1' style positions, where the leading number IS
+    the disc.
+    """
+    pos = str(position or "").strip()
+    m = re.match(r"^([A-Za-z])\s*[-.]?\s*(\d+)$", pos)
+    if m:
+        return 1, int(m.group(2))
+    m = re.match(r"^(\d+)\s*-\s*(\d+)$", pos)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = re.match(r"^(\d+)$", pos)
+    if m:
+        return 1, int(m.group(1))
+    return 1, 0
+
+
+def search_discogs(query, limit=40, artist_hint=None, album_hint=None):
+    """Search Discogs. Returns rows shaped exactly like the other providers.
+
+    Search MASTERS, not releases: the release index returns the same album once
+    per pressing, so 'Kind Of Blue' alone returns well over a hundred rows that
+    are all the same five tracks. A master is the canonical work and points at
+    the real tracklist.
+    """
+    if not _discogs_configured():
+        return []
+    cache_key = f"dg_search_{query}|{limit}|{artist_hint}|{album_hint}"
+    cached = search_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    resp = _discogs_get("database/search",
+                        params={"q": query, "type": "master",
+                                "per_page": min(limit, 100)})
+    if resp is None:
+        return []
+    try:
+        results = resp.json().get("results", []) or []
+    except Exception as e:
+        print(f"[DISCOGS] search parse error: {e}")
+        return []
+
+    out = []
+    for r in results:
+        artist, album = _dg_split_artist_title(r.get("title", ""))
+        if not album:
+            continue
+        master_id = r.get("master_id") or r.get("id")
+        if not master_id:
+            continue
+        styles = r.get("style") or ([r["genre"]] if r.get("genre") else [])
+        out.append({
+            "id": str(master_id),
+            "title": album,
+            "artist": artist,
+            "year": str(r.get("year") or ""),
+            "genre": (styles[0] if styles else ""),
+            "art_thumb": r.get("cover_image") or r.get("thumb") or "",
+            "country": "",
+            "format": " • ".join(r.get("format") or []),
+        })
+    search_cache.set(cache_key, out, ttl=7200)
+    return out
+
+
+def get_discogs_album_details(master_id):
+    """Fetch a Discogs master tracklist, normalized to the shared shape.
+
+    Returns the SAME dictionary the iTunes and MusicBrainz paths return, so the
+    confirm page, track selection, build_wmp_xml() and the WMP write are all
+    unchanged - a Discogs album simply arrives pre-normalized.
+    """
+    cache_key = f"dg_album_{master_id}"
+    cached = album_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    resp = _discogs_get(f"masters/{master_id}")
+    if resp is None:
+        return None
+    try:
+        data = resp.json()
+    except Exception as e:
+        print(f"[DISCOGS] detail parse error for {master_id}: {e}")
+        return None
+
+    # A master can legitimately carry an empty tracklist: the work is catalogued
+    # but no pressing has been entered. Its main release is where the real
+    # tracklist (and often better images) actually live.
+    if not data.get("tracklist") and data.get("main_release"):
+        rel = _discogs_get(f"releases/{data['main_release']}")
+        if rel is not None:
+            try:
+                release = rel.json()
+                if release.get("tracklist"):
+                    data["tracklist"] = release["tracklist"]
+                if not data.get("images") and release.get("images"):
+                    data["images"] = release["images"]
+            except Exception:
+                pass
+
+    try:
+        artists = [a.get("name", "").strip()
+                   for a in (data.get("artists") or []) if a.get("name")]
+        album_artist = ", ".join(artists) if artists else "Unknown Artist"
+        album_title = data.get("title") or "Unknown Album"
+        album_year = str(data.get("year") or "")[:4] or "2000"
+
+        genres = data.get("genres") or []
+        styles = data.get("styles") or []
+        primary_genre = genres[0] if genres else (styles[0] if styles else "Rock")
+        if isinstance(primary_genre, str):
+            primary_genre = primary_genre.title()
+
+        # Prefer the 'primary' image (the real front cover) over any 'secondary'
+        # back/inner sleeve Discogs happened to list first.
+        images = data.get("images") or []
+        chosen = next((i for i in images if i.get("type") == "primary"),
+                      images[0] if images else None)
+        art_url = ""
+        if chosen:
+            art_url = chosen.get("uri") or chosen.get("resource_url") or ""
+
+        tracks = []
+        seen = 0
+        for entry in (data.get("tracklist") or []):
+            if entry.get("type_") == "heading":
+                continue          # a side/medium heading is structure, not a track
+            t_name = (entry.get("title") or "").strip()
+            if not t_name:
+                continue
+            disc, number = _dg_position(entry.get("position"))
+            seen += 1
+
+            # Discogs carries per-track credits in 'extraartists' with a free-text
+            # 'role'. Written-By / Composed By is the composer slot; Producer,
+            # Engineer and Featuring are NOT composers and must never be written
+            # into the user's library as one.
+            #
+            # The role is HYPHENATED in the wild - 'Written-By' is what Discogs
+            # actually sends, not 'Written By'. Matching the spaced form only
+            # found 'Composed By' and silently dropped 'Written-By' credits, so
+            # normalise the separators before looking for the role.
+            composer = ""
+            for xa in (entry.get("extraartists") or []):
+                role = re.sub(r"[-_]+", " ", (xa.get("role") or "")).lower()
+                if "compos" in role or "written by" in role:
+                    nm = (xa.get("name") or "").strip()
+                    if nm and nm not in composer:
+                        composer = (composer + "; " + nm) if composer else nm
+
+            t_artist = album_artist
+            for xa in (entry.get("artists") or []):
+                nm = (xa.get("name") or "").strip()
+                if nm:
+                    t_artist = nm
+                    break
+
+            tracks.append({
+                "id": f"dg_{master_id}_{disc}_{number or seen}",
+                "name": t_name,
+                "number": number or seen,
+                "disc": disc,
+                "artist": t_artist,
+                "performer": t_artist,
+                "composer": composer,
+                "duration_ms": _dg_duration_ms(entry.get("duration")),
+                "genre": primary_genre,
+            })
+
+        details = {
+            # This 'id' feeds guid() to make the WMP collection GUID. The 'dg'
+            # prefix stops a Discogs master ever colliding with an iTunes
+            # collection id or a MusicBrainz release id - all three are bare
+            # integers, and a collision would apply the wrong album's tags.
+            "id": f"dg{master_id}",
+            "source": "discogs",
+            "title": album_title,
+            "artist": album_artist,
+            "genre": primary_genre,
+            "year": album_year,
+            "art_url": art_url,
+            "tracks": tracks,
+        }
+        album_cache.set(cache_key, details, ttl=86400)
+        return details
+    except Exception as e:
+        print(f"[DISCOGS] Details error for {master_id}: {e}")
+        return None
+
 
 def lookup_by_discid_or_toc(toc_string):
     cache_key = f"toc_lookup_{toc_string.strip()}"
@@ -1614,6 +1949,7 @@ def api_search():
 
     itunes_results = []
     mb_results = []
+    dg_results = []
     totals = {"albums": None, "tracks": None, "artists": None,
               "albums_shown": 0, "tracks_shown": 0}
 
@@ -1624,16 +1960,25 @@ def api_search():
     _itunes_limit = min(25 * _fetch_mult, 100)
     _mb_limit = min(15 * _fetch_mult, 60)
     _view_limit = min(20 * _fetch_mult, 80)
+    # Discogs is only asked when a token exists, and only for the Albums view -
+    # the Artists/Tracks tabs are MusicBrainz entity views and Discogs has no
+    # equivalent. With no token this is False and the call is never made.
+    _dg_enabled = _discogs_configured() and view == "album"
+    _dg_limit = min(15 * _fetch_mult, 60)
 
     # Parallel execution of iTunes, MusicBrainz and the exact-count lookups. Four
     # workers so the count round-trips never hold up the result rows. The
     # artist/track views are fetched lazily - only the tab that is open.
-    with ThreadPoolExecutor(max_workers=4) as executor:
+    # A fifth worker covers Discogs when it is enabled; the pool is sized for the
+    # enabled case so the extra request never serialises behind the others.
+    with ThreadPoolExecutor(max_workers=5 if _dg_enabled else 4) as executor:
         f_itunes = executor.submit(search_itunes, q, limit=_itunes_limit)
         f_mb = executor.submit(search_musicbrainz, q, artist_hint=artist_hint, album_hint=album_hint, limit=_mb_limit)
         f_cnt = executor.submit(count_search_totals, q, artist_hint, album_hint)
         f_view = executor.submit(search_mb_entities, q, "artist" if view == "artist" else "recording",
                                  artist_hint, album_hint, _view_limit) if view != "album" else None
+        f_dg = executor.submit(search_discogs, q, limit=_dg_limit,
+                               artist_hint=artist_hint) if _dg_enabled else None
         try:
             itunes_results = f_itunes.result(timeout=6)
         except Exception as e:
@@ -1642,6 +1987,11 @@ def api_search():
             mb_results = f_mb.result(timeout=7)
         except Exception as e:
             print(f"[SEARCH] MusicBrainz task error: {e}")
+        if f_dg is not None:
+            try:
+                dg_results = f_dg.result(timeout=7) or []
+            except Exception as e:
+                print(f"[SEARCH] Discogs task error: {e}")
         try:
             totals = f_cnt.result(timeout=10) or totals
         except Exception as e:
@@ -1664,7 +2014,7 @@ def api_search():
             _build_lucene_query(q, artist_hint, album_hint))
         if _known_total is not None:
             totals["albums"] = _known_total
-    totals["albums_shown"] = len(itunes_results) + len(mb_results)
+    totals["albums_shown"] = len(itunes_results) + len(mb_results) + len(dg_results)
     totals["tracks_shown"] = sum(
         int(i.get("track_count") or 0) for i in itunes_results) or 0
     # Paging state, consumed by the client to build the 'Show more' strip.
@@ -1749,7 +2099,7 @@ def api_search():
     # ---- Albums view (default) ------------------------------------------
     html_out = '<div class="section-label">Search Results</div>'
 
-    if not itunes_results and not mb_results:
+    if not itunes_results and not mb_results and not dg_results:
         return _respond(
             '<div class="section-label">Search Results</div>'
             '<div class="empty-msg">No matching albums found. Try different search terms or check spelling.</div>')
@@ -1759,7 +2109,15 @@ def api_search():
     # iTunes rows filled the whole 40-row window and MusicBrainz got ZERO
     # slots, so the dialog showed no MusicBrainz results at all despite
     # albums_shown reporting them. Round-robin keeps both sources visible.
-    _combined = _interleave_providers(itunes_results, mb_results)
+    # Discogs joins the same round-robin as a third source. When it is absent
+    # (no token, or the query returned nothing) the ORIGINAL two-argument call
+    # is used, so the iTunes/MusicBrainz page is byte-for-byte what it always was.
+    if dg_results:
+        _combined = _interleave_sources([("itunes", itunes_results),
+                                         ("musicbrainz", mb_results),
+                                         ("discogs", dg_results)])
+    else:
+        _combined = _interleave_providers(itunes_results, mb_results)
     _window = _combined[_start:_start + per_page]
 
     # Render in ONE pass over the interleaved window. Splitting it back into an
@@ -1788,12 +2146,27 @@ def api_search():
             country = esc(item.get("country", ""))
             meta_sub = []
             if year: meta_sub.append(year)
-            if country: meta_sub.append(country)
+            # Discogs rows carry a 'format' ('Vinyl • Album • LP') instead of a
+            # country. It is the single most useful thing on a Discogs row -
+            # it is how a user tells the CD pressing from the vinyl one - so it
+            # takes the same slot rather than being dropped.
+            if _prov == "discogs":
+                fmt = esc(item.get("format", ""))
+                if fmt: meta_sub.append(fmt)
+            elif country:
+                meta_sub.append(country)
             sub_text = "  ".join(meta_sub)
 
         rid = esc(item.get("id"))
-        badge = ("badge badge-itunes\">iTunes" if _prov == "itunes"
-                 else "badge badge-mb\">MusicBrainz")
+        # Each source gets its own badge so a user can always tell which
+        # provider a row came from - the whole point of a third provider is
+        # that its tracklist can be checked against the others.
+        if _prov == "itunes":
+            badge = "badge badge-itunes\">iTunes"
+        elif _prov == "discogs":
+            badge = "badge badge-dg\">Discogs"
+        else:
+            badge = "badge badge-mb\">MusicBrainz"
         html_out += f'''<div class="album-item" onclick="pick('{_prov}', '{rid}')">
   <div class="tick">&#9654;</div>
   <img src="{art}" class="album-thumb" alt="" onerror="this.src='/static/noart.png';this.onerror=null;">
@@ -1857,6 +2230,9 @@ body { font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 9pt; line-
 .badge { font-size: 8pt; }
 .badge-itunes { color: #7A6A3E; }
 .badge-mb { color: #4A6B52; }
+/* Discogs: a distinct hue from the other two so three sources stay tellable
+   apart at a glance in a long interleaved list. */
+.badge-dg { color: #6B4A7A; }
 /* 'Existing Information' block: 48px cover plus a three line summary. */
 .existing-info { padding: 8px; overflow: hidden; border: 1px solid #E4E9EF; background-color: #FBFCFE; }
 .existing-thumb { width: 48px; height: 48px; float: left; margin-right: 10px; border: 1px solid #C9D3DE; background-color: #F0F3F7; }
@@ -2484,8 +2860,13 @@ def confirm():
         'wmid_from_url': wmid_from_url
     })
 
+    # Three sources, dispatched by name. The 'else' stays MusicBrainz so an
+    # unknown or legacy source value keeps its original meaning - a request
+    # carrying a bad source must not be silently reinterpreted as Discogs.
     if source == "itunes":
         details = get_itunes_album_details(album_id)
+    elif source == "discogs":
+        details = get_discogs_album_details(album_id)
     else:
         details = get_musicbrainz_album_details(album_id)
 
