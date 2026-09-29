@@ -64,9 +64,15 @@ server stands in for that service and provides:
 
 ## Requirements
 
+> [!IMPORTANT]
+> **Verified working on Windows 10 and Windows 11 only, as of now.** Everything
+> below has been developed and tested on Windows 10/11. Windows 7 is listed in
+> the table because the dialog *targets* an IE7-era MSHTML host, but it has
+> **not** been verified end to end and should be treated as untested.
+
 | | |
 |---|---|
-| **OS** | Windows 7 / 10 / 11 (the FAI dialog is an IE7-era MSHTML host) |
+| **OS** | **Windows 10 / 11 (verified)** — Windows 7 untested |
 | **Player** | Windows Media Player 12 |
 | **Python** | 3.9+ (developed on 3.13) |
 | **Packages** | `flask`, `requests`, `cryptography` — see `requirements.txt` |
@@ -444,6 +450,8 @@ The legacy `submittoc` / `GetMDRCD.asp` / `QueryTOC.asp` routes are
 ## What works
 
 - **Physical CD rips** — tags and cover art are applied to the correct disc.
+  See [artwork on a CD rip](#artwork-on-a-cd-rip--confirmed-behaviour): artwork
+  lands on the **first** FAI apply to a disc.
 - **Library album updates** — existing collections are retagged in place by `WMID`,
   without renaming or regrouping files on disk.
 - **Concurrent hybrid search** — iTunes and MusicBrainz are queried in parallel and
@@ -458,12 +466,20 @@ The legacy `submittoc` / `GetMDRCD.asp` / `QueryTOC.asp` routes are
 - **Multi-disc albums** — grouped by disc number on the confirmation page.
 - **TLS trust** — a properly formed SAN + `CA:TRUE` certificate that Windows
   accepts, installed automatically into both trust stores.
-- **Dialog styling** reproduces the authentic Microsoft FAI layout and renders
-  correctly in IE7.
+- **Dialog styling** reproduces the authentic Microsoft FAI layout. On the
+  verified platforms the host reports `documentMode` **11**; the stylesheet also
+  carries IE7 fallbacks and avoids CSS the older engine cannot parse.
 
 ## What does not work
 
 Please read this section before assuming something is broken.
+
+### Platform support
+
+- **Only Windows 10 and Windows 11 are verified.** This is the current state of
+  the project, not a permanent limit. Windows 7 is *not* verified end to end
+  even though the dialog is built for an IE7-era host — treat it as untested
+  rather than supported.
 
 ### Not implemented
 
