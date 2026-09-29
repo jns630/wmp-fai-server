@@ -291,8 +291,33 @@ def _request_names_a_disc():
 
     WMP re-prompts a disc by appending ?wmid=<collection> to the CD URL, so a
     delivery request can carry BOTH ?cd= and ?wmid=. The wmid is incidental
-    there: the disc id is the authoritative subject, and the document must keep
-    describing the disc rather than being rewritten onto that collection.
+    there: the disc id is the authoritative subject.
+
+    ============================ ARTWORK: WHAT IS ACTUALLY KNOWN =============
+    A CD rip gets its artwork on the FIRST write to that disc, and stops
+    getting it once WMP has adopted a collection for it. Across every real
+    session in the log the correlation is exact:
+
+      dialog WITHOUT ?wmid  ->  [IMAGE] fetched
+        12:41:23  cd=B  wmid=-          -> [IMAGE] 103895B
+        12:53:23  cd=4  wmid=-          -> [IMAGE]  26131B
+      dialog WITH ?wmid     ->  no [IMAGE] at all
+        12:54:24  cd=B  wmid=B17CF884   -> none
+        13:14:26  cd=B  wmid=B17CF884   -> none
+        13:21:12  cd=B  wmid=B17CF884   -> none
+
+    This is NOT fixable by changing the document. 12:41 and 13:14 staged the
+    SAME MusicBrainz release and therefore produced a byte-identical document
+    (same guid, same cover params, same <status>OK</status>) - and 12:41 got
+    artwork while 13:14 did not. The document was not the variable; WMP's own
+    request and internal state were. The cover URL is also provably fine: the
+    Tiny Cities image returns 200 / image/jpeg / 140072 bytes through this
+    server's own proxy.
+
+    So the guard below is correctness only - a disc delivery should not be
+    rewritten onto a collection id - and deliberately does NOT claim to fix
+    artwork. Confirming WMP's remaining precondition needs a trace from inside
+    the player, which the HTTP log cannot supply.
     """
     for name in ('toc', 'TOC', 'mdq', 'cd', 'CD'):
         if raw_query_arg(name).strip():
@@ -1093,16 +1118,18 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
     # of the library collection being updated, so the document lines up with
     # WMP's own entry. Only generate a GUID when WMP gave us nothing.
     #
-    # BUT a CD RIP MUST NOT BORROW IT. When WMP re-prompts a disc it appends
-    # ?wmid=<the collection it made for this disc last time> to the CD URL, so
-    # the dialog carries both ?cd= and ?wmid=. Stamping that collection id onto
-    # a document written back by disc content id makes WMP treat the write as
-    # metadata for an existing collection rather than a fresh rip, and it then
-    # never fetches the artwork. The correlation is exact across real sessions:
-    #   12:53:23  cd=4  wmid=-        -> [IMAGE] served 26131B  (artwork OK)
-    #   12:54:24  cd=B  wmid=B17CF884 -> no [IMAGE] at all
-    #   13:14:26  cd=B  wmid=B17CF884 -> no [IMAGE] at all
-    # A disc is written by content id, so its document must describe the disc.
+    # A CD RIP DOES NOT BORROW IT. When WMP re-prompts a disc it appends
+    # ?wmid=<collection> to the CD URL, so the dialog carries both ?cd= and
+    # ?wmid=. A disc is written by content id, so its document should describe
+    # the disc rather than an existing collection.
+    #
+    # NOTE: this was first committed as an ARTWORK fix, on a correlation that
+    # has since turned out to be wrong. B17CF884 - the id WMP keeps sending
+    # back for this disc - is OUR OWN guid:
+    #     guid('1570089404') == B17CF884-35B2-5D0B-B819-ED648F592A2B
+    # so for this album the two branches produce the SAME value and the change
+    # is a no-op. See the artwork notes on _request_names_a_disc() for what the
+    # evidence actually shows.
     if cd:
         album_guid = guid(album_data.get("id") or cd)
         if wmid:
@@ -1379,11 +1406,10 @@ def mdr_post():
                     f"wmid={wmid_q or '-'}")
     if staged:
         # Do NOT retarget a request that names a disc. WMP re-prompts a disc by
-        # appending ?wmid= to the CD URL, and rewriting the document onto that
-        # collection is what stopped the artwork being fetched for a rip:
-        #   13:14:30  /redir/getmdrcdbackground/?...&cd=B+96+...&wmid=B17CF884
-        #              -> serving album='Tiny Cities' (wmid=B17CF884), no [IMAGE]
-        # The disc id is the subject of the request; the wmid is incidental.
+        # appending ?wmid= to the CD URL; the disc id is the subject of the
+        # request and the wmid is incidental, so the document keeps describing
+        # the disc. This is a correctness guard, NOT the artwork fix - see the
+        # evidence note on _request_names_a_disc().
         disc_request = _request_names_a_disc()
         if wmid_q and not disc_request:
             staged = _retarget_collection_id(staged, wmid_q)

@@ -1039,23 +1039,32 @@ check("delivery-preserves-an-existing-claim",
 
 # 39. A CD RIP MUST NOT BORROW A COLLECTION ID. When WMP re-prompts a disc it
 #     appends ?wmid=<collection> to the CD URL, so the dialog carries both ?cd=
-#     and ?wmid=. Stamping that collection onto a document written back by disc
-#     content id made WMP treat the write as metadata for an existing
-#     collection, and it then never fetched the artwork. The correlation is
-#     exact across real sessions:
-#       12:53:23  cd=4  wmid=-         -> [IMAGE] served 26131B   (artwork OK)
-#       12:54:24  cd=B  wmid=B17CF884  -> no [IMAGE] at all
-#       13:14:26  cd=B  wmid=B17CF884  -> no [IMAGE] at all
+#     and ?wmid=. A disc is written by content id, so its document should
+#     describe the disc rather than an existing collection.
+#     NOTE: this was first written as an ARTWORK fix. That correlation has
+#     since been disproved - see the note on _request_names_a_disc(): 12:41 and
+#     13:14 staged the SAME release, produced a byte-identical document, and
+#     only the earlier one got artwork. These checks pin the correctness rule,
+#     not an artwork outcome.
 check("cd-flow-ignores-a-borrowed-wmid",
       "if cd:" in _src and "CD flow: ignoring borrowed wmid" in _src,
-      "a CD document must describe the disc, not borrow a collection id - "
-      "borrowing one is what stopped WMP fetching the artwork for a rip")
+      "a CD document must describe the disc, not borrow a collection id")
 # ...and the delivery path must not put it straight back.
 check("disc-request-is-not-retargeted",
       "disc_request = _request_names_a_disc()" in _src
       and "if wmid_q and not disc_request:" in _src,
       "a request naming a disc must not be retargeted onto the collection WMP "
       "appended to the CD URL, or the borrowed id returns at delivery time")
+
+# 39a. RECORDED SO THE NEXT PERSON DOES NOT RE-DERIVE IT. B17CF884 is not a WMP
+#      collection id that WMP invented - it is OUR OWN deterministic guid for
+#      the iTunes album id. That is why the fix above changed nothing for this
+#      album: both branches produce the same value.
+check("collection-guid-is-derived-from-the-album-id",
+      fai.guid("1570089404") == "B17CF884-35B2-5D0B-B819-ED648F592A2B",
+      "B17CF884 is guid('1570089404') - our own value echoed back by WMP, not "
+      "a collection id WMP chose. A fix that treats them as different is a "
+      "no-op for this album.")
 
 _cdxml = fai.build_wmp_xml(dict(album, title="Rip Album"), cd="AA+BB+CC",
                            wmid="B17CF884-35B2-5D0B-B819-ED648F592A2B")

@@ -256,6 +256,40 @@ pass `claim_wmid=wmid_q` too. A re-stage otherwise counts as a new document,
 resets the claim to `''`, and lets the next unrelated collection claim a document
 that already belongs to another album.
 
+#### Artwork on a CD rip — an honest account
+
+**A CD rip gets its artwork on the first write to that disc, and stops getting it
+once WMP has adopted a collection for it.** The correlation is exact across every
+real session in the log:
+
+| Dialog opened with | Artwork |
+|---|---|
+| `?cd=` only (no `?wmid=`) | `[IMAGE]` fetched |
+| `?cd=` **and** `?wmid=` | never fetched |
+
+This is **not** fixable by changing the document, and two things were believed
+here for a while that turned out to be wrong:
+
+- **`B17CF884` is not a WMP-chosen collection id.** It is our own deterministic
+  GUID: `guid('1570089404') == B17CF884-…`, where `1570089404` is the iTunes
+  album id for *Tiny Cities*. WMP adopted it on an early write and now echoes it
+  back. Treating it as "WMP's collection" and refusing to stamp it onto a CD
+  document therefore changes **nothing** for this album — both branches produce
+  the same value. The `[CDGUID]` log line fires and the behaviour is identical.
+- **The document is not the variable.** The 12:41 and 13:14 runs staged the *same*
+  MusicBrainz release and produced a byte-identical document — same GUID, same
+  `largeCoverParams`, same `<status>OK</status>` — and only the earlier one
+  fetched artwork.
+
+The document is also provably well-formed for this album: the cover returns
+`200` / `image/jpeg` / 140072 bytes through this server's own proxy.
+
+So the remaining precondition is inside the player, not the HTTP conversation.
+Establishing it needs a trace from WMP itself (e.g. a network capture with the
+artwork request filtered), which this log cannot supply. The
+`_request_names_a_disc()` guard and the CD branch in `build_wmp_xml()` are
+correctness rules only — they are deliberately not claimed to fix artwork.
+
 `XML_LOCK` is an `RLock` because `store_staged_xml()` holds it while calling
 `_stage_request_xml()`, which takes it again. A plain `Lock` self-deadlocks
 there, and no XML is ever staged — every write then silently does nothing.
