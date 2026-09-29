@@ -301,22 +301,25 @@ they are not repeated:
 - **`B17CF884` is not a WMP-chosen collection id.** It is our own deterministic
   GUID: `guid('1570089404') == B17CF884-…`, where `1570089404` is the iTunes
   album id for *Tiny Cities*. WMP adopted it on an early write and now echoes it
-  back. Refusing to stamp it onto a CD document therefore changes **nothing** for
-  this album — both branches produce the same value. `[CDGUID]` fires and the
-  behaviour is identical.
+  back. Refusing to stamp it onto a CD document therefore changed **nothing** for
+  this album — both branches produced the same value.
 - **The document is not the variable.** The 12:41 and 13:14 runs staged the *same*
   MusicBrainz release and produced a byte-identical document — same GUID, same
   `largeCoverParams`, same `<status>OK</status>` — and only the earlier one
   fetched artwork.
 
-The document is provably well-formed for that album too: the cover returns
-`200` / `image/jpeg` / 140072 bytes through this server's own proxy.
+**Settled on 2026-09-29 at 15:52**, on the Prospekt disc. WMP asked with
+`wmid=64C552E6-0C68-5C6A-A02A-617A084205C1`, and that is *exactly*
+`guid('1122792846')` — our own id for the iTunes album. WMP had adopted our
+collection and was echoing it back. So the document identity was already correct
+all along, and the guard that suppressed it was a no-op for this album. Both
+guards are now removed (`5e4b946` and the commit that follows it); a named
+collection is described in both the staging and delivery paths.
 
-**Practical rule:** artwork lands on the first FAI apply to a disc. To change the
-art on an album WMP has already adopted, update that album in the library rather
-than re-ripping the disc. The `_request_names_a_disc()` guard and the CD branch
-in `build_wmp_xml()` are correctness rules only — they are deliberately not
-claimed to fix artwork.
+What that leaves is the one thing the server cannot see: WMP fetched the cover
+at 15:43:43 and 15:43:45 and still did not attach it. Re-applying the *same*
+album at 15:52 produced a byte-identical cover URL (the token is
+`md5(album_id)[:8]` = `51822f10`), so WMP did not re-fetch it at all.
 
 #### Artwork on a CD rip
 
@@ -351,6 +354,11 @@ they are not repeated:
   correlation that did not hold up. The 12:41 and 13:14 runs staged the *same*
   MusicBrainz release and produced a byte-identical document; the difference was
   elsewhere, and re-applies do fetch artwork once the URL carries a token.
+
+The token is `md5(album_id)[:8]`, so it is stable **per album**: it busts WMP's
+cache when the album changes, but re-applying the *same* album yields a
+byte-identical URL and WMP will not re-fetch. That is what the 15:52 re-apply of
+Prospekt's March hit — no `[IMAGE]` line at all.
 
 `XML_LOCK` is an `RLock` because `store_staged_xml()` holds it while calling
 `_stage_request_xml()`, which takes it again. A plain `Lock` self-deadlocks

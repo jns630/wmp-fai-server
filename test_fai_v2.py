@@ -1046,19 +1046,25 @@ check("delivery-preserves-an-existing-claim",
       "re-staging on delivery must preserve the claim, or the next collection "
       "to ask can claim a document that already belongs to another album")
 
-# 39. A CD RIP MUST NOT BORROW A COLLECTION ID. When WMP re-prompts a disc it
-#     appends ?wmid=<collection> to the CD URL, so the dialog carries both ?cd=
-#     and ?wmid=. A disc is written by content id, so its document should
-#     describe the disc rather than an existing collection.
-#     NOTE: this was first written as an ARTWORK fix. That correlation has
-#     since been disproved - see the note on _request_names_a_disc(): 12:41 and
-#     13:14 staged the SAME release, produced a byte-identical document, and
-#     only the earlier one got artwork. These checks pin the correctness rule,
-#     not an artwork outcome.
-check("cd-flow-ignores-a-borrowed-wmid",
-      "if cd:" in _src and "CD flow: ignoring borrowed wmid" in _src,
-      "a CD document must describe the disc, not borrow a collection id")
-# ...and the delivery path must not put it straight back.
+# 39. A NAMED COLLECTION IS THE COLLECTION. WMP appends ?wmid=<collection> to a
+#     CD URL when it re-prompts a disc. That is WMP naming the collection it is
+#     asking about, so the document must describe THAT collection - in the
+#     staging path (build_wmp_xml) and in the delivery path alike.
+#     REVERSED twice over. It was first written as an ARTWORK fix, on a
+#     correlation that did not hold up, and then hardened into "a CD RIP MUST
+#     NOT BORROW A COLLECTION ID". Both are gone.
+#
+#     The field evidence that settled it is in the 15:52 session: WMP's wmid for
+#     the Prospekt disc was 64C552E6-0C68-5C6A-A02A-617A084205C1, which is
+#     EXACTLY guid('1122792846') - our own id for the iTunes album. WMP adopted
+#     our collection. So the guard was a no-op for this album, and the only
+#     honest reading left is that document identity was never the problem.
+check("cd-flow-uses-the-named-collection",
+      "CD flow: ignoring borrowed wmid" not in _src
+      and 'album_guid = _remember_wmid(wmid) or guid(album_data.get("id") or cd)'
+      in _src,
+      "WMP's wmid is the collection it is asking about, so the CD flow must "
+      "stamp it like the library flow does")
 check("named-collection-is-retargeted-whatever-the-flow",
       "if wmid_q and not disc_request:" not in _src
       and "if wmid_q:" in _src,
@@ -1072,19 +1078,26 @@ check("named-collection-is-retargeted-whatever-the-flow",
 
 # 39a. RECORDED SO THE NEXT PERSON DOES NOT RE-DERIVE IT. B17CF884 is not a WMP
 #      collection id that WMP invented - it is OUR OWN deterministic guid for
-#      the iTunes album id. That is why the fix above changed nothing for this
-#      album: both branches produce the same value.
+#      the iTunes album id. That is why the fix above changed nothing for that
+#      album: both branches produce the same value. Confirmed again on Prospekt
+#      at 15:52, where guid('1122792846') == 64C552E6-0C68-5C6A-A02A-617A084205C1
+#      is precisely the wmid WMP sent.
 check("collection-guid-is-derived-from-the-album-id",
       fai.guid("1570089404") == "B17CF884-35B2-5D0B-B819-ED648F592A2B",
       "B17CF884 is guid('1570089404') - our own value echoed back by WMP, not "
       "a collection id WMP chose. A fix that treats them as different is a "
       "no-op for this album.")
+check("wmp-echoes-our-own-collection-id-for-prospekt",
+      fai.guid("1122792846") == "64C552E6-0C68-5C6A-A02A-617A084205C1",
+      "guid('1122792846') is exactly the wmid WMP sent at 15:52:13 for the "
+      "Prospekt disc - WMP adopted our collection id, so stamping our own guid "
+      "was already correct and the cover problem lies elsewhere")
 
 _cdxml = fai.build_wmp_xml(dict(album, title="Rip Album"), cd="AA+BB+CC",
                            wmid="B17CF884-35B2-5D0B-B819-ED648F592A2B")
-check("cd-document-does-not-carry-the-borrowed-collection",
-      "B17CF884" not in _cdxml,
-      f"a CD document must not contain the borrowed wmid: {_cdxml[:300]!r}")
+check("cd-document-carries-the-named-collection",
+      "B17CF884" in _cdxml,
+      f"a CD document must describe the collection WMP named: {_cdxml[:300]!r}")
 check("cd-document-still-describes-the-album",
       "Rip Album" in _cdxml and "<WMCollectionID>" in _cdxml,
       "the CD document must still name the album and carry a collection id")

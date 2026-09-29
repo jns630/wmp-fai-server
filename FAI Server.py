@@ -1109,25 +1109,22 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
     # of the library collection being updated, so the document lines up with
     # WMP's own entry. Only generate a GUID when WMP gave us nothing.
     #
-    # A CD RIP DOES NOT BORROW IT. When WMP re-prompts a disc it appends
-    # ?wmid=<collection> to the CD URL, so the dialog carries both ?cd= and
-    # ?wmid=. A disc is written by content id, so its document should describe
-    # the disc rather than an existing collection.
+    # THIS NOW APPLIES IN THE CD FLOW TOO, which it did not until 5e4b946. The
+    # old guard stamped guid(album_id) instead, on the theory that a disc
+    # "borrows" the collection. Two field observations killed that:
     #
-    # NOTE: this was first committed as an ARTWORK fix, on a correlation that
-    # has since turned out to be wrong. B17CF884 - the id WMP keeps sending
-    # back for this disc - is OUR OWN guid:
-    #     guid('1570089404') == B17CF884-35B2-5D0B-B819-ED648F592A2B
-    # so for this album the two branches produce the SAME value and the change
-    # is a no-op. See the artwork notes on _request_names_a_disc() for what the
-    # evidence actually shows.
-    if cd:
-        album_guid = guid(album_data.get("id") or cd)
-        if wmid:
-            log_line("CDGUID", f"CD flow: ignoring borrowed wmid "
-                               f"{str(wmid)[:8]}.., describing the disc instead")
-    else:
-        album_guid = _remember_wmid(wmid) or guid(album_data.get("id", str(uuid.uuid4())))
+    #   * WMP's own wmid for this disc, 64C552E6-0C68-5C6A-A02A-617A084205C1,
+    #     is EXACTLY guid('1122792846') - our own deterministic id for the
+    #     iTunes album. WMP adopted it and echoes it back, so the guard was a
+    #     no-op here and only its [CDGUID] line was visible.
+    #   * At 15:43 the same disc arrived with 2A4F0191.., which is NOT
+    #     guid(album_id) - WMP had made a collection of its own. There the
+    #     guard was not a no-op: we would have stamped a collection WMP was
+    #     not asking about.
+    #
+    # Preferring WMP's wmid is correct in both cases and needs no theory about
+    # discs: it is the collection WMP just told us it is asking about.
+    album_guid = _remember_wmid(wmid) or guid(album_data.get("id") or cd)
     provider = "iTunes" if album_data.get("source") == "itunes" else "MusicBrainz"
     content_ids = content_ids or {}
 
