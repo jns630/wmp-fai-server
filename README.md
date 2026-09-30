@@ -89,11 +89,16 @@ pip install -r requirements.txt
 
 ## Running the compiled EXE
 
-A prebuilt single-file executable is published on the
+A prebuilt build is published on the
 [**Releases**](https://github.com/jns630/wmp-fai-server/releases) page. Download
-`WMP-FAI-Server.exe` and run it. **You do not need Python, pip, or
-`requirements.txt`** — the interpreter and every dependency (Flask, requests,
-`cryptography`) are bundled inside the file.
+`WMP-FAI-Server-1.0.1-win64.zip`, extract it, and run `WMP-FAI-Server.exe`.
+**You do not need Python, pip, or `requirements.txt`** — the interpreter and every
+dependency (Flask, requests, `cryptography`) ship inside it.
+
+> [!IMPORTANT]
+> **Unzip it first.** The exe only works from inside the extracted folder, next to
+> its `_internal` directory. Running it from inside the zip, or after moving just
+> the exe somewhere else, will not work.
 
 ### What you still need
 
@@ -104,7 +109,7 @@ A prebuilt single-file executable is published on the
 | **Privileges** | **Run as Administrator** |
 | **Ports** | 80 and 443 free |
 | **Network** | Internet, for iTunes / MusicBrainz / Discogs lookups and cover art |
-| **Disk** | ~16 MB for the exe, ~26 MB while it runs (it unpacks itself to `%TEMP%`) |
+| **Disk** | ~16 MB for the zip, ~32 MB extracted |
 
 **Administrator is required**, for the same two reasons as the source build: it
 binds ports **80 and 443**, and it installs its self-signed CA into the machine
@@ -113,13 +118,14 @@ Right-click the exe → *Run as administrator*.
 
 ### Running it
 
-1. Right-click `WMP-FAI-Server.exe` → **Run as administrator**. A console window
+1. Extract the zip anywhere (for example `C:\WMP-FAI-Server\`).
+2. Right-click `WMP-FAI-Server.exe` → **Run as administrator**. A console window
    opens — **leave it open**, closing it stops the server.
-2. Wait for `[*] WMP FAI Metadata Server 2.0 READY`. First launch takes a few
+3. Wait for `[*] WMP FAI Metadata Server 2.0 READY`. First launch takes a few
    seconds longer because it generates a TLS certificate.
-3. Complete the Quick start steps below (hosts file, WMP entry) — the exe is the
+4. Complete the Quick start steps below (hosts file, WMP entry) — the exe is the
    server, so the instructions are identical.
-4. Stop it with **Ctrl+C** in the console window, or close the window.
+5. Stop it with **Ctrl+C** in the console window, or close the window.
 
 ### Where the EXE puts its files
 
@@ -130,17 +136,30 @@ Both of these live in `%APPDATA%\WMP_FAIServer\`:
 | `cert.pem` / `key.pem` | the self-signed certificate it generates on first run |
 | `fai_server.log` | the request log, self-rotating at 5 MB to `fai_server.log.1` |
 
-> [!NOTE]
-> When running from source, `fai_server.log` is written next to `FAI Server.py`
-> instead. The EXE cannot do that: a one-file PyInstaller build unpacks itself
-> into a temporary folder that is deleted on exit, so a log written there would
-> be lost. That is the only behavioural difference between the two builds.
+When running from source, `fai_server.log` is written next to `FAI Server.py`
+instead. Both the exe and a source run write the log to `%APPDATA%` when frozen
+and next to the script when not.
 
-### First run may trigger SmartScreen
+### Antivirus
 
 The exe is unsigned, so Windows may show a blue *"Windows protected your PC"*
 warning. Click **More info** → **Run anyway**. It is unsigned because signing costs
 money per year.
+
+> [!NOTE]
+> **This build is a folder, not a single file, and that is deliberate.**
+>
+> The 1.0.0 release shipped a single-file PyInstaller build, which unpacks itself
+> into a fresh `%TEMP%\_MEIxxxxxx` folder on every launch. Microsoft Defender
+> classified that behaviour — *it is what droppers and crypters do* — and flagged
+> the download as `Trojan:Win32/Sabsik.TE.A!ml`, an ML heuristic rather than a
+> match against any known malware. Users of that build would have hit a Trojan
+> warning before the server ever started.
+>
+> From 1.0.1 the build is a normal exe sitting beside its dependencies, so there
+> is nothing to unpack. If your AV still complains, that is your AV's reputation
+> model reacting to an unsigned binary — check the SHA-256 published in the
+> release notes against your copy, and consider installing from source instead.
 
 To be precise about what it does on the network: it contains no telemetry and
 calls home to nobody. The only hosts it contacts are the metadata providers it
@@ -155,8 +174,8 @@ pip install pyinstaller
 python build_exe.py
 ```
 
-Produces `dist/WMP-FAI-Server.exe` (~16 MB). The build is committed so it is
-reproducible rather than something you have to reverse-engineer.
+Produces `dist/WMP-FAI-Server\`. The build is committed so it is reproducible
+rather than something you have to reverse-engineer.
 
 ---
 

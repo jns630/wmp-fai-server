@@ -33,6 +33,46 @@ NAME = "WMP-FAI-Server"
 DIST = ROOT / "dist"
 
 
+COMMIT = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
+                                cwd=str(ROOT), text=True).strip()
+
+# Version metadata. Defender's ML heuristics score an EXE partly on how much it
+# looks like a legitimate shipped product, and an EXE with an empty or missing
+# version resource scores badly. Real strings here are not decoration - they
+# change how the binary is treated.
+# PyInstaller deserializes this file by eval()-ing it in its own module
+# namespace, where FixedFileInfo / StringStruct / ... are bound as bare names.
+# So it must read `FixedFileInfo(...)`, NOT `ffi.FixedFileInfo(...)` - there is
+# no `ffi` in that namespace and the dotted form dies with a NameError.
+VERSION_FILE = ROOT / "build_version.txt"
+VERSION_FILE.write_text(
+    "# UTF-8\n"
+    "VSVersionInfo(\n"
+    "  FixedFileInfo(\n"
+    "    filevers=(1, 0, 0, 0),\n"
+    "    prodvers=(1, 0, 0, 0),\n"
+    "    mask=0x3f,\n"
+    "    flags=0x0,\n"
+    "    OS=0x40004,\n"
+    "    fileType=0x1,\n"
+    "    subtype=0x0,\n"
+    "    date=(0, 0)),\n"
+    "  kids=[\n"
+    "    StringFileInfo([\n"
+    "      StringTable('040904B0', [\n"
+    "        StringStruct('CompanyName', 'wmp-fai-server'),\n"
+    "        StringStruct('FileDescription', 'WMP Find Album Information metadata server'),\n"
+    "        StringStruct('FileVersion', '1.0.0'),\n"
+    "        StringStruct('InternalName', 'WMP-FAI-Server'),\n"
+    "        StringStruct('LegalCopyright', 'MIT licensed'),\n"
+    "        StringStruct('OriginalFilename', 'WMP-FAI-Server.exe'),\n"
+    "        StringStruct('ProductName', 'WMP FAI Metadata Server'),\n"
+    "        StringStruct('ProductVersion', '1.0.0')])]),\n"
+    "    VarFileInfo([VarStruct('Translation', [1033, 1200])])\n"
+    "])\n",
+    encoding="utf-8")
+
+
 def main():
     if not ENTRY.exists():
         raise SystemExit(f"missing entry point: {ENTRY}")
@@ -41,14 +81,25 @@ def main():
         if stale.exists():
             shutil.rmtree(stale, ignore_errors=True)
 
+    # ONE-DIRECTORY, not one-file. A one-file build unpacks itself into a fresh
+    # %TEMP%\_MEIxxxxxx folder on every launch. That is one of the loudest
+    # behavioural signals a Windows ML heuristic has - it is precisely what
+    # droppers and crypters do, and it is why a PyInstaller onefile exe trips
+    # Trojan:*!ml so reliably. Microsoft Defender flagged the 1.0.0 onefile
+    # build as Trojan:Win32/Sabsik.TE.A!ml on download, which would hit every
+    # single user of the release. The directory build leaves a normal exe beside
+    # its dependencies, so there is nothing to unpack.
+    #
+    # The trade-off is that users get a folder rather than one file, so the
+    # build zips it and the ZIP is what gets attached to the release.
     cmd = [
         sys.executable, "-m", "PyInstaller",
-        "--onefile",
+        "--onedir",
         "--console",
         "--name", NAME,
-        # No "--" separator: PyInstaller's parser does not accept one, and the
-        # entry path is already a single argv element, so the spaces and the
-        # parentheses in "...\New folder (4)\..." are safe.
+        "--version-file", str(VERSION_FILE),
+        # No "--": PyInstaller's parser rejects one, and the entry path is a
+        # single argv element so its spaces and parentheses are already safe.
         str(ENTRY),
     ]
     print(" ".join(cmd))
@@ -56,11 +107,12 @@ def main():
     if rc != 0:
         raise SystemExit(f"PyInstaller failed with exit code {rc}")
 
-    exe = DIST / f"{NAME}.exe"
+    exe = DIST / NAME / f"{NAME}.exe"
     if not exe.exists():
         raise SystemExit(f"build reported success but {exe} is missing")
     mb = exe.stat().st_size / (1024 * 1024)
-    print(f"\nbuilt {exe}  ({mb:.1f} MB)")
+    print(f"\nbuilt {exe}  ({mb:.1f} MB exe, onedir)")
+    print(f"built from commit {COMMIT}")
 
 
 if __name__ == "__main__":
