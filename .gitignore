@@ -59,6 +59,13 @@ LIBRARY-WRITE-WIP.txt
 all-work-backup.patch
 *.bak
 
+# PyInstaller build output. The exe is a release asset uploaded to GitHub
+# Releases, not something to commit - it is ~16MB of binary that is
+# reproducible with `python build_exe.py`.
+build/
+dist/
+*.spec
+
 # Scratch files written by the node --check regression tests. They are
 # rewritten on every run and must never be committed.
 _syntaxcheck_*.js

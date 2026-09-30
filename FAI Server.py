@@ -159,6 +159,18 @@ image_cache = TTLCache(default_ttl=86400)       # 24 hours
 # FILE LOGGING (every request + key events -> fai_server.log)
 # ==========================================================
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fai_server.log")
+# In a PyInstaller ONE-FILE build __file__ points into the self-extracting temp
+# directory (%TEMP%\_MEIxxxxxx), which is deleted when the process exits - so a
+# log written there is unfindable and gone. The frozen build therefore logs into
+# APP_DATA_DIR, the same place the TLS certificate already lives, and that is
+# the path the README tells users to look at. Unfrozen runs keep the historical
+# behaviour of logging next to the source file.
+if getattr(sys, "frozen", False):
+    try:
+        os.makedirs(APP_DATA_DIR, exist_ok=True)
+        LOG_FILE = os.path.join(APP_DATA_DIR, "fai_server.log")
+    except OSError:
+        pass
 LOG_LOCK = threading.Lock()
 LOG_MAX_BYTES = 5 * 1024 * 1024
 

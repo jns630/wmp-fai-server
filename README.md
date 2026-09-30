@@ -23,6 +23,7 @@ actually tag discs, run the server on your own Windows machine.
 
 - [What it does](#what-it-does)
 - [Requirements](#requirements)
+- [Running the compiled EXE](#running-the-compiled-exe)
 - [Screenshot](#screenshot)
 - [Quick start](#quick-start)
 - [How to use](#how-to-use)
@@ -83,6 +84,79 @@ server stands in for that service and provides:
 ```powershell
 pip install -r requirements.txt
 ```
+
+---
+
+## Running the compiled EXE
+
+A prebuilt single-file executable is published on the
+[**Releases**](https://github.com/jns630/wmp-fai-server/releases) page. Download
+`WMP-FAI-Server.exe` and run it. **You do not need Python, pip, or
+`requirements.txt`** — the interpreter and every dependency (Flask, requests,
+`cryptography`) are bundled inside the file.
+
+### What you still need
+
+| | |
+|---|---|
+| **OS** | Windows 10 / 11 (same as the source build) |
+| **Player** | Windows Media Player 12 — the exe has nothing to talk to without it |
+| **Privileges** | **Run as Administrator** |
+| **Ports** | 80 and 443 free |
+| **Network** | Internet, for iTunes / MusicBrainz / Discogs lookups and cover art |
+| **Disk** | ~16 MB for the exe, ~26 MB while it runs (it unpacks itself to `%TEMP%`) |
+
+**Administrator is required**, for the same two reasons as the source build: it
+binds ports **80 and 443**, and it installs its self-signed CA into the machine
+trust store with `certutil` so WMP will accept `https://musicmatch-ssl.xboxlive.com`.
+Right-click the exe → *Run as administrator*.
+
+### Running it
+
+1. Right-click `WMP-FAI-Server.exe` → **Run as administrator**. A console window
+   opens — **leave it open**, closing it stops the server.
+2. Wait for `[*] WMP FAI Metadata Server 2.0 READY`. First launch takes a few
+   seconds longer because it generates a TLS certificate.
+3. Complete the Quick start steps below (hosts file, WMP entry) — the exe is the
+   server, so the instructions are identical.
+4. Stop it with **Ctrl+C** in the console window, or close the window.
+
+### Where the EXE puts its files
+
+Both of these live in `%APPDATA%\WMP_FAIServer\`:
+
+| File | Purpose |
+|---|---|
+| `cert.pem` / `key.pem` | the self-signed certificate it generates on first run |
+| `fai_server.log` | the request log, self-rotating at 5 MB to `fai_server.log.1` |
+
+> [!NOTE]
+> When running from source, `fai_server.log` is written next to `FAI Server.py`
+> instead. The EXE cannot do that: a one-file PyInstaller build unpacks itself
+> into a temporary folder that is deleted on exit, so a log written there would
+> be lost. That is the only behavioural difference between the two builds.
+
+### First run may trigger SmartScreen
+
+The exe is unsigned, so Windows may show a blue *"Windows protected your PC"*
+warning. Click **More info** → **Run anyway**. It is unsigned because signing costs
+money per year.
+
+To be precise about what it does on the network: it contains no telemetry and
+calls home to nobody. The only hosts it contacts are the metadata providers it
+searches — `itunes.apple.com`, `musicbrainz.org`, `coverartarchive.org`,
+`api.discogs.com` (with a token if you set one) and `is1-ssl.mzstatic.com` for
+cover art. Everything else is local.
+
+### Building the EXE yourself
+
+```powershell
+pip install pyinstaller
+python build_exe.py
+```
+
+Produces `dist/WMP-FAI-Server.exe` (~16 MB). The build is committed so it is
+reproducible rather than something you have to reverse-engineer.
 
 ---
 
