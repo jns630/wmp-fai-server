@@ -1302,7 +1302,7 @@ check("fai-flex-only-in-outer-column",
 # otherwise IE7 would lose the scrollbar entirely.
 check("ie7-undoes-the-pane-flexbox",
       ".main-container, .header-area, .footer, .left-pane, .right-pane { display: block; }" in _src
-      and ".results-scroll { height: 360px; overflow-y: scroll; }" in _src,
+      and ".results-scroll { height: 260px; overflow-y: scroll; }" in _src,
       "the IE7 conditional must reset the pane to display:block and give "
       ".results-scroll an explicit height so it still scrolls")
 check("fai-columns-are-floats",
@@ -1642,10 +1642,12 @@ check("no-paging-state-in-client",
       "CURRENT_PAGE" not in ui_html,
       "with no pager the client must not keep a page counter to desync")
 # IE7 has no flexbox, so the list needs an explicit height to still scroll.
+# That height IS the dialog height in WMP, so it is pinned to the reference
+# window's list area rather than left to whatever the content happens to be.
 check("ie7-gives-list-a-height",
-      ".results-scroll { height: 360px; overflow-y: scroll; }" in _src,
+      ".results-scroll { height: 260px; overflow-y: scroll; }" in _src,
       "the IE7 conditional must give the list a fixed height so it still gets "
-      "a scrollbar without flexbox")
+      "a scrollbar without flexbox, and that height is the dialog height")
 check("server-slices-by-page",
       'request.args.get("page"' in _src
       and "_start = (page - 1) * per_page" in _src
@@ -1837,8 +1839,19 @@ for _cls in (".existing-source", ".existing-empty", ".existing-edit",
     check("ie7-safe-styling-%s" % _cls.strip("."),
           _cls in _src and "flex" not in _cls,
           f"{_cls} must exist in the shared stylesheet")
+# Bounded by the conditional's own `<![endif]-->` rather than a fixed character
+# count. The intent is "the IE7 block resets these", which is a question about
+# the block's extent; a [:2000] window only happened to cover it while the
+# block was shorter, and silently starts failing the moment an unrelated
+# comment above grows. `_ie7_block` is asserted non-empty so a failed split
+# cannot quietly pass.
+_ie7_block = _src.split("lt IE 8")[1].split("<![endif]-->")[0]
+check("ie7-conditional-block-is-found",
+      len(_ie7_block) > 500,
+      f"the lt IE 8 conditional must be locatable in the stylesheet, got "
+      f"{len(_ie7_block)} chars")
 check("new-inputs-reset-border-radius",
-      ".edit-input" in _src.split("lt IE 8")[1][:2000],
+      ".edit-input" in _ie7_block,
       "the IE7 conditional block must reset the new inputs too")
 
 # 43. Nothing above may disturb the write path. The payload is still the same

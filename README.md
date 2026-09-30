@@ -1090,8 +1090,11 @@ So the list is now its own flex item that takes the leftover height and
 scrolls, with `overflow: hidden` establishing the formatting context that makes
 the float stack measurable, and `overflow-y: scroll` — not `auto` — so the bar
 is always drawn. IE7 has no flexbox, so the conditional block returns the pane
-to `display: block` and gives the list a fixed `height: 360px`, which still
-produces a scrollbar with arrows.
+to `display: block` and gives the list a fixed `height: 260px`, which still
+produces a scrollbar with arrows. That number is also the dialog's height: WMP
+sizes the Find Album Information frame to the content area, and in the IE7 branch
+`body` is `height: auto`, so the document is exactly as tall as the stacked header,
+panes and footer. It was `360px`, about 110px taller than the reference FAI window.
 
 There is deliberately **no "next page" button**: the reference dialog has none,
 and the default `per_page` of 100 is large enough that the scrollbar alone

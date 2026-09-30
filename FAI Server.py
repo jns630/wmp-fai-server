@@ -2446,8 +2446,18 @@ body { display: block; height: auto; overflow: auto; }
 /* IE7 has no flexbox, so it cannot let the list take the leftover height.
    Give it a fixed height instead so it STILL gets its own scrollbar with
    arrow buttons, rather than growing forever and pushing the command strip
-   off the dialog. 360px is about the list area in the reference screenshot. */
-.results-scroll { height: 360px; overflow-y: scroll; }
+   off the dialog.
+
+   This one number is what sets the HEIGHT OF THE WHOLE DIALOG in WMP. WMP sizes
+   the Find Album Information frame to the content area, and in the IE7 branch
+   `body` is `height: auto`, so the document is exactly as tall as the stacked
+   header + panes + footer. Every pixel here is a pixel of dialog height.
+
+   It was 360px, which made the dialog about 110px taller than the reference
+   FAI window and left a large empty field under the results. 260px is the
+   list area in the reference screenshot. The list still scrolls on its own -
+   it is `overflow-y: scroll`, so the bar is always drawn, arrows and all. */
+.results-scroll { height: 260px; overflow-y: scroll; }
 .footer-left, .footer-right, .search-clear, .existing-thumb, .album-thumb, .track-num, .track-time, .track-title { display: inline; }
 .search-clear { position: static; margin-left: 4px; }
 .btn { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FCFCFC', endColorstr='#E6E6E6', type='0'); }
