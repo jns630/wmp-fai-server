@@ -3128,11 +3128,24 @@ check("discogs-discography-rows-carry-their-kind",
       "'m' if kind == 'master' else 'r'" in _src,
       "an artist's Discogs discography mixes masters and orphan releases, so "
       "each row must say which endpoint its details come from")
-check("musicbrainz-browse-uses-the-singular-endpoint",
-      'MUSICBRAINZ_BASE_URL + "release"' in _src
-      and 'MUSICBRAINZ_BASE_URL + "releases"' not in _src,
-      "/ws/2/release is the browse endpoint; /ws/2/releases does not exist and "
-      "404s, which silently returned zero albums for every MusicBrainz artist")
+check("musicbrainz-browse-uses-release-groups",
+      'MUSICBRAINZ_BASE_URL + "release-group"' in _src
+      and '"g:" + ' not in _src and 'f"g:{gid}"' in _src,
+      "browsing RELEASES returns every pressing and every single - Coldplay has "
+      "over a hundred and the list appeared to stop in 2005. A release-group is "
+      "the work, which is what 'browse this artist's albums' must mean")
+check("musicbrainz-browse-is-newest-first",
+      'reverse=True' in _src and 'first-release-date' in _src,
+      "the API returns oldest first, so browsing an active artist meant "
+      "scrolling past their whole back catalogue to reach the current album")
+check("release-group-ids-resolve-to-a-release",
+      "def _mb_release_group_to_release" in _src
+      and '_mb_release_group_to_release(group_id)' in _src,
+      "a release-group id is not a release id; the details fetch has to resolve "
+      "one to the other or every browsed album 404s")
+check("discogs-discography-is-newest-first",
+      '"sort_order": "desc"' in _src,
+      "an artist page listing oldest-first makes an active artist look inactive")
 
 # One renderer for all album rows. Two copies of this markup would be free to
 # drift - a badge or an escaping fix landing in one list and not the other.

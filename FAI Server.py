@@ -1094,7 +1094,7 @@ def artist_albums(source, artist_id, limit=40):
             # carries its own kind prefix - exactly as the album search does -
             # and the details fetch routes to the matching endpoint.
             resp = _discogs_get(f"artists/{artist_id}/releases",
-                                params={"sort": "year", "sort_order": "asc",
+                                params={"sort": "year", "sort_order": "desc",
                                         "per_page": max(1, min(limit, 100))})
             if resp is not None:
                 for x in (resp.json() or {}).get("releases", []) or []:
@@ -1109,28 +1109,39 @@ def artist_albums(source, artist_id, limit=40):
                         "art_thumb": "", "track_count": 0,
                     })
         elif source == "musicbrainz":
-            # Browse by release, not release-group: the album details function
-            # takes a RELEASE id, and a release-group id would 404 there. That
-            # means one pressing per row rather than one per work - the same
-            # trade the Discogs master search makes, for the same reason.
-            # 'release' is SINGULAR here: /ws/2/release is the browse endpoint
-            # and /ws/2/releases does not exist, so the plural 404s. A browse
-            # takes an id filter, never a 'query' param.
-            resp = _mb_get(MUSICBRAINZ_BASE_URL + "release",
+            # RELEASE GROUPS, not releases. Browsing an artist's releases returns
+            # every pressing and every single: Coldplay alone has over a hundred,
+            # and the first page is nothing but 1998-2000 singles - so browsing
+            # releases produced a list that appeared to stop in 2005 and never
+            # reached Moon Music. A release-group is the WORK, one row per album
+            # however many pressings exist, which is what 'browse this artist's
+            # albums' has to mean.
+            #
+            # A release-group id is not a release id, so rows are prefixed 'g:'
+            # and get_musicbrainz_album_details resolves it to a concrete
+            # release before doing anything else.
+            resp = _mb_get(MUSICBRAINZ_BASE_URL + "release-group",
                            params={"artist": artist_id, "fmt": "json",
                                    "limit": max(1, min(limit, 100))},
                            timeout=10)
             if resp is not None:
-                for rel in (resp.json() or {}).get("releases", []) or []:
-                    rid = rel.get("id")
-                    rt = (rel.get("title") or "").strip()
-                    if not rid or not rt:
+                groups = (resp.json() or {}).get("release-groups", []) or []
+                # Newest FIRST. The API returns oldest first, so a user browsing
+                # an active artist had to scroll past the artist's entire back
+                # catalogue to reach the album they came for.
+                groups = sorted(groups,
+                                key=lambda g: (g.get("first-release-date") or ""),
+                                reverse=True)
+                for g in groups:
+                    gid = g.get("id")
+                    gt = (g.get("title") or "").strip()
+                    if not gid or not gt:
                         continue
                     out.append({
-                        "id": str(rid), "source": "musicbrainz", "title": rt,
-                        "artist": "", "year": str(rel.get("date") or "")[:4],
-                        "genre": "", "art_thumb": "",
-                        "track_count": int(rel.get("track-count") or 0),
+                        "id": f"g:{gid}", "source": "musicbrainz", "title": gt,
+                        "artist": "", "year": (g.get("first-release-date") or "")[:4],
+                        "genre": g.get("primary-type") or "",
+                        "art_thumb": "", "track_count": 0,
                     })
     except Exception as e:
         print(f"[ARTISTS] {source} albums for {artist_id} error: {e}")
@@ -1331,7 +1342,46 @@ def _resolve_art_url(url):
     return url
 
 
+def _mb_release_group_to_release(group_id):
+    """A release-group id -> one concrete release id, or None.
+
+    The artist browser lists release-GROUPS, because a group is the work (one
+    row per album) while releases are pressings and singles - Coldplay has over
+    a hundred releases and the list then looked frozen in 2005. But everything
+    downstream, including this function's own release fetch, needs a RELEASE.
+
+    The first release the group lists is used. Which pressing that is does not
+    matter: they all carry the same tracks.
+    """
+    resp = _mb_get(MUSICBRAINZ_BASE_URL + f"release-group/{group_id}",
+                   params={"inc": "releases", "fmt": "json"}, timeout=8)
+    if resp is None:
+        return None
+    rels = (resp.json() or {}).get("releases") or []
+    if not rels:
+        return None
+    # Prefer a plain album release over a compilation or a single if the group
+    # happens to be mixed, then fall back to whatever it offers.
+    for r in sorted(rels, key=lambda x: (x.get("primary-type") != "Album",)):
+        rid = r.get("id")
+        if rid:
+            return rid
+    return None
+
+
 def get_musicbrainz_album_details(release_id):
+    # 'g:<id>' is a release-GROUP, which is what the artist browser lists. Resolve
+    # it to a concrete release and carry on with the ordinary path, so every
+    # caller - album search, artist browse, confirm page - ends up in the same
+    # place with the same normalisation.
+    if isinstance(release_id, str) and release_id.startswith("g:"):
+        group_id = release_id[2:]
+        _resolved = _mb_release_group_to_release(group_id)
+        if _resolved is None:
+            print(f"[MUSICBRAINZ] release group {group_id} has no releases")
+            return None
+        release_id = _resolved
+
     cache_key = f"mb_album_{release_id}"
     cached = album_cache.get(cache_key)
     if cached is not None:

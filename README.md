@@ -1148,9 +1148,17 @@ entity type and swaps the result list:
 **Artists are browsable.** Click an artist and their whole catalogue opens in
 the same pane, with a *Back to artists* link. Each provider browses through a
 different endpoint — iTunes `lookup?entity=album`, Discogs `artists/<id>/releases`,
-MusicBrainz `ws/2/release?artist=` — and the rows that come back are ordinary
+MusicBrainz `ws/2/release-group?artist=` — and the rows that come back are ordinary
 album rows, so the second click reaches the same confirm page and tag flow as
 anything found by searching.
+
+Every discography is listed **newest first**. MusicBrainz and Discogs both return
+one oldest-first, which made an artist with a new album out look retired — Coldplay's
+page appeared to stop in 2005. MusicBrainz is browsed by *release group* rather than
+by release for the same reason: a release is a single pressing, so Coldplay's
+discography is over a hundred singles and editions whose first page was entirely
+1998–2000. A release group is the work — one row per album, however many pressings
+exist.
 
 **Tracks tag one track.** Clicking a track opens *its album* with `?focus=<track>`,
 which pre-ticks exactly that one checkbox. The write path can only ever produce an
