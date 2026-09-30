@@ -3098,6 +3098,93 @@ check("finish-always-leaves-the-dialog",
       "db0480f made this conditional on a handoff that never fires, which left "
       "the dialog stuck on 'Waiting for WMP...' with no exit.")
 
+# ---- 51. Artists and Tracks are navigable, not decorative -----------------
+# Both tabs used to render rows with NO onclick at all. You could read a name
+# and do nothing with it. The Artists tab is now fed by all three providers,
+# and every row leads somewhere real.
+check("artists-tab-calls-every-provider",
+      "search_itunes_artists" in _src and "search_discogs_artists" in _src
+      and '_search_artists_all' in _src,
+      "the Artists tab was MusicBrainz-only, so iTunes and Discogs artists "
+      "were unreachable however well known they were")
+check("artist-rows-are-clickable",
+      "showArtist(" in _src and "function showArtist" in _src,
+      "an artist row that cannot be clicked is a dead list")
+check("artist-rows-carry-their-provider",
+      "showArtist('{prov}'" in _src or "showArtist(" in _src,
+      "the row must say which provider it came from so the next lookup matches")
+check("artist-albums-route-exists",
+      '@app.route("/api_artist_albums")' in _src,
+      "browsing an artist's albums needs its own endpoint")
+check("artist-albums-reuse-the-album-renderer",
+      "_album_row_html(r.get(\"source\", source), r)" in _src,
+      "rows from an artist page must be the SAME pickable rows as the Albums "
+      "tab, so nothing downstream has to learn they came from a browse")
+check("artist-browse-covers-all-three",
+      all(s in _src for s in ('source == "itunes"', 'source == "discogs"',
+                              'source == "musicbrainz"')),
+      "each provider browses its own discography through a different endpoint")
+check("discogs-discography-rows-carry-their-kind",
+      "'m' if kind == 'master' else 'r'" in _src,
+      "an artist's Discogs discography mixes masters and orphan releases, so "
+      "each row must say which endpoint its details come from")
+check("musicbrainz-browse-uses-the-singular-endpoint",
+      'MUSICBRAINZ_BASE_URL + "release"' in _src
+      and 'MUSICBRAINZ_BASE_URL + "releases"' not in _src,
+      "/ws/2/release is the browse endpoint; /ws/2/releases does not exist and "
+      "404s, which silently returned zero albums for every MusicBrainz artist")
+
+# One renderer for all album rows. Two copies of this markup would be free to
+# drift - a badge or an escaping fix landing in one list and not the other.
+check("album-rows-have-a-single-renderer",
+      _src.count("def _album_row_html(") == 1
+      and "onclick=\"pick('{prov}', '{rid}')\"" in _src,
+      "the Albums tab and the artist browser must share one row renderer")
+
+# ---- 52. one track, not the whole album -----------------------------------
+# The Tracks tab could list a song but not the album it belongs to, so there
+# was nothing to open. Clicking a track now carries ?focus=, and that is the
+# difference between tagging one track and quietly renaming eleven.
+check("tracks-tab-has-both-providers",
+      "search_itunes_tracks" in _src and '_search_tracks_all' in _src,
+      "a track search that only knows MusicBrainz cannot tag what iTunes knows")
+check("track-rows-carry-their-album",
+      '"album_id"' in _src and "album_id = r.get(\"album_id\") or \"\"" in _src,
+      "without the album id a track row names a song but has nothing to open")
+check("tracks-drop-rows-with-no-album",
+      "if not album_id:" in _src and "continue" in _src,
+      "a track that cannot be placed on an album cannot be tagged, so it must "
+      "not be rendered as a row that leads nowhere")
+check("track-rows-open-the-album-with-focus",
+      "function pickTrack" in _src and '&focus=' in _src,
+      "a track row must navigate to the album carrying which track was clicked")
+check("focus-is-separate-from-the-playing-track",
+      'focus_name = request.args.get("focus", "")' in _src
+      and 'request.args.get("focus", "")' != 'request.args.get("track", "")',
+      "wmp_track is what WMP says IT is playing; focus is what the USER "
+      "clicked, and only the latter may decide that one box is ticked")
+check("focus-overrides-the-whole-album-default",
+      "if focus_name:" in _src
+      and "checked = 'checked' if _same_track(t_name, focus_name) else ''" in _src,
+      "with a focus set, ONLY the named track may be pre-ticked - applying the "
+      "whole album when one track was asked for is the worst outcome here")
+check("track-name-matching-tolerates-provider-noise",
+      "_same_track(" in _src,
+      "the focus name and the album's own name come from different payloads "
+      "(leading track numbers, '(Remastered)', punctuation), so equality "
+      "would match nothing and the track would silently stay untagged")
+check("track-name-matching-rejects-a-different-song",
+      fai._same_track("Sail Away", "Favorites") is False
+      and fai._same_track("Sail Away", "Sail Away") is True
+      and fai._same_track("3. Sail Away", "Sail Away") is True,
+      "the matcher must be tolerant of decoration but must NOT be so loose it "
+      "ticks a different song")
+check("a-track-without-an-album-is-inert",
+      'if album_id:' in _src and 'onclick = ""' in _src,
+      "a row with no album cannot be tagged, so it must render inert rather "
+      "than as a broken link")
+
+
 print()
 print(f"==== {len(PASS)} passed, {len(FAIL)} failed ====")
 if FAIL:

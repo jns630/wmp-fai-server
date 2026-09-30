@@ -1141,14 +1141,37 @@ entity type and swaps the result list:
 
 | Tab | Source | Rows shown |
 |---|---|---|
-| **Artists** | MusicBrainz `artist` | name, type, country |
-| **Albums** *(default)* | iTunes + MusicBrainz `release` | cover, artist, title, `N Track(s)  Genre • Year` |
-| **Tracks** | MusicBrainz `recording` | title, artist, format, duration |
+| **Artists** | iTunes + MusicBrainz + Discogs | name, genre or type/country |
+| **Albums** *(default)* | iTunes + MusicBrainz `release` + Discogs | cover, artist, title, `N Track(s)  Genre • Year` |
+| **Tracks** | iTunes `musicTrack` + MusicBrainz `recording` | track, artist, album, duration |
+
+**Artists are browsable.** Click an artist and their whole catalogue opens in
+the same pane, with a *Back to artists* link. Each provider browses through a
+different endpoint — iTunes `lookup?entity=album`, Discogs `artists/<id>/releases`,
+MusicBrainz `ws/2/release?artist=` — and the rows that come back are ordinary
+album rows, so the second click reaches the same confirm page and tag flow as
+anything found by searching.
+
+**Tracks tag one track.** Clicking a track opens *its album* with `?focus=<track>`,
+which pre-ticks exactly that one checkbox. The write path can only ever produce an
+album document, so "tag this track" necessarily means "open the album and select
+this track" — and it is important that only one box is pre-ticked: quietly applying
+eleven renames because the user clicked one is the worst thing this page can do.
+Track names are matched on their significant words, so a leading track number or a
+`(Remastered)` suffix does not stop the match.
+
+> Discogs has no track index — its search covers releases and masters — so the
+> Tracks tab is iTunes + MusicBrainz only. That is deliberate rather than a gap
+> that silently returns album rows in a list of songs.
 
 Each tab keeps its own count, so `Artists (2) | Albums (24) | Tracks (73)` shows
 how many of each exist. The active view is passed as `?view=` on
 `/api_search`; the default stays `album`, so existing callers and the WMP flow
 are unaffected.
+
+> Both tabs used to render rows with **no `onclick` at all**. You could read a
+> name and do nothing with it. Two dead lists that looked like they worked are
+> worse than two that were obviously unfinished, so both now lead somewhere real.
 
 A real bug surfaced here. The scoped album query used `release:"ghost story"`
 as an exact phrase, so Coldplay's *Ghost Stories* matched nothing, the whole

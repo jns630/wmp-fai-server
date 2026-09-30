@@ -984,6 +984,160 @@ def count_search_totals(query, artist_hint=None, album_hint=None):
     return out
 
 
+def search_itunes_artists(query, limit=15):
+    """iTunes artists. entity=musicArtist returns artists, not songs.
+
+    The album search already reaches iTunes, but only for albums: the Artists
+    tab was MusicBrainz-only, so an artist iTunes knows well could not be found
+    there at all.
+    """
+    term = (query or "").strip()
+    if not term:
+        return []
+    cache_key = f"it_artist_{term.lower()}_{limit}"
+    cached = search_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    out = []
+    try:
+        resp = requests.get("https://itunes.apple.com/search",
+                            params={"term": term, "entity": "musicArtist",
+                                    "limit": max(1, min(limit, 50))},
+                            timeout=8)
+        if resp is not None:
+            for x in (resp.json() or {}).get("results", []) or []:
+                nm = (x.get("artistName") or "").strip()
+                aid = x.get("artistId")
+                if not nm or not aid:
+                    continue
+                out.append({
+                    "source": "itunes", "id": str(aid), "name": nm,
+                    "genre": x.get("primaryGenreName") or "", "art_thumb": "",
+                })
+    except Exception as e:
+        print(f"[ITUNES] artist search error: {e}")
+    search_cache.set(cache_key, out, ttl=3600)
+    return out
+
+
+def search_discogs_artists(query, limit=15):
+    """Discogs artists. type=artist is the artist index, distinct from the
+    release/master index the album search uses."""
+    term = (query or "").strip()
+    if not term or not _discogs_configured():
+        return []
+    cache_key = f"dg_artist_{term.lower()}_{limit}"
+    cached = search_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    out = []
+    resp = _discogs_get("database/search",
+                        params={"q": term, "type": "artist",
+                                "per_page": max(1, min(limit, 50))})
+    if resp is not None:
+        try:
+            for x in (resp.json() or {}).get("results", []) or []:
+                nm = (x.get("title") or "").strip()
+                aid = x.get("id")
+                if not nm or not aid:
+                    continue
+                out.append({
+                    "source": "discogs", "id": str(aid), "name": nm,
+                    "genre": "", "art_thumb": x.get("thumb") or "",
+                })
+        except Exception as e:
+            print(f"[DISCOGS] artist search parse error: {e}")
+    search_cache.set(cache_key, out, ttl=3600)
+    return out
+
+
+def artist_albums(source, artist_id, limit=40):
+    """Every album one artist has, per provider. This is what makes the Artists
+    tab navigable: pick an artist, see their records, pick a record, tag it.
+
+    Returns rows in the SAME shape the album search produces, so the existing
+    album renderer and its pick(source, id) handler work unchanged - no second
+    renderer, and the confirm page and the write path are untouched.
+    """
+    key = f"artist_albums_{source}_{artist_id}_{limit}"
+    cached = search_cache.get(key)
+    if cached is not None:
+        return cached
+    out = []
+    try:
+        if source == "itunes":
+            # lookup with entity=album turns an artistId into their collections.
+            resp = requests.get("https://itunes.apple.com/lookup",
+                                params={"id": artist_id, "entity": "album",
+                                        "limit": max(1, min(limit, 100))},
+                                timeout=10)
+            if resp is not None:
+                for x in (resp.json() or {}).get("results", []) or []:
+                    if x.get("wrapperType") != "collection":
+                        continue
+                    cid = x.get("collectionId")
+                    cn = (x.get("collectionName") or "").strip()
+                    if not cid or not cn:
+                        continue
+                    out.append({
+                        "id": str(cid), "source": "itunes", "title": cn,
+                        "artist": (x.get("artistName") or "").strip(),
+                        "year": str(x.get("releaseDate") or "")[:4],
+                        "genre": x.get("primaryGenreName") or "",
+                        "art_thumb": x.get("artworkUrl100") or "",
+                        "track_count": int(x.get("trackCount") or 0),
+                    })
+        elif source == "discogs":
+            if not _discogs_configured():
+                return []
+            # A discography is a MIX of masters and orphan releases, so each row
+            # carries its own kind prefix - exactly as the album search does -
+            # and the details fetch routes to the matching endpoint.
+            resp = _discogs_get(f"artists/{artist_id}/releases",
+                                params={"sort": "year", "sort_order": "asc",
+                                        "per_page": max(1, min(limit, 100))})
+            if resp is not None:
+                for x in (resp.json() or {}).get("releases", []) or []:
+                    nm = (x.get("title") or "").strip()
+                    rid, kind = x.get("id"), x.get("type")
+                    if not nm or not rid or kind not in ("master", "release"):
+                        continue
+                    out.append({
+                        "id": f"{'m' if kind == 'master' else 'r'}:{rid}",
+                        "source": "discogs", "title": nm, "artist": "",
+                        "year": str(x.get("year") or ""), "genre": "",
+                        "art_thumb": "", "track_count": 0,
+                    })
+        elif source == "musicbrainz":
+            # Browse by release, not release-group: the album details function
+            # takes a RELEASE id, and a release-group id would 404 there. That
+            # means one pressing per row rather than one per work - the same
+            # trade the Discogs master search makes, for the same reason.
+            # 'release' is SINGULAR here: /ws/2/release is the browse endpoint
+            # and /ws/2/releases does not exist, so the plural 404s. A browse
+            # takes an id filter, never a 'query' param.
+            resp = _mb_get(MUSICBRAINZ_BASE_URL + "release",
+                           params={"artist": artist_id, "fmt": "json",
+                                   "limit": max(1, min(limit, 100))},
+                           timeout=10)
+            if resp is not None:
+                for rel in (resp.json() or {}).get("releases", []) or []:
+                    rid = rel.get("id")
+                    rt = (rel.get("title") or "").strip()
+                    if not rid or not rt:
+                        continue
+                    out.append({
+                        "id": str(rid), "source": "musicbrainz", "title": rt,
+                        "artist": "", "year": str(rel.get("date") or "")[:4],
+                        "genre": "", "art_thumb": "",
+                        "track_count": int(rel.get("track-count") or 0),
+                    })
+    except Exception as e:
+        print(f"[ARTISTS] {source} albums for {artist_id} error: {e}")
+    search_cache.set(key, out, ttl=3600)
+    return out
+
+
 def search_mb_entities(query, kind, artist_hint=None, album_hint=None, limit=15):
     """Search MusicBrainz for artists or recordings (the filter-strip views).
 
@@ -1048,7 +1202,18 @@ def search_mb_entities(query, kind, artist_hint=None, album_hint=None, limit=15)
                     out.append({
                         "id": rec.get("id", ""), "title": title,
                         "artist": r_artist,
+                        "source": "musicbrainz",
+                        # Which release this recording was found on. Without it
+                        # a MusicBrainz track row could name a song but not the
+                        # album it belongs to, so there was nothing to open - the
+                        # Tracks tab could list a track and then do nothing with
+                        # it. 'releases' is a LIST and may be empty.
+                        "album_id": ((rels[0] or {}).get("id") or "")
+                                    if rels and isinstance(rels[0], dict) else "",
+                        "album": ((rels[0] or {}).get("title") or "")
+                                 if rels and isinstance(rels[0], dict) else "",
                         "length_ms": (rec.get("length") or 0),
+                        "track_no": 0,
                         "format": fmt,
                     })
     except Exception as e:
@@ -1283,7 +1448,7 @@ def _dg_split_artist_title(title):
     with no separator keeps the whole string as the title rather than guessing.
     """
     raw = (title or "").strip()
-    for sep in (" - ", " – ", " — "):
+    for sep in (" - ", " â€“ ", " â€” "):
         if sep in raw:
             artist, _, rest = raw.partition(sep)
             if artist.strip() and rest.strip():
@@ -1327,6 +1492,48 @@ def _dg_position(position):
     if m:
         return 1, int(m.group(1))
     return 1, 0
+
+
+def search_itunes_tracks(query, limit=15):
+    """iTunes tracks. entity=musicTrack.
+
+    Each row carries the ALBUM it belongs to (collectionId / collectionName),
+    which is what makes 'tag this one track' possible: the write path always
+    works on a whole album document, so picking a track means picking its album
+    and then selecting exactly that track on the confirm page.
+    """
+    term = (query or "").strip()
+    if not term:
+        return []
+    cache_key = f"it_track_{term.lower()}_{limit}"
+    cached = search_cache.get(cache_key)
+    if cached is not None:
+        return cached
+    out = []
+    try:
+        resp = requests.get("https://itunes.apple.com/search",
+                            params={"term": term, "entity": "musicTrack",
+                                    "limit": max(1, min(limit, 50))},
+                            timeout=8)
+        if resp is not None:
+            for x in (resp.json() or {}).get("results", []) or []:
+                nm = (x.get("trackName") or "").strip()
+                cid = x.get("collectionId")
+                if not nm or not cid:
+                    continue
+                out.append({
+                    "source": "itunes", "album_id": str(cid),
+                    "track": nm,
+                    "album": (x.get("collectionName") or "").strip(),
+                    "artist": (x.get("artistName") or "").strip(),
+                    "track_no": x.get("trackNumber") or 0,
+                    "length_ms": x.get("trackTimeMillis") or 0,
+                    "art_thumb": x.get("artworkUrl100") or "",
+                })
+    except Exception as e:
+        print(f"[ITUNES] track search error: {e}")
+    search_cache.set(cache_key, out, ttl=3600)
+    return out
 
 
 def _dg_token_overlap(a, b):
@@ -1455,7 +1662,7 @@ def search_discogs(query, limit=40, artist_hint=None, album_hint=None,
                 "genre": (styles[0] if styles else ""),
                 "art_thumb": r.get("cover_image") or r.get("thumb") or "",
                 "country": "",
-                "format": " • ".join(r.get("format") or []),
+                "format": " â€¢ ".join(r.get("format") or []),
             })
     search_cache.set(cache_key, out, ttl=7200)
     return out
@@ -2223,8 +2430,17 @@ def api_search():
         f_itunes = executor.submit(search_itunes, q, limit=_itunes_limit)
         f_mb = executor.submit(search_musicbrainz, q, artist_hint=artist_hint, album_hint=album_hint, limit=_mb_limit)
         f_cnt = executor.submit(count_search_totals, q, artist_hint, album_hint)
-        f_view = executor.submit(search_mb_entities, q, "artist" if view == "artist" else "recording",
-                                 artist_hint, album_hint, _view_limit) if view != "album" else None
+        # The Artists tab used to submit a single MusicBrainz artist query, so
+        # iTunes and Discogs artists were unreachable however well known they
+        # were. All three now run in the same pool and merge into one list.
+        if view == "artist":
+            f_view = executor.submit(_search_artists_all, q, _view_limit,
+                                     _discogs_configured())
+        elif view == "track":
+            f_view = executor.submit(_search_tracks_all, q, _view_limit,
+                                     artist_hint, album_hint)
+        else:
+            f_view = None
         f_dg = executor.submit(search_discogs, q, limit=_dg_limit,
                                artist_hint=artist_hint,
                                hints_reliable=hints_reliable) if _dg_enabled else None
@@ -2319,30 +2535,11 @@ def api_search():
         out = [f'<div class="section-label">{label}</div>']
         for row in view_rows[_start:_start + per_page]:
             if view == "artist":
-                nm = esc(row.get("name", "Unknown Artist"))
-                bits = [b for b in (row.get("type", ""), row.get("country", "")) if b]
-                sub = esc(" • ".join(bits))
-                out.append(
-                    f'<div class="album-item">'
-                    f'  <div class="album-meta">'
-                    f'    <div class="album-artist">{nm} <span class="badge badge-mb">MusicBrainz</span></div>'
-                    f'    <div class="album-sub">{sub}</div>'
-                    f'  </div>'
-                    f'</div>')
+                # Clickable through to that artist's albums. These rows used to
+                # render with no onclick at all, so the tab was a dead list.
+                out.append(_artist_row_html(row))
             else:
-                ti = esc(row.get("title", "Unknown Track"))
-                ar = esc(row.get("artist", ""))
-                ms = row.get("length_ms") or 0
-                dur = f"{ms//60000}:{(ms%60000)//1000:02d}" if ms > 0 else ""
-                sub = esc(dur)
-                out.append(
-                    f'<div class="album-item">'
-                    f'  <div class="album-meta">'
-                    f'    <div class="album-artist">{ti} <span class="badge badge-mb">MusicBrainz</span></div>'
-                    f'    <div class="album-title">{ar}</div>'
-                    f'    <div class="album-sub">{sub}</div>'
-                    f'  </div>'
-                    f'</div>')
+                out.append(_track_row_html(row))
         return _respond("".join(out))
 
     # ---- Albums view (default) ------------------------------------------
@@ -2375,48 +2572,63 @@ def api_search():
     # a block of iTunes followed by a block of MusicBrainz, which is the
     # original behaviour this replaced.
     for _prov, item in _window:
-        title = esc(item.get("title"))
-        artist = esc(item.get("artist"))
-        art = item.get("art_thumb") or ""
-        year = esc(item.get("year", ""))
+        html_out += _album_row_html(_prov, item)
 
-        if _prov == "itunes":
-            genre = esc(item.get("genre", ""))
-            tracks = item.get("track_count", "")
-            meta_sub = []
-            if tracks:
-                meta_sub.append(f"{tracks} Track(s)")
-            if genre:
-                meta_sub.append(genre)
-            sub_text = "  ".join(meta_sub)
-            if year:
-                sub_text = (sub_text + " • " + year) if sub_text else year
-        else:
-            country = esc(item.get("country", ""))
-            meta_sub = []
-            if year: meta_sub.append(year)
-            # Discogs rows carry a 'format' ('Vinyl • Album • LP') instead of a
-            # country. It is the single most useful thing on a Discogs row -
-            # it is how a user tells the CD pressing from the vinyl one - so it
-            # takes the same slot rather than being dropped.
-            if _prov == "discogs":
-                fmt = esc(item.get("format", ""))
-                if fmt: meta_sub.append(fmt)
-            elif country:
-                meta_sub.append(country)
-            sub_text = "  ".join(meta_sub)
+    return _respond(html_out)
 
-        rid = esc(item.get("id"))
-        # Each source gets its own badge so a user can always tell which
-        # provider a row came from - the whole point of a third provider is
-        # that its tracklist can be checked against the others.
-        if _prov == "itunes":
-            badge = "badge badge-itunes\">iTunes"
-        elif _prov == "discogs":
-            badge = "badge badge-dg\">Discogs"
-        else:
-            badge = "badge badge-mb\">MusicBrainz"
-        html_out += f'''<div class="album-item" onclick="pick('{_prov}', '{rid}')">
+
+# ONE renderer for every album-shaped row: the Albums tab and the artist
+# browser both show records the user can pick, and a second copy of this markup
+# would be free to drift from the first - a provider badge or an escaping fix
+# landing in one list and not the other.
+_PROVIDER_BADGE = {
+    "itunes": "badge badge-itunes\">iTunes",
+    "discogs": "badge badge-dg\">Discogs",
+}
+
+
+def _album_row_html(prov, item):
+    """One album row: cover, artist, title, provider badge, and a click that
+    calls the existing pick(source, id) handler. Because it emits the same
+    pick() call as the Albums tab, a row picked from an artist's page lands on
+    the same confirm page and goes through the same write path - nothing
+    downstream had to learn that this row came from a browse."""
+    title = esc(item.get("title"))
+    artist = esc(item.get("artist"))
+    art = item.get("art_thumb") or ""
+    year = esc(item.get("year", ""))
+    if prov == "itunes":
+        genre = esc(item.get("genre", ""))
+        tracks = item.get("track_count", "")
+        meta_sub = []
+        if tracks:
+            meta_sub.append(f"{tracks} Track(s)")
+        if genre:
+            meta_sub.append(genre)
+        sub_text = "  ".join(meta_sub)
+        if year:
+            sub_text = (sub_text + " â€¢ " + year) if sub_text else year
+    else:
+        country = esc(item.get("country", ""))
+        meta_sub = []
+        if year: meta_sub.append(year)
+        # Discogs rows carry a 'format' ('Vinyl â€¢ Album â€¢ LP') instead of a
+        # country. It is the single most useful thing on a Discogs row - it is
+        # how a user tells the CD pressing from the vinyl one - so it takes the
+        # same slot rather than being dropped.
+        if prov == "discogs":
+            fmt = esc(item.get("format", ""))
+            if fmt: meta_sub.append(fmt)
+        elif country:
+            meta_sub.append(country)
+        sub_text = "  ".join(meta_sub)
+
+    rid = esc(item.get("id"))
+    # Each source gets its own badge so a user can always tell which provider a
+    # row came from - the whole point of a third provider is that its tracklist
+    # can be checked against the others.
+    badge = _PROVIDER_BADGE.get(prov, "badge badge-mb\">MusicBrainz")
+    return f'''<div class="album-item" onclick="pick('{prov}', '{rid}')">
   <div class="tick">&#9654;</div>
   <img src="{art}" class="album-thumb" alt="" onerror="this.src='/static/noart.png';this.onerror=null;">
   <div class="album-meta">
@@ -2427,7 +2639,217 @@ def api_search():
   </div>
 </div>'''
 
-    return _respond(html_out)
+
+def _search_tracks_all(query, limit=20, artist_hint=None, album_hint=None):
+    """Tracks from iTunes and MusicBrainz, merged.
+
+    Discogs has no track index to search (its search is over releases and
+    masters), so it is deliberately absent here rather than silently returning
+    album rows in a list of songs.
+
+    Every row carries the album it belongs to. That is the whole point of the
+    tab: the write path can only ever produce an ALBUM document, so 'tag this
+    one track' means opening that album and selecting that track on it.
+    """
+    results = {}
+    sources = [
+        ("itunes", lambda: search_itunes_tracks(query, limit)),
+        ("musicbrainz", lambda: search_mb_entities(query, "recording",
+                                                    artist_hint, album_hint,
+                                                    limit)),
+    ]
+    for name, call in sources:
+        try:
+            rows = call()
+        except Exception as e:
+            print(f"[TRACKS] {name} search error: {e}")
+            rows = []
+        norm = []
+        for r in rows:
+            album_id = r.get("album_id") or ""
+            # A track we cannot place on an album cannot be tagged, so it is
+            # dropped rather than rendered as a row that leads nowhere.
+            if not album_id:
+                continue
+            norm.append({
+                "source": name, "album_id": str(album_id),
+                "track": r.get("track") or r.get("title") or "",
+                "album": r.get("album") or "",
+                "artist": r.get("artist") or "",
+                "track_no": r.get("track_no") or 0,
+                "length_ms": r.get("length_ms") or 0,
+                "art_thumb": r.get("art_thumb") or "",
+            })
+        norm = [r for r in norm if r["track"]]
+        if norm:
+            results[name] = norm
+    if not results:
+        return []
+    return [r for _p, r in _interleave_sources(list(results.items()))]
+
+
+_ARTIST_BADGE = {
+    "itunes": "badge badge-itunes\">iTunes",
+    "discogs": "badge badge-dg\">Discogs",
+}
+
+
+def _search_artists_all(query, limit=20, with_discogs=False):
+    """Artists from MusicBrainz, iTunes and Discogs, merged and interleaved.
+
+    The three indexes describe artists differently - MusicBrainz carries a
+    country and a type, iTunes a genre, Discogs neither - so the rows are
+    normalised onto the one shape the renderer needs before interleaving. Any
+    provider that fails or is not configured contributes nothing rather than
+    taking the whole tab down with it.
+    """
+    results = {}
+    # Each provider has its own signature - search_mb_entities takes a 'kind'
+    # as its SECOND positional, not a limit. Calling them all as fn(query, limit)
+    # silently passed the limit in as MusicBrainz's 'kind', which raised inside
+    # the query builder and left the tab with no MusicBrainz artists at all -
+    # the exact provider that used to be the only one working.
+    sources = [
+        ("musicbrainz", lambda: search_mb_entities(query, "artist", limit=limit)),
+        ("itunes", lambda: search_itunes_artists(query, limit)),
+    ]
+    if with_discogs:
+        sources.append(("discogs", lambda: search_discogs_artists(query, limit)))
+    for name, call in sources:
+        try:
+            rows = call()
+        except Exception as e:
+            print(f"[ARTISTS] {name} artist search error: {e}")
+            rows = []
+        norm = []
+        for r in rows:
+            if name == "musicbrainz":
+                norm.append({"source": "musicbrainz", "id": r.get("id", ""),
+                             "name": r.get("name", ""),
+                             "country": r.get("country", "") or "",
+                             "type": r.get("type", "") or "",
+                             "genre": "", "art_thumb": r.get("art_thumb", "")})
+            else:
+                norm.append({"source": name, "id": r.get("id", ""),
+                             "name": r.get("name", ""), "country": "",
+                             "type": "", "genre": r.get("genre", "") or "",
+                             "art_thumb": r.get("art_thumb", "")})
+        norm = [r for r in norm if r["id"] and r["name"]]
+        if norm:
+            results[name] = norm
+    if not results:
+        return []
+    return [r for _p, r in _interleave_sources(list(results.items()))]
+
+
+def _same_track(a, b):
+    """Do two track names name the same track?
+
+    Matched on the significant words, not equality: the track name in the URL
+    came from a provider search and the one on the album came from that
+    provider's own tracklist, so punctuation, a leading track number, or a
+    trailing '- Remastered' routinely differ between them. Equality would
+    match nothing and the user's one track would silently stay untagged.
+    """
+    import re as _re
+    _STOP = {"the", "a", "an", "of", "and", "in", "to", "feat", "ft"}
+    def toks(s):
+        s = _re.sub(r"^\s*\d+[\s.\-]+", "", s or "")      # leading "3. "
+        s = _re.sub(r"\(.*?\)|\[.*?\]", " ", s)          # (Remastered) [Live]
+        return {w for w in _re.findall(r"[a-z0-9]+", s.lower()) if w not in _STOP}
+    ta, tb = toks(a), toks(b)
+    if not ta or not tb:
+        return False
+    return ta == tb or (len(ta & tb) >= max(1, min(len(ta), len(tb)) - 0))
+
+
+def _artist_row_html(item):
+    """One artist row, clickable through to that artist's albums.
+
+    Before this the Artists tab rendered plain divs with no onclick at all, so
+    it was a dead list: you could read an artist name and do nothing with it.
+    Clicking now opens /api_artist_albums, which reuses _album_row_html, so the
+    second click goes straight to the existing confirm page."""
+    prov = item.get("source", "musicbrainz")
+    name = esc(item.get("name", "Unknown Artist"))
+    bits = [b for b in (item.get("genre", ""), item.get("type", ""),
+                        item.get("country", "")) if b]
+    sub = esc(" â€¢ ".join(bits))
+    aid = esc(item.get("id", ""))
+    badge = _ARTIST_BADGE.get(prov, "badge badge-mb\">MusicBrainz")
+    art = item.get("art_thumb") or ""
+    thumb = (f'<img src="{art}" class="album-thumb" alt="" '
+             f'onerror="this.src=\'/static/noart.png\';this.onerror=null;">'
+             if art else "")
+    return f'''<div class="album-item" onclick="showArtist('{prov}', '{aid}')">
+  <div class="tick">&#9654;</div>
+  {thumb}
+  <div class="album-meta">
+    <div class="album-artist">{name} <span class="{badge}</span></div>
+    <div class="album-sub">{sub}</div>
+  </div>
+</div>'''
+
+
+@app.route("/api_artist_albums")
+def api_artist_albums():
+    """Every album by one artist, as ordinary pickable album rows.
+
+    Rendered with the same _album_row_html as the Albums tab, so a row picked
+    here is indistinguishable downstream from one picked from a search - same
+    confirm page, same track selection, same write path.
+    """
+    source = request.args.get("source", "musicbrainz")
+    artist_id = request.args.get("id", "")
+    if not artist_id or source not in ("itunes", "musicbrainz", "discogs"):
+        return Response('<div class="empty-msg">Pick an artist first.</div>',
+                        mimetype="text/html")
+    rows = artist_albums(source, artist_id, limit=60)
+    if not rows:
+        return Response(
+            '<div class="section-label">Albums</div>'
+            '<div class="empty-msg">No albums found for this artist.</div>',
+            mimetype="text/html")
+    html = '<div class="section-label">Albums</div>'
+    for r in rows:
+        html += _album_row_html(r.get("source", source), r)
+    # A plain Response, NOT api_search's _respond: that one is a closure over
+    # that request's search totals, so it does not exist out here. The client
+    # only assigns this fragment to innerHTML, so nothing is lost.
+    return Response(html, mimetype="text/html")
+
+
+def _track_row_html(item):
+    """One track row, clickable straight through to tagging that ONE track.
+
+    The click carries the album AND the track name as ?focus=, so the confirm
+    page can open the album with exactly that track ticked. Without it a track
+    row would either do nothing or, worse, silently apply the whole album -
+    which is how a user asking for one track ends up renaming eleven.
+    """
+    track = item.get("track") or item.get("title") or "Unknown Track"
+    album = item.get("album") or ""
+    artist = item.get("artist") or ""
+    src = item.get("source", "musicbrainz")
+    album_id = item.get("album_id", "")
+    ms = item.get("length_ms") or 0
+    dur = "%d:%02d" % (ms // 60000, (ms % 60000) // 1000) if ms > 0 else ""
+    badge = _PROVIDER_BADGE.get(src, "badge badge-mb\">MusicBrainz")
+    # A track with no album cannot be tagged at all - the write path builds an
+    # album document - so it is rendered inert rather than as a broken link.
+    if album_id:
+        onclick = ("pickTrack('%s', '%s', '%s')"
+                   % (esc(src), esc(album_id), esc(track)))
+    else:
+        onclick = ""
+    return f'''<div class="album-item" onclick="{onclick}">
+  <div class="tick">&#9654;</div>
+  <div class="album-meta">
+    <div class="album-artist">{esc(track)} <span class="{badge}"></span></div>
+    <div class="album-title">{esc(artist)}</div>
+    <div class="album-sub">{esc(album)}{("  " + dur) if dur else ""}</div>
+  </div>
+</div>'''
 # ==========================================================
 # UNIFIED MODERN FAI UI (HTML/CSS/JS)
 # ==========================================================
@@ -2768,6 +3190,47 @@ def unified_ui():
       };
       xhr.send();
     }
+
+    // Second step of the Artists tab: an artist row opens that artist's albums
+    // in the SAME results pane, reusing the album rows the Albums tab renders,
+    // so the second click reaches the ordinary confirm page and tag flow.
+    // 'Back' returns to the artist list, because the tab strip alone cannot -
+    // changing CURRENT_VIEW would fire a fresh search and lose the context.
+    function showArtist(source, id) {
+      var scrollBox = document.getElementById('results_scroll');
+      var resultsDiv = document.getElementById('results_area');
+      var target = scrollBox || resultsDiv;
+      target.innerHTML = '<div class="empty-msg">Loading albums&#8230;</div>';
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', '/api_artist_albums?source=' + encodeURIComponent(source)
+               + '&id=' + encodeURIComponent(id), true);
+      xhr.onreadystatechange = function() {
+        if (xhr.readyState == 4) {
+          target.innerHTML = '<div class="nav-steps"><span class="link" '
+            + 'onclick="backToArtists()">&#8592; Back to artists</span></div>'
+            + xhr.responseText;
+          target.scrollTop = 0;
+        }
+      };
+      xhr.send();
+    }
+
+    function backToArtists() {
+      doSearch();
+    }
+
+    // A track row opens its ALBUM with ?focus=<track>, because the write path
+    // can only ever produce an album document. The confirm page uses focus to
+    // tick exactly that one track - without it, clicking a track would either
+    // do nothing or, far worse, quietly apply the whole album and rename every
+    // other track on the disc.
+    function pickTrack(source, albumId, track) {
+      var url = "/confirm?source=" + encodeURIComponent(source)
+        + "&id=" + encodeURIComponent(albumId)
+        + "&focus=" + encodeURIComponent(track)
+        + "&" + window.location.search.substring(1);
+      window.location.href = url;
+    }
     // Render the REAL number of matches instead of a hardcoded '500+'.
     // The server sends MusicBrainz's exact totals in X-Search-Totals; when it
     // cannot, we fall back to the number of rows on screen instead of
@@ -3080,6 +3543,11 @@ def confirm():
         source = "musicbrainz" if "-" in album_id else "itunes"
 
     wmp_track = request.args.get("track", "")
+    # ?focus=<track> arrives from the Tracks tab. It is deliberately NOT
+    # wmp_track: that is what WMP says IT is playing, whereas focus is the user
+    # naming the one track they clicked. Only the latter should decide that
+    # exactly ONE box ends up ticked.
+    focus_name = request.args.get("focus", "")
     wmp_artist = request.args.get("artist", "")
     wmp_album = request.args.get("album", "")
     # WMP's real CD flow passes ?cd=<hex>+<hex>... (e.g. 5+96+554B+83B5)
@@ -3210,7 +3678,16 @@ def confirm():
             if wmp_track and wmp_track.lower() in t_name.lower():
                 is_match = True
 
-            checked = 'checked' if is_match or len(tracks) == 1 else ''
+            # ?focus=<track> comes from the Tracks tab: the user asked for THIS
+            # one track, so it is the only tick. It overrides both the
+            # WMP-playing-track match and the single-track default - a user who
+            # clicked a track did not ask for the whole album, and quietly
+            # applying eleven renames because they wanted one is the worst
+            # outcome this page can produce.
+            if focus_name:
+                checked = 'checked' if _same_track(t_name, focus_name) else ''
+            else:
+                checked = 'checked' if is_match or len(tracks) == 1 else ''
             cls_match = 'selected' if checked else ''
 
             track_html += f'''<div class="track-row {cls_match}" id="row_{t['id']}" onclick="toggleRow('{t['id']}')">
@@ -4271,7 +4748,7 @@ def done():
 </head>
 <body>
   <div class="card">
-    <div class="icon">✓</div>
+    <div class="icon">âœ“</div>
     <h3>Metadata Applied Successfully!</h3>
     <p id="statusMsg">Windows Media Player is updating your library tracks. Returning to the player&hellip;</p>
     <button class="btn" onclick="returnToMainTask()">Close Window</button>
