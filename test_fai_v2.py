@@ -3147,6 +3147,25 @@ check("discogs-discography-is-newest-first",
       '"sort_order": "desc"' in _src,
       "an artist page listing oldest-first makes an active artist look inactive")
 
+# Browse rows came back with no artwork at all: MusicBrainz's release-group
+# browse carries no image, and Discogs' artist-releases returns an empty thumb.
+# A row with no cover must resolve one rather than sit on the placeholder.
+check("browsed-rows-resolve-their-cover-lazily",
+      '@app.route("/api_art")' in _src
+      and 'if not art:' in _src
+      and '"/api_art?source=' in _src,
+      "every browsed album showed the placeholder because the browse endpoints "
+      "return no image; the row must resolve a cover on demand")
+check("lazy-cover-lookups-are-cached",
+      'image_cache.get(cache_key)' in _src
+      and 'image_cache.set(cache_key, url, ttl=86400)' in _src,
+      "sixty rows must not mean sixty provider calls on every visit; the "
+      "resolved URL is cached, so a repeat view costs nothing")
+check("lazy-cover-falls-back-to-the-placeholder",
+      'return redirect("/static/noart.png")' in _src,
+      "an album with no cover must land on the placeholder, not on a broken "
+      "image or a 404")
+
 # One renderer for all album rows. Two copies of this markup would be free to
 # drift - a badge or an escaping fix landing in one list and not the other.
 check("album-rows-have-a-single-renderer",

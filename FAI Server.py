@@ -2678,6 +2678,15 @@ def _album_row_html(prov, item):
     # row came from - the whole point of a third provider is that its tracklist
     # can be checked against the others.
     badge = _PROVIDER_BADGE.get(prov, "badge badge-mb\">MusicBrainz")
+    # No artwork from the search itself? Point the row at /api_art, which
+    # resolves one cover on demand and caches it. The artist browser is where
+    # this bites: MusicBrainz's release-group browse and Discogs'
+    # artist-releases both come back with no image, so every browsed row would
+    # otherwise have shown the placeholder forever. Resolving inline for sixty
+    # rows is not an option, so it is resolved as the browser asks for it.
+    if not art:
+        art = (f"/api_art?source={prov}"
+               f"&amp;id={rid}")
     return f'''<div class="album-item" onclick="pick('{prov}', '{rid}')">
   <div class="tick">&#9654;</div>
   <img src="{art}" class="album-thumb" alt="" onerror="this.src='/static/noart.png';this.onerror=null;">
@@ -2867,6 +2876,83 @@ def api_artist_albums():
     # that request's search totals, so it does not exist out here. The client
     # only assigns this fragment to innerHTML, so nothing is lost.
     return Response(html, mimetype="text/html")
+
+
+@app.route("/api_art")
+def api_art():
+    """The cover for one album, resolved on demand.
+
+    The artist browser lists albums the provider's own browse endpoint returned
+    with NO artwork - MusicBrainz's release-group browse carries no image at all,
+    and Discogs' artist-releases hands back an empty 'thumb'. The artwork lives
+    one lookup deeper, and doing that inline for sixty rows is not an option:
+    Coldplay alone has over a hundred releases, so the page would hang, and the
+    Discogs rate limiter would serialise it into the bargain.
+
+    So a row with no artwork is rendered with THIS as its image source. The
+    browser asks for each row's art in parallel, the server does one cached
+    lookup per album, and covers fill in as they arrive instead of the page
+    blocking. A repeat visit is served from image_cache with no provider call.
+
+    Redirects to the placeholder when there is no cover, so the row's existing
+    onerror fallback still does the work it always did.
+    """
+    source = request.args.get("source", "")
+    ref = request.args.get("id", "")
+    if not ref:
+        return redirect("/static/noart.png")
+    cache_key = f"art_{source}_{ref}"
+    cached = image_cache.get(cache_key)
+    if cached:
+        return redirect(cached)
+    url = ""
+    try:
+        if source == "itunes":
+            resp = requests.get("https://itunes.apple.com/lookup",
+                                params={"id": ref}, timeout=8)
+            for x in (resp.json() or {}).get("results", []) or []:
+                if x.get("artworkUrl100"):
+                    url = x["artworkUrl100"]
+                    break
+        elif source == "discogs":
+            kind, sep, raw = ref.partition(":")
+            if not sep or kind not in ("m", "r"):
+                kind, raw = "m", ref
+            resp = _discogs_get(f"{'masters' if kind == 'm' else 'releases'}/{raw}")
+            if resp is not None:
+                data = resp.json() or {}
+                images = data.get("images") or []
+                chosen = next((i for i in images if i.get("type") == "primary"),
+                              images[0] if images else None)
+                if chosen:
+                    url = chosen.get("uri") or chosen.get("resource_url") or ""
+                # A master with no images of its own keeps them on its main
+                # release - the same dance the details fetch does.
+                if not url and kind == "m" and data.get("main_release"):
+                    rel = _discogs_get(f"releases/{data['main_release']}")
+                    if rel is not None:
+                        imgs = (rel.json() or {}).get("images") or []
+                        pick = next((i for i in imgs if i.get("type") == "primary"),
+                                    imgs[0] if imgs else None)
+                        if pick:
+                            url = pick.get("uri") or pick.get("resource_url") or ""
+        elif source == "musicbrainz":
+            release_id = ref
+            if ref.startswith("g:"):
+                release_id = _mb_release_group_to_release(ref[2:]) or ""
+            if release_id:
+                # The Cover Art Archive is itself a redirect, and this is
+                # exactly the URL pattern it accepts. A browser follows the
+                # redirect, so the image resolves without us spending a request
+                # finding out where it lands.
+                url = (f"https://coverartarchive.org/release/{release_id}"
+                       f"/front-250.jpg")
+    except Exception as e:
+        print(f"[ART] resolve failed for {source}/{ref}: {e}")
+    if not url:
+        return redirect("/static/noart.png")
+    image_cache.set(cache_key, url, ttl=86400)
+    return redirect(url)
 
 
 def _track_row_html(item):
