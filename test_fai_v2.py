@@ -2033,6 +2033,99 @@ check("proxy-serves-the-path-token-form",
       f"the proxy must serve the tokenised path form, got {_rp.status_code}, "
       f"{len(_rp.data)}B")
 
+# 47b. REGRESSION. MusicBrainz was the only provider whose artwork URL is a
+#      REDIRECT rather than an image, and WMP was handed the redirecting URL:
+#
+#        coverartarchive.org/release/<id>/front-500.jpg
+#          -> 307 text/plain   (not an image at all)
+#          -> 302 image/jpeg
+#
+#      iTunes and Discogs return 200 image/jpeg directly, which is exactly why
+#      those two attached artwork and MusicBrainz did not. The document must now
+#      carry the final direct image URL.
+#
+#      These pin the RESOLUTION behaviour rather than live archive.org, so they
+#      cannot go flaky when the network is down.
+class _FakeResp:
+    def __init__(self, url, ctype):
+        self.url = url
+        self.headers = {"Content-Type": ctype}
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class _FakeGet:
+    """Stands in for requests.get, recording that the body was never read."""
+
+    def __init__(self, final, ctype):
+        self.final, self.ctype, self.calls = final, ctype, []
+
+    def __call__(self, url, **kw):
+        self.calls.append((url, kw))
+        return _FakeResp(self.final, self.ctype)
+
+
+_real_get = fai.requests.get
+try:
+    # A redirect chain that lands on an image is resolved.
+    _fg = _FakeGet("https://dn710007.ca.archive.org/0/items/mbid-x/mbid-x-1_thumb500.jpg",
+                   "image/jpeg")
+    fai.requests.get = _fg
+    check("musicbrainz-cover-redirect-resolves-to-a-direct-image",
+          fai._resolve_art_url("https://coverartarchive.org/release/x/front-500.jpg")
+          == _fg.final,
+          "the redirect chain must be walked so WMP is given a direct image URL, "
+          "the same shape iTunes and Discogs already returned")
+    check("art-resolve-does-not-download-the-body",
+          _fg.calls and _fg.calls[0][1].get("stream") is True
+          and _fg.calls[0][1].get("allow_redirects") is True,
+          f"resolution only needs the final URL and headers, so the image body "
+          f"must not be pulled down: {_fg.calls}")
+
+    # A chain that does NOT end on an image keeps the original URL, so a release
+    # with no cover can never be left with a URL pointing at a text/plain body.
+    fai.requests.get = _FakeGet("https://coverartarchive.org/release/x/front-500.jpg",
+                                "text/plain")
+    check("art-resolve-keeps-the-url-when-it-is-not-an-image",
+          fai._resolve_art_url("https://coverartarchive.org/release/x/front-500.jpg")
+          == "https://coverartarchive.org/release/x/front-500.jpg",
+          "an unresolvable or non-image redirect must fall back to the original URL "
+          "rather than hand WMP something that cannot be an image")
+
+    # Offline / exception must never lose the artwork.
+    def _boom(url, **kw):
+        raise RuntimeError("network down")
+    fai.requests.get = _boom
+    check("art-resolve-falls-back-when-the-network-fails",
+          fai._resolve_art_url("https://coverartarchive.org/release/x/front-500.jpg")
+          == "https://coverartarchive.org/release/x/front-500.jpg",
+          "resolution is best-effort; a failure must degrade to today's behaviour, "
+          "not strip the artwork")
+
+    # Non-http and empty values pass straight through without any request.
+    _fg2 = _FakeGet("http://elsewhere/x.jpg", "image/jpeg")
+    fai.requests.get = _fg2
+    check("art-resolve-ignores-non-http-inputs",
+          fai._resolve_art_url("") == "" and fai._resolve_art_url("data:,x") == "data:,x"
+          and not _fg2.calls,
+          "empty and non-http values must be returned untouched and must not "
+          "trigger a network call")
+finally:
+    fai.requests.get = _real_get
+
+# The end-to-end effect: a MusicBrainz album's art_url is what reaches the
+# document, so the resolved URL must survive into largeCoverParams intact.
+_MB_RESOLVED = ("https://dn710007.ca.archive.org/0/items/"
+                "mbid-d47ffe81-892b-46bf-ab3f-085c011d3292/"
+                "mbid-d47ffe81-892b-46bf-ab3f-085c011d3292-33662597246_thumb500.jpg")
+check("resolved-art-url-survives-into-the-document",
+      _cover(dict(_alb, source="musicbrainz", art_url=_MB_RESOLVED),
+             "direct", cd="B+96+1970") == _MB_RESOLVED,
+      "the resolved direct URL is what WMP reads out of largeCoverParams, "
+      "unchanged and unescaped")
+
 # 48. REGRESSION. Adding the token as a SECOND QUERY PARAMETER put a bare '&'
 #      into largeCoverParams, which made the whole document not-well-formed.
 #      WMP then rejected the entire response, so tags stopped applying as well

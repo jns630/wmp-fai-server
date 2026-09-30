@@ -453,6 +453,33 @@ Two operational rules follow, both learned the hard way:
 - **Renewing WMP's database files is a legitimate diagnostic**, not a workaround.
   When a rip appears to do nothing, the metadata may be staged and unfetched.
 
+### MusicBrainz artwork was a redirect; the other two providers are not
+
+Artwork worked on iTunes and Discogs but not on MusicBrainz. The difference is that
+MusicBrainz is the only provider whose cover URL is not already an image:
+
+```text
+coverartarchive.org/release/<id>/front-500.jpg
+  -> 307  text/plain   archive.org/download/mbid-<id>/…_thumb500.jpg
+  -> 302  image/jpeg   dn710007.ca.archive.org/0/items/…_thumb500.jpg
+
+iTunes : 200 image/jpeg   is1-ssl.mzstatic.com/…/600x600bb.jpg
+Discogs: 200 image/jpeg   i.discogs.com/…
+```
+
+The first hop is a **`text/plain` 307**, not an image. WMP fetches
+`largeCoverParams` itself, and in direct mode it was being handed that redirecting
+URL, so it never received the JPEG the other two providers were always supplying.
+`_resolve_art_url` now walks the chain and puts the final direct URL in the
+document, which is the same shape the working providers returned.
+
+It is deliberately forgiving. The resolved URL is used **only** if the chain
+actually ended somewhere else *and* that somewhere is an `image/*`; otherwise the
+original URL is kept. So an offline machine, a timeout, or a release with no front
+cover at all degrades to the previous behaviour instead of stripping the artwork.
+Resolution uses `stream=True`, so the image body is never downloaded just to read a
+URL header.
+
 ### The diagnostic rule this thread should have followed
 
 **A mechanism with N failures and no successes, alongside an untried alternative,

@@ -1104,6 +1104,56 @@ def search_musicbrainz(query, artist_hint=None, album_hint=None, limit=10):
     search_cache.set(cache_key, results, ttl=3600)
     return results
 
+
+# ==========================================================
+# ARTWORK REDIRECT RESOLUTION
+# ==========================================================
+# MusicBrainz is the only provider whose artwork URL is a REDIRECT. The other two
+# hand out a direct image, which is why only MusicBrainz-sourced albums came back
+# without artwork:
+#
+#   coverartarchive.org/release/<id>/front-500.jpg
+#     -> 307  text/plain            archive.org/download/mbid-<id>/..._thumb500.jpg
+#     -> 302  image/jpeg            dn710007.ca.archive.org/0/items/..._thumb500.jpg
+#
+#   iTunes : 200 image/jpeg          is1-ssl.mzstatic.com/.../600x600bb.jpg
+#   Discogs: 200 image/jpeg          i.discogs.com/...
+#
+# The first MusicBrainz hop is not an image at all - it is a text/plain 307. WMP
+# fetches largeCoverParams itself and was being handed that redirecting URL, so
+# it did not end up with the JPEG that the other two providers were always
+# giving it. Following the chain here gives WMP the final direct URL and puts
+# MusicBrainz on the same footing as iTunes and Discogs.
+#
+# The resolution is deliberately forgiving: any failure - offline, a timeout, a
+# release with no front cover at all (404, no image) - returns the original URL
+# unchanged, which is exactly the behaviour this had before. A redirect that
+# cannot be resolved must never cost the album its artwork entirely.
+def _resolve_art_url(url):
+    """Follow an artwork redirect chain down to a final, direct image URL.
+
+    Returns the resolved URL, or `url` unchanged if it is already direct or if
+    the chain could not be walked.
+    """
+    if not url or not url.startswith("http"):
+        return url
+    try:
+        resp = requests.get(url, stream=True, timeout=15, allow_redirects=True)
+        try:
+            final = resp.url or url
+            # Only accept the result if the walk actually ended somewhere else and
+            # that somewhere is plausibly an image. `stream=True` keeps this from
+            # pulling down the whole image body just to look at a URL.
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if final != url and ctype.startswith("image/"):
+                return final
+        finally:
+            resp.close()
+    except Exception as e:
+        print(f"[ART] redirect resolve failed for {url}: {e}")
+    return url
+
+
 def get_musicbrainz_album_details(release_id):
     cache_key = f"mb_album_{release_id}"
     cached = album_cache.get(cache_key)
@@ -1182,7 +1232,10 @@ def get_musicbrainz_album_details(release_id):
                 })
                 track_seq += 1
 
-        art_url = f"https://coverartarchive.org/release/{release_id}/front-500.jpg"
+        # Resolve the coverartarchive redirect to a direct image URL. See
+        # _resolve_art_url for the chain and why iTunes/Discogs never needed this.
+        art_url = _resolve_art_url(
+            f"https://coverartarchive.org/release/{release_id}/front-500.jpg")
 
         details = {
             "id": str(release_id),
