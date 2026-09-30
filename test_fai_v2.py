@@ -2411,6 +2411,184 @@ check("discogs-track-durations-carry-through",
       f"a real runtime must survive normalization: "
       f"{_det['tracks'][0]['duration_ms'] if _det else None}")
 
+# ---- 50d. an ORPHAN release must be findable at all ----------------------
+# Searching 'Sunday Driver The End Of Julia' showed only the MusicBrainz row.
+# The album IS on Discogs - release 4913272 - and Discogs' own API returns it
+# as the top hit for type=release. We only ever asked for type=master, and that
+# release has master_id 0: it was never linked to a master, so the master-only
+# search returned nothing at all. The album existed and was simply unreachable.
+#
+# The rows below are the REAL payloads from that case, not invented ones.
+_ORPHAN_RELEASE = {"title": "The End Of Julia - Sunday Driver", "id": 4913272,
+                   "master_id": 0, "type": "release", "year": None,
+                   "thumb": "", "cover_image": "", "genre": ["Rock"],
+                   "style": ["Math Rock", "Emo"], "format": ["CD", "Album"],
+                   "country": "US"}
+_MASTER_ROW = {"title": "Miles Davis - Kind Of Blue", "id": 5460,
+               "master_id": 5460, "type": "master", "year": 1959,
+               "thumb": "t", "cover_image": "c", "genre": ["Jazz"],
+               "style": [], "format": ["LP"], "country": "US"}
+# A release that IS linked to a master must not be listed twice.
+_LINKED_RELEASE = dict(_MASTER_ROW, id=999999, type="release")
+
+
+def _orphan_search_probe():
+    def _get(path, params=None, **k):
+        if path == "database/search":
+            t = (params or {}).get("type")
+            if t == "master":
+                return _FakeResp(200, {"results": [_MASTER_ROW]})
+            if t == "release":
+                return _FakeResp(200, {"results": [_ORPHAN_RELEASE,
+                                                   _LINKED_RELEASE]})
+        return None
+    fai._discogs_get = _get
+    return fai.search_discogs("Sunday Driver The End Of Julia", limit=30,
+                              artist_hint="Sunday Driver",
+                              album_hint="The End Of Julia",
+                              hints_reliable=True)
+
+
+_orphan = _with_token(_orphan_search_probe)
+_ids = [r["id"] for r in _orphan]
+# Masters are emitted before orphans, so look the rows up by id rather than
+# by position - otherwise these assertions silently test the wrong row.
+_orphan_row = next((r for r in _orphan if r["id"] == "r:4913272"), None)
+check("discogs-finds-a-release-that-has-no-master",
+      "r:4913272" in _ids,
+      f"an orphan release (master_id 0) is invisible to a master-only search, "
+      f"which is why Sunday Driver's album never appeared: {_ids}")
+check("discogs-orphan-row-does-not-duplicate-its-master",
+      _ids.count("m:5460") == 1 and "r:999999" not in _ids,
+      f"a release that already has a master is covered by the master row; "
+      f"adding it again would reintroduce the one-row-per-pressing flood the "
+      f"master search exists to prevent: {_ids}")
+check("discogs-rows-carry-their-kind",
+      all((":" in i and i[0] in "mr") for i in _ids) and len(set(_ids)) == len(_ids),
+      f"masters/id and releases/id are different endpoints, so the id must "
+      f"say which one it is: {_ids}")
+
+# The inverted record. Discogs has this release as title='Sunday Driver' with
+# artists=['The End Of Julia'] - the two halves the wrong way round, in the
+# record itself. Splitting the index title 'The End Of Julia - Sunday Driver'
+# naively yields artist='The End Of Julia', album='Sunday Driver', which is
+# backwards and is exactly what the user saw.
+check("discogs-swaps-an-inverted-artist-and-album",
+      bool(_orphan_row) and _orphan_row["artist"] == "Sunday Driver"
+      and _orphan_row["title"] == "The End Of Julia",
+      f"the query names both, so the reading that agrees with it wins: "
+      f"{(_orphan_row or {}).get('artist')} | {(_orphan_row or {}).get('title')}")
+check("discogs-leaves-a-correctly-ordered-album-alone",
+      bool(_orphan) and any(r["artist"] == "Miles Davis"
+                            and r["title"] == "Kind Of Blue" for r in _orphan),
+      f"the swap must need positive evidence from the query; a correct record "
+      f"must never be flipped: {[(r['artist'], r['title']) for r in _orphan]}")
+
+
+def _orient_probe():
+    return fai._dg_orient, fai._dg_token_overlap
+
+
+_orient, _ovl = _with_token(_orient_probe)
+check("discogs-orientation-needs-evidence",
+      _orient("Some Artist", "Some Album", "", "") == ("Some Artist", "Some Album"),
+      "with no usable hints the Discogs order must be kept, never guessed at")
+check("discogs-orientation-ignores-stop-words",
+      _ovl("The End Of Julia", "The End Of Julia") == 2
+      and _ovl("Sunday Driver", "Sunday Driver") == 2,
+      f"stop words must not inflate the score or every 'The ...' would tie: "
+      f"{_ovl('The End Of Julia', 'The End Of Julia')}")
+# REGRESSION. The 50/50 token split the server does for a bare query is a
+# GUESS: 'Kind Of Blue Miles Davis' becomes artist_hint='Kind Of',
+# album_hint='Blue Miles Davis'. Feeding that to the orientation rule scored a
+# phantom swap and turned the CORRECT 'Miles Davis - Kind Of Blue' inside out.
+# A guess must never reverse a record, so the rule refuses unreliable hints
+# outright rather than trying to weigh them.
+check("discogs-orientation-ignores-guessed-hints",
+      _orient("The End Of Julia", "Sunday Driver", "The End Of",
+              "Julia Sunday Driver", hints_reliable=False)
+      == ("The End Of Julia", "Sunday Driver"),
+      "a 50/50 token guess is wrong half the time; it may narrow the provider "
+      "search but must never be allowed to reorder a record")
+check("discogs-orientation-swap-needs-real-agreement",
+      _orient("Some Artist", "Some Album", "Some", "Some",
+              hints_reliable=True) == ("Some Artist", "Some Album"),
+      "one shared word is not enough evidence to reverse a record")
+check("discogs-only-an-explicit-separator-is-reliable",
+      'hints_reliable = False' in _src
+      and 'hints_reliable = bool(artist_hint and album_hint)' in _src
+      and 'hints_reliable=hints_reliable' in _src,
+      "only a literal 'Artist - Album' is the user telling us which is which")
+
+# The details fetch must call the endpoint matching the row's kind, or an
+# orphan is listed and then 404s the moment it is picked.
+_asked = []
+
+
+def _kind_route_probe():
+    def _get(path, params=None, **k):
+        _asked.append(path)
+        if path == "releases/4913272":
+            return _FakeResp(200, {
+                "title": "Sunday Driver",
+                "artists": [{"name": "The End Of Julia"}],
+                "year": 2004, "genres": ["Rock"],
+                "images": [{"type": "primary", "uri": "https://img/f.jpg"}],
+                "tracklist": [{"position": "1", "title": "What Happened To Forever?"},
+                              {"position": "2", "title": "Sail Away"}]})
+        if path == "masters/5460":
+            return _FakeResp(200, _MASTER)
+        return None
+    fai._discogs_get = _get
+    fai.album_cache.clear()
+    fai._DG_ORIENT["r:4913272"] = ("Sunday Driver", "The End Of Julia")
+    return fai.get_discogs_album_details("r:4913272")
+
+
+_orphan_det = _with_token(_kind_route_probe)
+check("discogs-orphan-details-hit-the-releases-endpoint",
+      "releases/4913272" in _asked and "masters/4913272" not in _asked,
+      f"a release id sent to the masters endpoint 404s: {_asked}")
+check("discogs-orphan-details-return-the-tracklist",
+      bool(_orphan_det) and len(_orphan_det["tracks"]) == 2,
+      f"the orphan's own tracklist is the only source: "
+      f"{len(_orphan_det['tracks']) if _orphan_det else None}")
+check("discogs-orphan-details-keep-the-corrected-orientation",
+      bool(_orphan_det) and _orphan_det["artist"] == "Sunday Driver"
+      and _orphan_det["title"] == "The End Of Julia",
+      f"the record's own artists/title are where the swap lives, so the detail "
+      f"fetch must re-apply what the search row settled on: "
+      f"{(_orphan_det or {}).get('artist')} | {(_orphan_det or {}).get('title')}")
+check("discogs-orphan-id-is-namespaced",
+      bool(_orphan_det) and _orphan_det["id"] == "dgr:4913272",
+      f"master 4913272 and release 4913272 are different albums: "
+      f"{(_orphan_det or {}).get('id')}")
+
+# The album cache used to be keyed on the ref ALONE, but the orientation the
+# search row settled on is part of the RESULT. A search that could not tell
+# artist from album cached its guess for 24h, and a later correctly-informed
+# search of the same album kept being served that stale guess - so the fix
+# appeared not to work at all.
+def _stale_cache_probe():
+    m = fai
+    m.album_cache = m.TTLCache(default_ttl=86400)
+    m._DG_ORIENT.clear()
+    m._DG_ORIENT["r:4913272"] = ("The End Of Julia", "Sunday Driver")
+    first = m.get_discogs_album_details("r:4913272")
+    m._DG_ORIENT["r:4913272"] = ("Sunday Driver", "The End Of Julia")
+    second = m.get_discogs_album_details("r:4913272")
+    return first, second
+
+
+_stale_bad, _stale_good = _with_token(_stale_cache_probe)
+check("discogs-cache-key-includes-the-settled-orientation",
+      bool(_stale_bad) and bool(_stale_good)
+      and (_stale_bad["artist"], _stale_bad["title"]) == ("The End Of Julia", "Sunday Driver")
+      and (_stale_good["artist"], _stale_good["title"]) == ("Sunday Driver", "The End Of Julia"),
+      f"a re-search that settles the artist/album differently must not be "
+      f"served the previous answer for 24h: "
+      f"{(_stale_bad or {}).get('artist')}|{(_stale_good or {}).get('artist')}")
+
 # a master with no tracklist must fall back to its main release
 def _empty_master_probe():
     def _g(p, params=None, **k):

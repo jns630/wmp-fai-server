@@ -1329,13 +1329,73 @@ def _dg_position(position):
     return 1, 0
 
 
-def search_discogs(query, limit=40, artist_hint=None, album_hint=None):
+def _dg_token_overlap(a, b):
+    """How many significant words two strings share, ignoring stop words."""
+    _STOP = {"the", "of", "a", "an", "and", "in", "on", "at", "to", "for"}
+    wa = {w for w in re.findall(r"[a-z0-9]+", (a or "").lower()) if w not in _STOP}
+    wb = {w for w in re.findall(r"[a-z0-9]+", (b or "").lower()) if w not in _STOP}
+    return len(wa & wb)
+
+
+def _dg_orient(artist, album, artist_hint, album_hint, hints_reliable=True):
+    """Discogs sometimes stores the artist and album the wrong way round.
+
+    Sunday Driver's 'The End Of Julia' (release 4913272) is indexed with the
+    title 'The End Of Julia - Sunday Driver' but the release record itself has
+    title='Sunday Driver' and artists=['The End Of Julia'] - both halves the
+    wrong way round, in both the row and the detail. Splitting the index title
+    therefore yields artist='The End Of Julia', album='Sunday Driver', which is
+    backwards, and the detail fetch repeats the same swap.
+
+    Nothing in the record itself says which half is the album, so the only
+    evidence is the query the user typed - and only when they actually said
+    which part was which. `hints_reliable` is False for the guesses the server
+    makes by splitting a bare query down the middle: 'Kind Of Blue Miles Davis'
+    becomes artist='Kind Of', album='Blue Miles Davis', which is nonsense. Those
+    guesses are not merely weak evidence, they are actively harmful - a looser
+    rule scored a phantom swap and turned the CORRECT 'Miles Davis - Kind Of
+    Blue' inside out. So an unreliable hint never reverses anything.
+
+    Even with reliable hints the bar is strict: the record's own reading must
+    agree with the query NOT AT ALL and the reversed reading must agree clearly
+    (two or more words). A record that any part of the query supports is left
+    exactly as Discogs has it, which is the safe direction to be wrong in.
+    """
+    if not hints_reliable or not artist or not album:
+        return (artist, album)
+    straight = (_dg_token_overlap(artist, artist_hint or "")
+                + _dg_token_overlap(album, album_hint or ""))
+    swapped = (_dg_token_overlap(album, artist_hint or "")
+               + _dg_token_overlap(artist, album_hint or ""))
+    if straight == 0 and swapped >= 2:
+        return (album, artist)
+    return (artist, album)
+
+
+# Which reading of 'Artist - Album' the search row settled on, keyed by the
+# prefixed id. The details fetch re-applies it, because the release record is
+# where the swap actually lives and would otherwise win.
+_DG_ORIENT = {}
+
+
+def search_discogs(query, limit=40, artist_hint=None, album_hint=None,
+                   hints_reliable=False):
+
     """Search Discogs. Returns rows shaped exactly like the other providers.
 
     Search MASTERS, not releases: the release index returns the same album once
     per pressing, so 'Kind Of Blue' alone returns well over a hundred rows that
     are all the same five tracks. A master is the canonical work and points at
     the real tracklist.
+
+    Masters alone, though, cannot see a release that was never linked to one.
+    Sunday Driver's 'The End Of Julia' is release 4913272 with master_id 0, and
+    a master-only search returned NOTHING for it while the same query against
+    type=release returned it as the top hit - an album that exists on Discogs
+    and was simply unreachable here. So the release index is queried as well,
+    keeping ONLY the orphans (master_id falsy). An orphan cannot duplicate a
+    master row, because having no master is exactly what makes it an orphan, so
+    this does not reintroduce the per-pressing explosion above.
     """
     if not _discogs_configured():
         return []
@@ -1344,59 +1404,99 @@ def search_discogs(query, limit=40, artist_hint=None, album_hint=None):
     if cached is not None:
         return cached
 
+    per_page = min(limit, 100)
     resp = _discogs_get("database/search",
                         params={"q": query, "type": "master",
-                                "per_page": min(limit, 100)})
-    if resp is None:
-        return []
-    try:
-        results = resp.json().get("results", []) or []
-    except Exception as e:
-        print(f"[DISCOGS] search parse error: {e}")
-        return []
+                                "per_page": per_page})
+    masters = []
+    if resp is not None:
+        try:
+            masters = resp.json().get("results", []) or []
+        except Exception as e:
+            print(f"[DISCOGS] search parse error: {e}")
+            masters = []
+
+    orphans = []
+    rel = _discogs_get("database/search",
+                       params={"q": query, "type": "release",
+                               "per_page": per_page})
+    if rel is not None:
+        try:
+            for r in (rel.json().get("results", []) or []):
+                # master_id is 0 (not None) on an unlinked release, so test
+                # truthiness rather than equality with None.
+                if not r.get("master_id"):
+                    orphans.append(r)
+        except Exception as e:
+            print(f"[DISCOGS] orphan search parse error: {e}")
 
     out = []
-    for r in results:
-        artist, album = _dg_split_artist_title(r.get("title", ""))
-        if not album:
-            continue
-        master_id = r.get("master_id") or r.get("id")
-        if not master_id:
-            continue
-        styles = r.get("style") or ([r["genre"]] if r.get("genre") else [])
-        out.append({
-            "id": str(master_id),
-            "title": album,
-            "artist": artist,
-            "year": str(r.get("year") or ""),
-            "genre": (styles[0] if styles else ""),
-            "art_thumb": r.get("cover_image") or r.get("thumb") or "",
-            "country": "",
-            "format": " • ".join(r.get("format") or []),
-        })
+    # Masters first: they carry the canonical tracklist. Orphans follow.
+    for kind, rows in (("m", masters), ("r", orphans)):
+        for r in rows:
+            artist, album = _dg_split_artist_title(r.get("title", ""))
+            if not album:
+                continue
+            raw_id = r.get("master_id") or r.get("id")
+            if not raw_id:
+                continue
+            artist, album = _dg_orient(artist, album, artist_hint, album_hint,
+                                       hints_reliable)
+            # The id carries its kind so the details fetch knows which endpoint
+            # to call: masters/{id} and releases/{id} are different resources.
+            row_id = f"{kind}:{raw_id}"
+            _DG_ORIENT[row_id] = (artist, album)
+            styles = r.get("style") or ([r["genre"]] if r.get("genre") else [])
+            out.append({
+                "id": row_id,
+                "title": album,
+                "artist": artist,
+                "year": str(r.get("year") or ""),
+                "genre": (styles[0] if styles else ""),
+                "art_thumb": r.get("cover_image") or r.get("thumb") or "",
+                "country": "",
+                "format": " • ".join(r.get("format") or []),
+            })
     search_cache.set(cache_key, out, ttl=7200)
     return out
 
 
-def get_discogs_album_details(master_id):
-    """Fetch a Discogs master tracklist, normalized to the shared shape.
+def get_discogs_album_details(album_ref):
+    """Fetch a Discogs tracklist, normalized to the shared shape.
 
     Returns the SAME dictionary the iTunes and MusicBrainz paths return, so the
     confirm page, track selection, build_wmp_xml() and the WMP write are all
     unchanged - a Discogs album simply arrives pre-normalized.
+
+    `album_ref` is the prefixed id minted by search_discogs: "m:<id>" for a
+    master, "r:<id>" for an orphan release. masters/{id} and releases/{id} are
+    DIFFERENT Discogs resources, so calling the master endpoint with a release
+    id returns 404 - an orphan album would be visible in the list and then fail
+    the moment it was picked. A bare numeric ref is still accepted and treated
+    as a master, so any link minted before the prefix existed keeps working.
     """
-    cache_key = f"dg_album_{master_id}"
+    ref = str(album_ref)
+    kind, sep, raw_id = ref.partition(":")
+    if not sep or kind not in ("m", "r"):
+        kind, raw_id = "m", ref
+
+    # The orientation the search row settled on is part of the RESULT, not just
+    # an input, so it has to be part of the cache key. Keyed on the ref alone, a
+    # search that could not tell artist from album cached its guess for 24h and
+    # a later, correctly-informed search kept serving that stale guess.
+    _settled = _DG_ORIENT.get(ref, ())
+    cache_key = f"dg_album_{ref}|{_settled[0] if _settled else ''}|{_settled[1] if _settled else ''}"
     cached = album_cache.get(cache_key)
     if cached is not None:
         return cached
 
-    resp = _discogs_get(f"masters/{master_id}")
+    resp = _discogs_get(f"{'masters' if kind == 'm' else 'releases'}/{raw_id}")
     if resp is None:
         return None
     try:
         data = resp.json()
     except Exception as e:
-        print(f"[DISCOGS] detail parse error for {master_id}: {e}")
+        print(f"[DISCOGS] detail parse error for {ref}: {e}")
         return None
 
     # A master can legitimately carry an empty tracklist: the work is catalogued
@@ -1420,6 +1520,20 @@ def get_discogs_album_details(master_id):
         album_artist = ", ".join(artists) if artists else "Unknown Artist"
         album_title = data.get("title") or "Unknown Album"
         album_year = str(data.get("year") or "")[:4] or "2000"
+
+        # Re-apply the orientation the search row settled on. The record's own
+        # artists/title are where an inverted entry actually lives - release
+        # 4913272 has artists=['The End Of Julia'] and title='Sunday Driver' -
+        # so without this the detail fetch would reintroduce the swap the row
+        # just corrected. Only applied when the search row recorded a decision,
+        # so a deep link with no prior search behaves exactly as before.
+        settled = _DG_ORIENT.get(ref)
+        if settled:
+            want_artist, want_album = settled
+            # Swap only if the record is the mirror image of what we settled on.
+            if (album_artist, album_title) == (want_album, want_artist) \
+                    and album_artist != album_title:
+                album_artist, album_title = want_artist, want_album
 
         genres = data.get("genres") or []
         styles = data.get("styles") or []
@@ -1472,7 +1586,7 @@ def get_discogs_album_details(master_id):
                     break
 
             tracks.append({
-                "id": f"dg_{master_id}_{disc}_{number or seen}",
+                "id": f"dg_{ref}_{disc}_{number or seen}",
                 "name": t_name,
                 "number": number or seen,
                 "disc": disc,
@@ -1488,7 +1602,9 @@ def get_discogs_album_details(master_id):
             # prefix stops a Discogs master ever colliding with an iTunes
             # collection id or a MusicBrainz release id - all three are bare
             # integers, and a collision would apply the wrong album's tags.
-            "id": f"dg{master_id}",
+            # The kind prefix is part of this too, so a master 12345 and a
+            # release 12345 cannot collide.
+            "id": f"dg{ref}",
             "source": "discogs",
             "title": album_title,
             "artist": album_artist,
@@ -1500,7 +1616,7 @@ def get_discogs_album_details(master_id):
         album_cache.set(cache_key, details, ttl=86400)
         return details
     except Exception as e:
-        print(f"[DISCOGS] Details error for {master_id}: {e}")
+        print(f"[DISCOGS] Details error for {ref}: {e}")
         return None
 
 
@@ -2060,10 +2176,19 @@ def api_search():
 
     artist_hint = ""
     album_hint = ""
+    # Only an EXPLICIT 'Artist - Album' is trustworthy enough to let Discogs
+    # rows be re-oriented. The bare-query branch below is a guess at where the
+    # artist stops and the album starts, and it is wrong whenever the user typed
+    # them the other way round - which is exactly the trap that turned a correct
+    # 'Miles Davis - Kind Of Blue' inside out. Guesses are still useful for
+    # narrowing the provider's own search, so they are still passed, but they
+    # are flagged so nothing downstream treats them as fact.
+    hints_reliable = False
     if " - " in q:
         parts = q.split(" - ", 1)
         artist_hint = parts[0].strip()
         album_hint = parts[1].strip()
+        hints_reliable = bool(artist_hint and album_hint)
     elif " " in q:
         tokens = q.split()
         if len(tokens) >= 2:
@@ -2101,7 +2226,8 @@ def api_search():
         f_view = executor.submit(search_mb_entities, q, "artist" if view == "artist" else "recording",
                                  artist_hint, album_hint, _view_limit) if view != "album" else None
         f_dg = executor.submit(search_discogs, q, limit=_dg_limit,
-                               artist_hint=artist_hint) if _dg_enabled else None
+                               artist_hint=artist_hint,
+                               hints_reliable=hints_reliable) if _dg_enabled else None
         try:
             itunes_results = f_itunes.result(timeout=6)
         except Exception as e:
