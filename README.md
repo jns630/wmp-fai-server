@@ -177,6 +177,52 @@ python build_exe.py
 Produces `dist/WMP-FAI-Server\`. The build is committed so it is reproducible
 rather than something you have to reverse-engineer.
 
+### Zune (reconnaissance — not yet a working flow)
+
+Zune is **not** WMP with a different skin. Its metadata client, `ZuneMBR.dll`,
+hardcodes a completely separate endpoint (the strings are UTF-16, which is why a
+plain text search of the install finds nothing):
+
+```text
+http://redir.metaservices.microsoft.com/redir/ZuneFAI/?apiVersion=1.0
+http://images.metaservices.microsoft.com/cover        ← artwork host
+```
+
+Different host, different path, and plain **HTTP** with no TLS — so the hosts
+entry for WMP's `musicmatch-ssl.xboxlive.com` does nothing for Zune, and Zune
+dialled a retired Microsoft service. That is the whole of the *"Can't connect to
+the server. Please try again later."* dialog: **the request never reached this
+server.**
+
+You need two more hosts entries alongside the WMP one:
+
+```
+127.0.0.1 redir.metaservices.microsoft.com
+127.0.0.1 images.metaservices.microsoft.com
+```
+
+`/redir/ZuneFAI/` is served and **logs every request it receives** — method,
+path, query parameters, relevant headers and body — to `fai_server.log` under
+the `[ZUNE]` tag. It replies with a plain page listing what arrived, so a
+successful connection is obvious rather than looking like another failure.
+
+Trigger the Zune dialog once, then look for `[ZUNE]` lines in the log:
+
+```powershell
+Select-String -Path fai_server.log -Pattern '\[ZUNE\]' | Select-Object -Last 20
+```
+
+An unmapped `/redir/<path>` is logged too, so if Zune wants anything beyond
+`ZuneFAI` it will show up rather than 404 quietly. Flask prefers explicit routes
+over that catch-all, so **every WMP endpoint is unaffected** — verified.
+
+> The parameter names Zune sends are **not** in its binaries (`apiVersion` is,
+> but `requestId` / `albumTitle` / `artist` / `mbrId` are not — it builds the
+> query at runtime), which is exactly why the endpoint logs rather than guesses.
+> Nothing is written back to Zune yet: WMP tags through
+> `IWMPCDDVDWizardExternal`, and whether Zune exposes an equivalent COM object is
+> **unverified**. Do not assume this can tag anything until that is confirmed.
+
 ---
 
 ## Screenshot

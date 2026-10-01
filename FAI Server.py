@@ -2231,6 +2231,73 @@ def get_image(ignore=None):
     return Response("", 404)
 
 # ==========================================================
+# ZUNE FAI - RECONNAISSANCE
+# ==========================================================
+# WMP reaches this server at musicmatch-ssl.xboxlive.com. Zune does not: its
+# metadata client (ZuneMBR.dll) hardcodes
+#
+#     http://redir.metaservices.microsoft.com/redir/ZuneFAI/?apiVersion=1.0
+#
+# and http://images.metaservices.microsoft.com/cover for artwork. Different
+# host, different path, plain HTTP - so a hosts entry for the WMP host leaves
+# Zune dialling a retired Microsoft service and reporting exactly what the
+# screenshot shows: "Can't connect to the server."
+#
+# The parameter names Zune sends are NOT in the binaries - apiVersion is there,
+# but requestId / albumTitle / albumArtist / mbrId are not, because it builds
+# the query at runtime. So these routes LOG what actually arrives rather than
+# guessing at it. Everything goes to fai_server.log under the [ZUNE] tag.
+#
+# The response is a deliberately plain page: the point of this pass is to see
+# the request, not to render a dialog the protocol may not match yet.
+@app.route("/redir/ZuneFAI/", methods=["GET", "POST"])
+@app.route("/redir/zunefai/", methods=["GET", "POST"])
+def zune_fai_probe():
+    """Log everything Zune sends to the Find Album Info endpoint."""
+    q = sorted(request.args.items())
+    hdrs = {k: v for k, v in request.headers.items()
+            if k.lower() in ("user-agent", "referer", "origin", "accept",
+                             "content-type", "host", "accept-language")}
+    log_line("ZUNE", f"=== {request.method} {request.url}")
+    log_line("ZUNE", f"  path   = {request.path}")
+    log_line("ZUNE", f"  query  = {q}")
+    log_line("ZUNE", f"  headers= {hdrs}")
+    body = request.get_data(cache=False) or b""
+    if body:
+        log_line("ZUNE", f"  body   ({len(body)}B) = {body[:600]!r}")
+    print(f"[ZUNE] {request.method} {request.url} query={q}")
+
+    # Echo what was received so the dialog is visibly doing something rather
+    # than failing silently, which would send the user hunting in the wrong
+    # place for a rendering bug that is really a routing one.
+    rows = "".join(f"<tr><td>{esc(k)}</td><td>{esc(v)}</td></tr>"
+                   for k, v in q) or "<tr><td colspan=2>(no query string)</td></tr>"
+    return Response(
+        '<html><body style="font-family:Segoe UI,Tahoma,sans-serif;padding:16px">'
+        '<h3>Zune FAI endpoint reached</h3>'
+        '<p>The server logged this request. Query parameters:</p>'
+        '<table border=1 cellpadding=4 style="border-collapse:collapse">'
+        + rows + '</table></body></html>', mimetype="text/html")
+
+
+@app.route("/redir/<path:rest>", methods=["GET", "POST"])
+def zune_unmapped_probe(rest):
+    """Catch any /redir/ path Zune uses that nothing else implements.
+
+    Flask prefers an explicit route over this one, so every WMP endpoint is
+    unaffected - this only sees paths no other rule claims, which is how we find
+    out whether Zune wants anything else from the redirect service.
+    """
+    log_line("ZUNE", f"=== unmapped {request.method} /redir/{rest} "
+                     f"query={sorted(request.args.items())}")
+    print(f"[ZUNE] unmapped /redir/{rest} "
+          f"query={sorted(request.args.items())}")
+    return Response(f"/redir/{rest} reached the server (no handler). "
+                    f"Query: {sorted(request.args.items())}",
+                    mimetype="text/plain")
+
+
+# ==========================================================
 # DISCOVERY (WMP & ZUNE EXPECTS THIS)
 # ==========================================================
 @app.route("/cdinfo/GetMDRCDPOSTURL.aspx")
