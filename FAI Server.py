@@ -460,7 +460,18 @@ _COVER_SEQ = 0
 #
 # The proxy is kept as a fallback in case an upstream host is found to refuse WMP.
 # It should not be reinstated as the default on the strength of a theory.
-_ART_MODE = "direct"
+#
+# It IS switchable from the environment, because "direct" makes artwork fetching
+# invisible: the client fetches the image straight from the upstream CDN and this
+# server never sees the request, so there is no [IMAGE] line to prove or disprove
+# anything. Running with WMP_ART_MODE=proxy routes every fetch back through
+# /cover/ and makes it observable. That is the only way to tell "the client never
+# asked" apart from "the client asked and the image failed" - which is exactly the
+# question Windows Media Center's missing cover art leaves open.
+#
+#   $env:WMP_ART_MODE='proxy'
+_ART_MODE = (os.environ.get("WMP_ART_MODE", "direct").strip().lower()
+            or "direct")
 
 def _remember_wmid(value):
     """Record the most recent wmid WMP asked us about."""
@@ -2570,6 +2581,14 @@ def mdr_post():
         served = m.group(1) if m else "?"
         log_line("MDR", f"  -> serving album={served!r} to WMP "
                         f"(wmid={wmid_q[:8] if wmid_q else '-'})")
+        # Log the cover URL actually being handed over. In "direct" art mode the
+        # client fetches it from the upstream CDN and this server sees nothing, so
+        # without this line there is no way to tell a client that ignored the
+        # artwork from one that was handed a URL it then failed to fetch.
+        _art = re.search(r"<largeCoverParams>([^<]*)</largeCoverParams>", staged)
+        _art = _art.group(1).strip() if _art and _art.group(1).strip() else ""
+        log_line("MDR", f"  -> art={('none' if not _art else _art[:110])} "
+                        f"(mode={_ART_MODE})")
         return Response(staged, mimetype='text/xml')
 
     # No metadata is staged for this disc. Return an EMPTY document so WMP
