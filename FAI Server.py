@@ -3260,8 +3260,45 @@ body { display: block; height: auto; overflow: auto; }
 <![endif]-->
 """
 
+@app.route("/redir/getmdrcdzune/")
+def zune_cd_dialog():
+    """Zune reaches the SAME dialog through /redir/getmdrcdzune/.
+
+    Logged from a real request, not guessed:
+        GET /redir/getmdrcdzune/?CD=3+96+45EA+B624+10E8E&locale=409&geoid=be
+            &system=ZuneClient&userlocale=2000&version=4.8.2345.0
+
+    That CD parameter is the disc table of contents, and unified_ui() already
+    reads raw_query_arg("CD"), so Zune gets the same search, the same track
+    selection and the same staged document as WMP with no second page.
+
+    This is a wrapper rather than a second @app.route on unified_ui itself: two
+    rules on one view make url_for("unified_ui") resolve to whichever is
+    registered last, which silently turned every legacy browser redirect to
+    /FAI/ui into /redir/getmdrcdzune/.
+
+    /redir/ZuneFAI/?apiVersion=1.0 is a different thing entirely. Zune calls it
+    first, with no album and no artist, and ignores whatever it answers - it is
+    a capability probe, not the dialog. The CD flow is the one that matters.
+    """
+    return unified_ui()
+
+
 @app.route("/FAI/ui")
 def unified_ui():
+    # Zune reaches the SAME dialog through /redir/getmdrcdzune/ - logged from a
+    # real request, not guessed:
+    #   GET /redir/getmdrcdzune/?CD=3+96+45EA+B624+10E8E&locale=409&geoid=be
+    #       &system=ZuneClient&userlocale=2000&version=4.8.2345.0
+    # That CD parameter is the disc table of contents, and this handler already
+    # reads raw_query_arg("CD"), so serving the dialog here needs no separate
+    # page and no duplicated template - Zune gets the same search, the same
+    # track selection and the same staged document as WMP.
+    #
+    # /redir/ZuneFAI/?apiVersion=1.0 is a different thing entirely: Zune calls
+    # it first, with no album and no artist, and ignores whatever it answers.
+    # It is a capability probe, not the dialog, and returning HTML from it is
+    # harmless. The CD flow is the one that matters.
     q = (request.args.get("artist", "") + " " + request.args.get("album", "")).strip()
     wmp_artist = request.args.get("artist", "")
     wmp_album = request.args.get("album", "")
