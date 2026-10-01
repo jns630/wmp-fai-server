@@ -1931,6 +1931,84 @@ def to_musicbrainz_toc(toc_string):
     return "+".join(parts)
 
 
+# ---------------------------------------------------------------
+# AUTOMATIC TOC LOOKUP (WMP ONLY)
+# ---------------------------------------------------------------
+# lookup_by_discid_or_toc() above can identify a disc from its TOC, but its
+# result was deliberately only logged, because applying an album nobody chose is
+# how discs end up sharing one album.
+#
+# That is still the rule for a request that carries no disc of its own. What
+# changed is the CD flow: when WMP names a disc (?cd= / ?toc=) and NOTHING is
+# staged for it, there is no user choice to override, so an exact TOC match is
+# applied automatically. A TOC is a physical fingerprint - it identifies the
+# pressing, not a guess about the album - so a match is not the same kind of
+# inference as matching on a search query.
+#
+# The dialog remains the escape hatch and outranks this completely:
+# _lookup_staged_xml() runs FIRST, so anything staged by the dialog wins. Wrong
+# or missing album? Open the FAI dialog for that disc, pick the right one, and it
+# is served from then on. Nothing here changes the dialog's behaviour.
+#
+# Zune is deliberately EXCLUDED. Its client is not the one asking for this
+# behaviour and it has no dialog to correct a mistake with, so a wrong automatic
+# match there would be silent and unfixable. Zune keeps getting an empty document,
+# exactly as before.
+AUTO_TOC_LOOKUP = os.environ.get("AUTO_TOC_LOOKUP", "1").strip() not in ("0", "no", "false")
+# TOC -> the XML built for it. Kept so the same disc always gets the same answer
+# and so a repeat fetch costs no MusicBrainz request.
+AUTO_TOC_CACHE = {}
+AUTO_TOC_MISS = set()
+
+
+def _auto_toc_xml_for_disc(disc_id):
+    """Build MDR-CD XML for a disc WMP named but for which nothing is staged.
+
+    Returns None when the disc cannot be identified, which leaves the caller
+    returning an empty document so the disc is left untouched.
+    """
+    key = str(disc_id or "").strip()
+    if not key or not AUTO_TOC_LOOKUP:
+        return None
+    with XML_LOCK:
+        if key in AUTO_TOC_CACHE:
+            return AUTO_TOC_CACHE[key]
+        if key in AUTO_TOC_MISS:
+            return None
+
+    details = lookup_by_discid_or_toc(key)
+    if not details:
+        with XML_LOCK:
+            AUTO_TOC_MISS.add(key)
+        log_line("AUTO-TOC", f"no release for {key[:40]!r} - disc left alone")
+        return None
+
+    try:
+        # Same builder the dialog uses, so an automatic document is
+        # indistinguishable in shape from a chosen one - same fields, same art
+        # handling, same collection ids. content_ids is empty because there is no
+        # MDQ to read real WMContentIDs from on this path.
+        xml = build_wmp_xml(details, selected_tracks=None, request_id="",
+                            content_ids={}, wmid="", cd=key)
+    except Exception as e:
+        print(f"[AUTO-TOC] build failed for {key[:40]!r}: {e}")
+        return None
+
+    with XML_LOCK:
+        AUTO_TOC_CACHE[key] = xml
+        AUTO_TOC_MISS.discard(key)
+        # Bounded, same reason STAGED_REQUESTS is: this outlives the request.
+        if len(AUTO_TOC_CACHE) > 16:
+            for old in list(AUTO_TOC_CACHE)[:len(AUTO_TOC_CACHE) - 16]:
+                AUTO_TOC_CACHE.pop(old, None)
+    log_line("AUTO-TOC",
+             f"matched {details.get('title')!r} by {details.get('artist')!r} "
+             f"for {key[:40]!r} - override via the FAI dialog")
+    print(f"[AUTO-TOC] {key[:40]} -> {details.get('title')} "
+          f"by {details.get('artist')}")
+    return xml
+
+
 def lookup_by_discid_or_toc(toc_string):
     cache_key = f"toc_lookup_{toc_string.strip()}"
     cached = album_cache.get(cache_key)
@@ -2497,6 +2575,32 @@ def mdr_post():
     # No metadata is staged for this disc. Return an EMPTY document so WMP
     # leaves the album untouched. Previously we fell back to the most recently
     # staged album, which wrote that album onto every other CD.
+    #
+    # The one exception is the automatic TOC lookup above, and it is deliberately
+    # narrow. All four conditions must hold:
+    #
+    #   * WMP, not Zune. The Zune client gets an empty document exactly as it
+    #     did before; it has no dialog to correct a wrong match with.
+    #   * The request names a real disc (?cd= / ?toc=). A library update carrying
+    #     only ?wmid= is the user editing an album they can see, and must never
+    #     be answered by inference.
+    #   * WMP asked for XML, not for a page. A browser User-Agent means WMP is
+    #     driving the dialog itself; auto-answering underneath it would take the
+    #     choice away from the very UI the user is looking at.
+    #   * Nothing matched, i.e. we are already on the empty-document path.
+    if AUTO_TOC_LOOKUP and "zune" not in request.path.lower():
+        disc_id = (raw_query_arg('cd') or raw_query_arg('CD')
+                   or raw_query_arg('toc') or raw_query_arg('TOC'))
+        # Read here rather than reusing legacy_redirects()'s local: this is a
+        # different view and has no `user_agent` in scope.
+        ua = request.headers.get('User-Agent', '')
+        is_browser = ('MSIE' in ua or 'Mozilla' in ua)
+        if disc_id.strip() and not is_browser:
+            auto_xml = _auto_toc_xml_for_disc(disc_id)
+            if auto_xml:
+                if wmid_q:
+                    auto_xml = _retarget_collection_id(auto_xml, wmid_q)
+                return Response(auto_xml, mimetype='text/xml')
     return Response(EMPTY_METADATA_XML, mimetype='text/xml')
 
     return Response("<METADATA><version>5.0</version><status>OK</status></METADATA>", mimetype='text/xml')

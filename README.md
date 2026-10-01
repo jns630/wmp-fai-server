@@ -978,16 +978,48 @@ to have worked against. Both TOC encodings the clients use are handled: `+`
 Verified against the live API using the two TOCs real Zune sent — both now
 resolve to a release with a full track list.
 
-> The result is **logged but not applied**. Applying it would mean auto-tagging a
-> disc the user never chose, which is how discs end up sharing one album.
+> The result is **logged but not applied** in the general case — see below for
+> the one exception.
+
+### Automatic TOC lookup (WMP only)
+
+When WMP names a disc (`?cd=` / `?toc=`) and **nothing is staged for it**, the
+server now identifies the disc from its TOC and applies the match without
+opening the dialog. A TOC is a physical fingerprint: it identifies the exact
+pressing, so this is not the same kind of guess as matching on a search query.
+
+Four guards, all deliberate:
+
+| Condition | Why |
+|---|---|
+| **WMP only** — never Zune | Zune has no dialog to correct a wrong match with, so one would be silent and unfixable. |
+| **The request names a real disc** | A `?wmid=`-only library update is the user editing an album they can see; never answer it by inference. |
+| **Not a browser User-Agent** | A browser UA means WMP is driving the dialog itself. Auto-answering underneath it would take the choice away from the UI the user is looking at. |
+| **Nothing was staged** | Runs only on the empty-document path. |
+
+**The dialog is the escape hatch and outranks this completely.**
+`_lookup_staged_xml()` runs first, so anything you pick in the FAI dialog wins.
+Wrong album, or none at all? Open the dialog for that disc, pick the right one,
+and it is served from then on. Every match is logged:
+
+```powershell
+Select-String -Path fai_server.log -Pattern '\[AUTO-TOC\]' | Select-Object -Last 20
+```
+
+A disc with no MusicBrainz release is left untouched, and the miss is cached so
+repeat fetches cost no request. To turn the whole thing off:
+
+```powershell
+$env:AUTO_TOC_LOOKUP = '0'
+```
 
 ### Not implemented
 
 - **Automatic disc identification.** There is no fingerprinting (AcoustID,
-  MusicBrainz recording IDs). You must search and pick the album yourself.
-  TOC lookup *is* performed — see [TOC lookup](#toc-lookup) — but a TOC match is
-  logged and otherwise **not** applied, because a wrong automatic match silently
-  mis-tags a disc.
+  MusicBrainz recording IDs). For a **disc**, an exact MusicBrainz TOC match is
+  applied automatically — see [Automatic TOC lookup](#automatic-toc-lookup-wmp-only).
+  **Albums in your library are not touched**: a `?wmid=`-only request is never
+  answered by inference, so you still search and pick those yourself.
 - **Track-level art or acoustic matching.** The whole album's cover is applied.
 - **Lyrics, release-group selection, or "best match" ranking.** Results are ordered
   by provider score; there is no re-ranking across sources.

@@ -346,6 +346,99 @@ check("toc-lookup-uses-the-converted-toc",
       "toc={mb_toc}" in _src_toc and "toc={clean_toc}" not in _src_toc,
       "lookup_by_discid_or_toc must query with the converted TOC")
 
+# 11d. Automatic TOC lookup: when WMP names a disc and NOTHING is staged for it,
+#      an exact MusicBrainz TOC match is applied without the dialog. The dialog
+#      stays the override - _lookup_staged_xml() runs first, so a staged pick
+#      always wins. Zune is deliberately excluded (no dialog to correct it with).
+#
+#      These stub the network so the suite stays offline, and assert on the four
+#      guards rather than on any one album.
+_fake_album = {"id": "AUTO1", "title": "Auto Matched", "artist": "TOC Artist",
+               "year": "2005", "genre": "Rock", "art_url": "",
+               "tracks": [{"number": 1, "name": "Auto One",
+                           "duration_ms": 1000, "disc": 1}],
+               "source": "musicbrainz"}
+_real_lookup = fai.lookup_by_discid_or_toc
+# Every disc id below that should auto-match is listed here, so the stub is
+# explicit about what it stands in for.
+_AUTO_TOC_MATCHES = {"AUTO_TOC_HEX", "AUTO_TOC_KILLSWITCH"}
+fai.lookup_by_discid_or_toc = lambda toc: (_fake_album
+                                           if toc.strip() in _AUTO_TOC_MATCHES
+                                           else None)
+fai.AUTO_TOC_CACHE.clear()
+fai.AUTO_TOC_MISS.clear()
+
+WMP_UA = {"User-Agent": "WindowsMediaPlayer/12.0.16384.0"}
+BROWSER_UA = {"User-Agent": "Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 10.0)"}
+
+r = c.get("/redir/getmdrcdbackground/?cd=AUTO_TOC_HEX", headers=WMP_UA)
+check("auto-toc-matches-a-real-disc",
+      r.status_code == 200 and "Auto Matched" in r.data.decode("utf-8", "ignore")
+      and fai.EMPTY_METADATA_XML not in r.data.decode("utf-8", "ignore"),
+      f"code={r.status_code} body={r.data[:200]!r}")
+
+# Zune must NOT get it: it has no dialog, so a wrong match there is unfixable.
+r = c.get("/redir/getmdrcdzune/?CD=AUTO_TOC_HEX",
+          headers={"User-Agent": "ZuneClient"})
+check("auto-toc-never-fires-for-zune",
+      fai.EMPTY_METADATA_XML in r.data.decode("utf-8", "ignore"),
+      "Zune received an automatic match; it has no dialog to correct one")
+
+# A browser UA means WMP is driving the dialog itself - never answer underneath it.
+r = c.get("/redir/getmdrcdbackground/?cd=AUTO_TOC_HEX", headers=BROWSER_UA)
+check("auto-toc-steps-aside-for-a-browser",
+      fai.EMPTY_METADATA_XML in r.data.decode("utf-8", "ignore"),
+      "a browser request was auto-answered, taking the choice from the dialog")
+
+# A library update names a collection, not a disc. Inferring an album for it
+# would tag something the user is actively looking at. Note this asserts the
+# auto-match title specifically: a wmid-only GET is legitimately served the
+# PENDING_WRITE document by the fallback in _lookup_staged_xml(), which is
+# pre-existing behaviour and not what this guard is about.
+fai.AUTO_TOC_CACHE.clear()
+r = c.get("/redir/getmdrcdbackground/?wmid=77777777-8888-9999-AAAA-BBBBBBBBBBBB",
+          headers=WMP_UA)
+check("auto-toc-never-fires-for-a-library-update",
+      "Auto Matched" not in r.data.decode("utf-8", "ignore"),
+      "a wmid-only request was auto-answered by inference")
+
+# A TOC with no release must leave the disc alone, and must be remembered so a
+# repeat fetch costs no MusicBrainz request.
+fai.AUTO_TOC_MISS.clear()
+r = c.get("/redir/getmdrcdbackground/?cd=NO_SUCH_DISC", headers=WMP_UA)
+check("auto-toc-leaves-an-unknown-disc-alone",
+      fai.EMPTY_METADATA_XML in r.data.decode("utf-8", "ignore"),
+      "an unidentifiable disc was not left untouched")
+check("auto-toc-remembers-a-miss",
+      "NO_SUCH_DISC" in fai.AUTO_TOC_MISS,
+      "a failed lookup must be cached so it is not retried every fetch")
+
+# The dialog is the escape hatch: staging for that disc must beat the cache.
+c.post("/store_staged_xml", content_type="application/json",
+       data=json.dumps({"album": dict(_fake_album, title="Hand Picked"),
+                        "selected_tracks": _fake_album["tracks"],
+                        "request_id": "REQ_AUTOOVERRIDE", "session_id": "S",
+                        "toc": "AUTO_TOC_HEX"}))
+r = c.get("/redir/getmdrcdbackground/?cd=AUTO_TOC_HEX", headers=WMP_UA)
+check("dialog-overrides-the-automatic-match",
+      "Hand Picked" in r.data.decode("utf-8", "ignore"),
+      "the automatic result won over the user's own choice")
+
+# The kill-switch must actually disable the path. Uses a fresh disc id so the
+# assertion cannot be satisfied by the "Hand Picked" document staged above.
+fai.AUTO_TOC_LOOKUP = False
+fai.AUTO_TOC_CACHE.clear()
+fai.AUTO_TOC_MISS.clear()
+r = c.get("/redir/getmdrcdbackground/?cd=AUTO_TOC_KILLSWITCH", headers=WMP_UA)
+check("auto-toc-can-be-switched-off",
+      fai.EMPTY_METADATA_XML in r.data.decode("utf-8", "ignore"),
+      "AUTO_TOC_LOOKUP=False still auto-answered")
+fai.AUTO_TOC_LOOKUP = True
+
+fai.lookup_by_discid_or_toc = _real_lookup
+fai.AUTO_TOC_CACHE.clear()
+fai.AUTO_TOC_MISS.clear()
+
 # 12. Staged XML keyed by a '+' TOC is retrievable by that same TOC
 payload_plus = {"album": dict(album, title="Plus TOC Album"),
                 "selected_tracks": [album["tracks"][0]],
