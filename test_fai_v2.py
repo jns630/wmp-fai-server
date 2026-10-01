@@ -2307,13 +2307,52 @@ check("cover-token-is-well-formed-for-a-path-segment",
           for t in re.findall(r"/cover/fai-([^/]+)/", _c1 + _c2 + _c3)),
       f"the token is a path segment and must stay hex: {_c1[:120]!r}")
 
+# --- relative shape (the default) -------------------------------------------
+# REVERSED from 'art-mode-defaults-to-direct'.
+#
+# Windows Media Center's entire request profile against this server is 14 metadata
+# requests to /toc/getmdrcd.aspx and 6 each of the /redir/ ASP endpoints - and not
+# ONE request for a picture. With direct mode the document handed it an absolute
+# archive.org URL, so any fetch it made would have happened behind our back and
+# left no trace; the log therefore cannot distinguish "WMC never asked" from
+# "WMC asked and the image failed", and that ambiguity is what stalled this.
+#
+# PyZuneMetadataServer, a working reimplementation of this same service, emits a
+# scheme-less '/large/album.jpg?id=...'. These clients resolve that against the
+# host they fetched the document from. Matching that shape both matches a known
+# working client and routes every artwork request to /cover/, where it is logged.
+check("art-mode-defaults-to-relative",
+      fai._ART_MODE == "relative",
+      "the client resolves cover params against the metadata host, so the default "
+      "must be a scheme-less path; absolute URLs also leave artwork unfetchable and "
+      "therefore unobservable")
+
+_r1 = _cover(_alb, "relative", cd="B+96+1970")
+check("relative-cover-has-no-scheme-or-host",
+      _r1.startswith("/cover/fai-") and "//" not in _r1.split("?")[0],
+      f"relative mode must emit a scheme-less absolute-PATH, not a URL, "
+      f"got {_r1[:130]!r}")
+check("relative-cover-keeps-the-upstream-url-readable",
+      "?url=https://is1" in _r1,
+      f"the client resolves this path against the metadata host and the proxy then "
+      f"has to know which upstream image to fetch, got {_r1[:130]!r}")
+check("relative-cover-still-carries-the-version-token",
+      re.search(r"/cover/fai-[0-9a-f]{8}/album\.jpg", _r1),
+      f"dropping the token would re-break the retry case - a byte-identical URL is "
+      f"one WMP already has and will not refetch, got {_r1[:130]!r}")
+check("relative-cover-holds-exactly-one-question-mark",
+      _r1.count("?") == 1 and "&" not in _r1,
+      f"a second '?' or a bare '&' inside this element made the document "
+      f"not-well-formed, and WMP then rejected the WHOLE response - tags and "
+      f"artwork together, got {_r1[:130]!r}")
+check("relative-cover-parses-as-xml-inside-a-real-document",
+      _ET.fromstring(fai.build_wmp_xml(dict(_alb), selected_tracks=_alb["tracks"],
+                                       cd="B+96+1970").replace(
+                                           '<?xml version="1.0" encoding="utf-8"?>',
+                                           "")) is not None,
+      "the document carrying the new cover shape must still be well-formed XML")
+
 # --- direct shape ----------------------------------------------------------
-# The default, and the first configuration in which WMP has ever been offered a
-# cover it did not have to go through this server to reach.
-check("art-mode-defaults-to-direct",
-      fai._ART_MODE == "direct",
-      "the proxy produced 62 fetched covers and 0 attachments; the direct URL is "
-      "what a real FAI server sends and keeps a loopback host out of the document")
 _d1 = _cover(_alb, "direct", cd="B+96+1970")
 _d2 = _cover(dict(_alb, art_url="https://example.com/x.jpg?a=1&b=2"),
              "direct", cd="B+96+1970")

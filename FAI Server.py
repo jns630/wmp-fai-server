@@ -470,8 +470,8 @@ _COVER_SEQ = 0
 # question Windows Media Center's missing cover art leaves open.
 #
 #   $env:WMP_ART_MODE='proxy'
-_ART_MODE = (os.environ.get("WMP_ART_MODE", "direct").strip().lower()
-            or "direct")
+_ART_MODE = (os.environ.get("WMP_ART_MODE", "relative").strip().lower()
+             or "relative")
 
 def _remember_wmid(value):
     """Record the most recent wmid WMP asked us about."""
@@ -2185,8 +2185,32 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
         ver = hashlib.md5(
             f"{album_data.get('id', '')}|{art_url}|{_COVER_SEQ}".encode(
                 "utf-8", "replace")).hexdigest()[:8]
-        proxy_art = xesc(f"http://127.0.0.1/cover/fai-{ver}/album.jpg?url="
-                         f"{requests.utils.quote(art_url, safe='/:?=&')}")
+        # RELATIVE, with no scheme or host.
+        #
+        # Windows Media Center asked this server for metadata 14 times and for a
+        # picture 0 times, with a largeCoverParams pointing at an absolute
+        # archive.org URL. PyZuneMetadataServer - a working reimplementation of
+        # the service these clients were built against - emits a RELATIVE path
+        # instead ('/large/album.jpg?id=...'), and the clients resolve it against
+        # the host they just fetched the document from.
+        #
+        # That is the working shape, and it is also the only one we can observe:
+        # a relative URL resolves to musicmatch-ssl.xboxlive.com or
+        # redir.metaservices.microsoft.com, both of which the hosts file points
+        # here, so every fetch arrives at /cover/ and is logged. An absolute
+        # upstream URL is fetched by the client behind our back and leaves no
+        # trace at all - which is why "no artwork" could not be diagnosed from
+        # the log at all.
+        #
+        # The version token stays in the PATH so the value still contains exactly
+        # one '?' and no '&'. A bare '&' here made the document not-well-formed,
+        # and WMP then rejected the WHOLE response - tags and artwork together.
+        _cover_path = f"/cover/fai-{ver}/album.jpg?url=" \
+            f"{requests.utils.quote(art_url, safe='/:?=&')}"
+        # 'proxy' keeps the older absolute spelling for clients that do not
+        # resolve a relative URL; it points at us either way.
+        proxy_art = xesc(f"http://127.0.0.1{_cover_path}"
+                         if _ART_MODE == "proxy" else _cover_path)
 
     tracks_to_include = selected_tracks if selected_tracks is not None else album_data.get("tracks", [])
 
