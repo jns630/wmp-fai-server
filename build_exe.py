@@ -32,6 +32,14 @@ ENTRY = ROOT / "FAI Server.py"
 NAME = "WMP-FAI-Server"
 DIST = ROOT / "dist"
 
+# The release version, in ONE place. It was previously hardcoded as 1.0.0 in the
+# four spots below, so the shipped 1.0.1/1.0.2/1.0.3 EXEs all still reported
+# 1.0.0 in their version resource - Windows shows that in the file properties,
+# so a user on 1.0.3 was told they were running 1.0.0. Bump this and the
+# version resource follows.
+VERSION = (1, 1, 0)
+VERSION_STR = ".".join(str(n) for n in VERSION)
+
 
 COMMIT = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"],
                                 cwd=str(ROOT), text=True).strip()
@@ -49,8 +57,8 @@ VERSION_FILE.write_text(
     "# UTF-8\n"
     "VSVersionInfo(\n"
     "  FixedFileInfo(\n"
-    "    filevers=(1, 0, 0, 0),\n"
-    "    prodvers=(1, 0, 0, 0),\n"
+    f"    filevers=({VERSION[0]}, {VERSION[1]}, {VERSION[2]}, 0),\n"
+    f"    prodvers=({VERSION[0]}, {VERSION[1]}, {VERSION[2]}, 0),\n"
     "    mask=0x3f,\n"
     "    flags=0x0,\n"
     "    OS=0x40004,\n"
@@ -62,12 +70,12 @@ VERSION_FILE.write_text(
     "      StringTable('040904B0', [\n"
     "        StringStruct('CompanyName', 'wmp-fai-server'),\n"
     "        StringStruct('FileDescription', 'WMP Find Album Information metadata server'),\n"
-    "        StringStruct('FileVersion', '1.0.0'),\n"
+    f"        StringStruct('FileVersion', '{VERSION_STR}'),\n"
     "        StringStruct('InternalName', 'WMP-FAI-Server'),\n"
     "        StringStruct('LegalCopyright', 'MIT licensed'),\n"
     "        StringStruct('OriginalFilename', 'WMP-FAI-Server.exe'),\n"
     "        StringStruct('ProductName', 'WMP FAI Metadata Server'),\n"
-    "        StringStruct('ProductVersion', '1.0.0')])]),\n"
+    f"        StringStruct('ProductVersion', '{VERSION_STR}')])]),\n"
     "    VarFileInfo([VarStruct('Translation', [1033, 1200])])\n"
     "])\n",
     encoding="utf-8")
