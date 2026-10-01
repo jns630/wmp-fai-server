@@ -1981,6 +1981,52 @@ AUTO_TOC_LOOKUP = os.environ.get("AUTO_TOC_LOOKUP", "1").strip() not in ("0", "n
 # and so a repeat fetch costs no MusicBrainz request.
 AUTO_TOC_CACHE = {}
 AUTO_TOC_MISS = set()
+# The disc's resolved identity (artist/album) keyed by TOC, so the search page
+# can name the disc it was opened for WITHOUT repeating the MusicBrainz lookup
+# that /redir/getmdrcdbackground/ has usually already done for the same disc.
+AUTO_TOC_DETAILS = {}
+
+
+def _auto_toc_details_for_disc(disc_id):
+    """Resolve a bare TOC to its release, or None when it cannot be identified.
+
+    Split out of _auto_toc_xml_for_disc so the SEARCH page can ask the same
+    question without wanting an XML document: WMP opens this dialog for a disc
+    it could not tag, sends no artist/album/track with it, and the dialog then
+    has nothing at all to put in the search box. The disc is not unidentified
+    though - it carries a TOC, and the TOC resolves. Reusing the one resolver
+    here means both paths share AUTO_TOC_MISS, so a disc that already resolved
+    (or already failed) is never looked up twice.
+    """
+    key = str(disc_id or "").strip()
+    if not key or not AUTO_TOC_LOOKUP:
+        return None
+    with XML_LOCK:
+        if key in AUTO_TOC_DETAILS:
+            return AUTO_TOC_DETAILS[key]
+        if key in AUTO_TOC_MISS:
+            return None
+
+    details = lookup_by_discid_or_toc(key)
+    if not details:
+        with XML_LOCK:
+            AUTO_TOC_MISS.add(key)
+        log_line("AUTO-TOC", f"no release for {key[:40]!r} - disc left alone")
+        return None
+
+    with XML_LOCK:
+        AUTO_TOC_DETAILS[key] = details
+        AUTO_TOC_MISS.discard(key)
+        # Same bound as AUTO_TOC_CACHE, same reason: this outlives the request.
+        if len(AUTO_TOC_DETAILS) > 16:
+            for old in list(AUTO_TOC_DETAILS)[:len(AUTO_TOC_DETAILS) - 16]:
+                AUTO_TOC_DETAILS.pop(old, None)
+    log_line("AUTO-TOC",
+             f"matched {details.get('title')!r} by {details.get('artist')!r} "
+             f"for {key[:40]!r} - override via the FAI dialog")
+    print(f"[AUTO-TOC] {key[:40]} -> {details.get('title')} "
+          f"by {details.get('artist')}")
+    return details
 
 
 def _auto_toc_xml_for_disc(disc_id):
@@ -1995,14 +2041,12 @@ def _auto_toc_xml_for_disc(disc_id):
     with XML_LOCK:
         if key in AUTO_TOC_CACHE:
             return AUTO_TOC_CACHE[key]
-        if key in AUTO_TOC_MISS:
-            return None
 
-    details = lookup_by_discid_or_toc(key)
+    # One resolver for both callers, so the MISS set and the log line stay in
+    # one place. It returns None for a disc it cannot identify, which is the
+    # caller's cue to return an empty document and leave the disc untouched.
+    details = _auto_toc_details_for_disc(key)
     if not details:
-        with XML_LOCK:
-            AUTO_TOC_MISS.add(key)
-        log_line("AUTO-TOC", f"no release for {key[:40]!r} - disc left alone")
         return None
 
     try:
@@ -2023,11 +2067,6 @@ def _auto_toc_xml_for_disc(disc_id):
         if len(AUTO_TOC_CACHE) > 16:
             for old in list(AUTO_TOC_CACHE)[:len(AUTO_TOC_CACHE) - 16]:
                 AUTO_TOC_CACHE.pop(old, None)
-    log_line("AUTO-TOC",
-             f"matched {details.get('title')!r} by {details.get('artist')!r} "
-             f"for {key[:40]!r} - override via the FAI dialog")
-    print(f"[AUTO-TOC] {key[:40]} -> {details.get('title')} "
-          f"by {details.get('artist')}")
     return xml
 
 
@@ -3798,6 +3837,42 @@ def unified_ui():
     #   Found 500+ Album(s) containing "Mr. E's Beautiful Blues ... Various Artists".
     # WMP hands us those pieces as separate query values; join them back up.
     rip_name = " ".join(x for x in (wmp_track, wmp_artist, wmp_album) if x).strip() or q
+
+    # ---- Autofill from the disc's own TOC ---------------------------------
+    # WMP opens this dialog for a CD it could not tag and, on that path, sends
+    # no artist/album/track at all - so rip_name is empty, the lead-in reads
+    # 'Searching for ""...', the search box is empty and the results pane says
+    # 'Enter a search and press Enter.' Verified on the Course of Nature disc:
+    # the URL carried only ?cd=, and all four of those read as blank.
+    #
+    # The disc is not unidentified, though. It carries a TOC, and this server
+    # already resolves that TOC to a release for the automatic delivery path -
+    # the same request that logs 'matched Damaged by Course of Nature'. The
+    # dialog was simply never told. When WMP named nothing, fall back to that
+    # resolution so the box and the results start populated.
+    #
+    # Only a fallback: a rip WMP DID name always wins, so nothing is overridden.
+    # And it is a hint, not an answer - the user still chooses in the list.
+    toc_query = ""
+    disc_identity = ""
+    if not rip_name and (wmp_cd or wmp_toc):
+        _det = _auto_toc_details_for_disc(wmp_cd or wmp_toc)
+        if _det:
+            _artist = str(_det.get("artist") or "").strip()
+            _title = str(_det.get("title") or "").strip()
+            # Artist first: it is the narrower term and gives the better result
+            # set, which is what this dialog is for.
+            toc_query = " ".join(x for x in (_artist, _title) if x)
+            # Same shape as a WMP-supplied rip_name, so the lead-in reads
+            # 'Searching for "Course of Nature Damaged"...' rather than naming
+            # the artist alone.
+            disc_identity = toc_query
+    if toc_query:
+        log_line("FAI-UI", f"autofilled search from disc TOC: {toc_query!r}")
+    # The lead-in and the search box both read from these. The TOC fallback is
+    # applied LAST and only fills a blank, so a rip WMP named is never overridden.
+    q = q or toc_query
+    rip_name = rip_name or disc_identity
 
     session_id = get_session_id()
     track_fai_navigation(session_id, 'ui_search', {

@@ -435,6 +435,64 @@ check("auto-toc-can-be-switched-off",
       "AUTO_TOC_LOOKUP=False still auto-answered")
 fai.AUTO_TOC_LOOKUP = True
 
+# ---------------------------------------------------------------------------
+# 41b. The SEARCH DIALOG was opened for a disc WMP could not tag, so it arrives
+#      with ?cd= and NO artist/album/track. The dialog then showed
+#        lead-in  'Searching for ""...'
+#        search    [                    ]  (empty)
+#        results   'Enter a search and press Enter.'
+#      while this same server had ALREADY resolved that disc's TOC to a release
+#      for the automatic delivery path. The dialog was simply never told.
+#      It must fall back to that resolution so the box and results start filled.
+# ---------------------------------------------------------------------------
+fai.AUTO_TOC_DETAILS.clear()
+_ui_disc = dict(_fake_album, title="Damaged", artist="Course of Nature")
+# Stubbed for THIS block only. _auto_toc_xml_for_disc now delegates to this same
+# module-level name, so a stub left in place here would hand every later disc in
+# the file the same album - which is exactly how this broke
+# 'other-disc-gets-empty-metadata' the first time round.
+_orig_details = fai._auto_toc_details_for_disc
+fai._auto_toc_details_for_disc = lambda disc_id: _ui_disc
+_r = c.get("/FAI/ui?cd=UI_AUTOFILL_TOC")
+_h = _r.data.decode("utf-8", "ignore")
+_box = re.search(r'<input[^>]*id="sq"[^>]*value="([^"]*)"', _h)
+_lead = re.search(r'id="leadIn">([^<]*)</div>', _h)
+check("fai-autofills-the-search-box-from-the-disc-toc",
+      _box and _box.group(1) == "Course of Nature Damaged",
+      f"a bare ?cd= must prefill the box from the disc's own TOC resolution; "
+      f"got {_box.group(1) if _box else None!r}")
+check("fai-lead-in-names-the-disc-it-was-opened-for",
+      _lead and "Course of Nature Damaged" in _lead.group(1)
+      and 'Searching for &quot;&quot;' not in _lead.group(1),
+      f"the lead-in must not read 'Searching for \"\"...'; got "
+      f"{_lead.group(1) if _lead else None!r}")
+check("fai-autofilled-box-triggers-the-search",
+      re.search(r"if \(document\.getElementById\('sq'\)\.value\.trim\(\)\)\s*\{\s*doSearch\(\);\s*\}",
+                _h) is not None,
+      "a prefilled box must actually run the search on load, otherwise the "
+      "results pane keeps saying 'Enter a search and press Enter.'")
+
+# A rip WMP DID name must never be overridden by the fallback. The box carries
+# artist + album (q), which is WMP's own rip_name, not the TOC fallback.
+_r = c.get("/FAI/ui?artist=Bob+Acri&album=Jazz+Music&track=Sleep+Away")
+_h2 = _r.data.decode("utf-8", "ignore")
+_box2 = re.search(r'<input[^>]*id="sq"[^>]*value="([^"]*)"', _h2)
+check("fai-toc-autofill-never-overrides-a-named-rip",
+      _box2 and _box2.group(1) == "Bob Acri Jazz Music",
+      f"the TOC fallback must only fill a blank; got {_box2.group(1) if _box2 else None!r}")
+
+# No disc and no context is unchanged: nothing to resolve, nothing invented.
+_r = c.get("/FAI/ui")
+_h3 = _r.data.decode("utf-8", "ignore")
+check("fai-autofill-stays-silent-with-nothing-to-resolve",
+      'id="sq" class="search-input" value=""' in _h3
+      and "Enter a search and press Enter." in _h3,
+      "with no disc and no rip name the dialog must behave exactly as before")
+# Restore before anything else runs: this stub answers for EVERY disc id.
+fai._auto_toc_details_for_disc = _orig_details
+fai.AUTO_TOC_DETAILS.clear()
+fai.AUTO_TOC_LOOKUP = True
+
 fai.lookup_by_discid_or_toc = _real_lookup
 fai.AUTO_TOC_CACHE.clear()
 fai.AUTO_TOC_MISS.clear()
