@@ -2594,7 +2594,7 @@ def mdr_post():
         # Read here rather than reusing legacy_redirects()'s local: this is a
         # different view and has no `user_agent` in scope.
         ua = request.headers.get('User-Agent', '')
-        is_browser = ('MSIE' in ua or 'Mozilla' in ua)
+        is_browser = _is_dialog_host_client(ua)
         if disc_id.strip() and not is_browser:
             auto_xml = _auto_toc_xml_for_disc(disc_id)
             if auto_xml:
@@ -2604,6 +2604,80 @@ def mdr_post():
     return Response(EMPTY_METADATA_XML, mimetype='text/xml')
 
     return Response("<METADATA><version>5.0</version><status>OK</status></METADATA>", mimetype='text/xml')
+
+def _is_dialog_host_client(user_agent):
+    """True when the caller is a BROWSER that will render the FAI dialog itself.
+
+    WMP 12 drives the dialog through an IE7-era browser control, so those
+    User-Agents get redirected to /FAI/ui and can pick an album by hand.
+
+    Windows Media Center and Windows Media Player 7-9 are NOT in that group.
+    They have no browser to host the dialog and they ask for the legacy
+    .asp endpoints, so redirecting them at an HTML page leaves them with
+    nothing usable. They are XML clients and must be answered with the
+    document - which is what this returns False for.
+
+    WMC reports as 'Windows-Media-Center' / 'WMC' and the older players as
+    'NSPlayer' or 'Windows-Media-Player', none of which contain 'MSIE' or
+    'Mozilla'. The explicit list is here anyway so the decision does not rest
+    on an accidental substring match if those agents ever change.
+    """
+    ua = user_agent or ""
+    for marker in ("Windows-Media-Center", "WMC", "NSPlayer",
+                   "Windows-Media-Player", "MCE"):
+        if marker.lower() in ua.lower():
+            return False
+    return "MSIE" in ua or "Mozilla" in ua
+
+
+# ==========================================================
+# WINDOWS MEDIA CENTER / WMP 7-9 (LEGACY ENDPOINTS)
+# ==========================================================
+# WMC and the older players predate musicmatch-ssl.xboxlive.com entirely. They
+# talk to a different host - toc.music.metaservices.microsoft.com - and to the
+# .asp-era paths below. Microsoft retired those services in 2019 (KB 4488539),
+# which is why a WMC install reports no title, genre or cover for a CD.
+#
+# Two things were missing for it:
+#
+#   * the HOSTS entries for toc./info.music.metaservices.microsoft.com. Without
+#     them WMC dials a dead Microsoft service; with them it reaches this one.
+#     These are a system change and are documented, not committed.
+#   * GetMDRCDPOSTURLBackground.asp, the .asp spelling of the post-url
+#     handshake. WMP 12 asks for getmdrcdposturlbackground; the older players ask
+#     for the .asp name, which no route claimed, so it fell through to the
+#     unmapped-/redir/ catch-all and got a sentence instead of a URL.
+#
+# The MDR-CD document itself is unchanged - same builder, same cover fields -
+# because WMC consumes exactly the XML WMP does.
+@app.route("/redir/GetMDRCDPOSTURLBackground.asp")
+@app.route("/redir/GetMDRCDPostURL.asp")
+def wmc_post_url():
+    """The .asp-era post-url handshake. Same answer as the WMP 12 spelling."""
+    target = "http://127.0.0.1/cdinfo/GetMDRCD.aspx"
+    log_line("WMC", f"post-url (.asp) {request.path} -> {target}")
+    return Response(target, mimetype="text/plain")
+
+
+@app.route("/toc/getmdrcd.aspx")
+def wmc_toc_xml():
+    """WMC's toc.music.metaservices.microsoft.com entry point.
+
+    Answers with the same MDR-CD document as every other delivery path, so WMC
+    gets metadata and cover art rather than an HTML page it cannot render.
+    """
+    log_line("WMC", f"{request.method} {request.path} "
+                    f"qs={request.query_string.decode('utf-8', 'replace')!r}")
+    return mdr_post()
+
+
+# /redir/QueryTOC.asp and its siblings are NOT re-routed here: legacy_redirects
+# below already claims them, and registering a second rule for the same path
+# makes Flask resolve to whichever came first - the same trap that turned every
+# legacy redirect into /redir/getmdrcdzune/ earlier. legacy_redirects() calls
+# _is_dialog_host_client() instead, which is the one place that decision belongs
+# and covers all of those paths at once.
+
 
 # ==========================================================
 # LEGACY REDIRECTS (CD TOC & WMP BROWSING)
@@ -2619,7 +2693,11 @@ def legacy_redirects():
 
     # Check for CD TOC in query parameters or POST body.
     # Read raw: request.args would turn the leading '+' of a TOC into a space.
-    toc_param = raw_query_arg('toc') or raw_query_arg('TOC') or ''
+    # 'cd'/'CD' are included because that is what WMC and WMP 7-9 actually send -
+    # they use 'CD', WMP 12 uses both. Reading only 'toc' meant the legacy .asp
+    # routes missed a staged document keyed by the same disc and answered empty.
+    toc_param = (raw_query_arg('toc') or raw_query_arg('TOC')
+                 or raw_query_arg('cd') or raw_query_arg('CD') or '')
     if not toc_param and request.method == "POST":
         post_body = request.data.decode("utf-8", errors="ignore")
         match = re.search(r'toc=([^&]+)', post_body, re.IGNORECASE)
@@ -2636,7 +2714,7 @@ def legacy_redirects():
             # echo it straight back instead of re-querying MusicBrainz.
             print(f"[CD TOC] Returning previously staged XML for this TOC: {toc_param[:60]}")
             log_line("TOC", f"staged-hit toc={toc_param!r} ua={user_agent[:60]}")
-            if not ('MSIE' in user_agent or 'Mozilla' in user_agent):
+            if not _is_dialog_host_client(user_agent):
                 return Response(staged_xml, mimetype='text/xml')
             # Browser re-submission: go straight to the UI, no network lookup.
             # Forward the RAW query string so the '+' of the TOC survives
@@ -2654,12 +2732,17 @@ def legacy_redirects():
             log_line("TOC", f"match-not-applied toc={toc_param[:40]!r} "
                             f"album={album_details.get('title')!r}")
 
-    if 'MSIE' in user_agent or 'Mozilla' in user_agent:
+    if _is_dialog_host_client(user_agent):
         # Forward the RAW query string verbatim - re-encoding request.args
         # corrupts the leading '+' of a CD TOC.
         qs = request.query_string.decode('utf-8', 'replace')
         target = url_for('unified_ui') + ('?' + qs if qs else '')
         return redirect(target)
+
+    # XML client (WMP 12's background fetch, Zune, WMC, WMP 7-9): hand it the
+    # document. WMC and the older players land here too - they have no browser to
+    # host the dialog, so redirecting them at an HTML page would leave them with
+    # nothing they can use.
 
     # No metadata for this TOC: return an EMPTY document rather than the last
     # album staged, which would tag an unrelated disc.
@@ -5270,6 +5353,18 @@ def _install_cert_as_trusted_root(cert_path):
 
 
 def ensure_ssl_certificates():
+    # Every host that must be reachable over TLS. The certificate is generated
+    # once and then reused, so the check below has to require ALL of them - it
+    # used to return early as soon as it found musicmatch-ssl.xboxlive.com, which
+    # meant adding a host here would never take effect on an existing install
+    # (exactly the bug this list fixes).
+    TLS_HOSTS = (
+        "musicmatch-ssl.xboxlive.com",   # WMP 12
+        "redir.metaservices.microsoft.com",        # Zune
+        "images.metaservices.microsoft.com",       # Zune artwork
+        "toc.music.metaservices.microsoft.com",    # WMC / WMP 7-9
+        "info.music.metaservices.microsoft.com",   # WMC / WMP 7-9 post-url
+    )
     # Always re-verify trust: a cert generated before the SAN fix is invalid for
     # hostname verification and will hang the dialog.
     if os.path.exists(CERT_FILE) and os.path.exists(KEY_FILE):
@@ -5279,10 +5374,12 @@ def ensure_ssl_certificates():
                 existing = x509.load_pem_x509_certificate(f.read())
             san = existing.extensions.get_extension_for_class(
                 x509.SubjectAlternativeName)
-            if "musicmatch-ssl.xboxlive.com" in [str(v) for v in san.value]:
+            present = {str(v) for v in san.value}
+            if all(h in present for h in TLS_HOSTS):
                 _install_cert_as_trusted_root(CERT_FILE)
                 return
-            print("[*] Existing certificate has no usable SAN - regenerating.")
+            print("[*] Existing certificate is missing a SAN this server now "
+                  "serves - regenerating.")
         except Exception as e:
             print(f"[!] Existing certificate unusable ({e}) - regenerating.")
 
@@ -5311,11 +5408,10 @@ def ensure_ssl_certificates():
             # Modern Windows ignores the legacy CN for hostname validation, so a
             # SubjectAlternativeName is REQUIRED or TLS verification fails.
             .add_extension(
-                x509.SubjectAlternativeName([
-                    x509.DNSName("musicmatch-ssl.xboxlive.com"),
-                    x509.DNSName("localhost"),
-                    x509.IPAddress(ipaddress.ip_address("127.0.0.1")),
-                ]),
+                x509.SubjectAlternativeName(
+                    [x509.DNSName(h) for h in TLS_HOSTS] +
+                    [x509.DNSName("localhost"),
+                     x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]),
                 critical=False)
             # Self-signed cert is its own CA; without this, Windows refuses to
             # use it as a trust anchor.

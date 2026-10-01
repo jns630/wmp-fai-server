@@ -981,6 +981,42 @@ resolve to a release with a full track list.
 > The result is **logged but not applied** in the general case — see below for
 > the one exception.
 
+## Windows Media Center / Windows Media Player 7-9
+
+WMC and the older players predate `musicmatch-ssl.xboxlive.com` entirely. They
+use a different host and the `.asp`-era endpoints, and Microsoft retired those
+services in 2019 ([KB 4488539](https://support.microsoft.com/help/4488539)) —
+which is why a WMC install reports no title, genre or cover for a CD.
+
+Two more hosts entries are needed:
+
+```
+127.0.0.1 toc.music.metaservices.microsoft.com
+127.0.0.1 info.music.metaservices.microsoft.com
+```
+
+WMC is **not** a browser client. It has no browser to host the FAI dialog, so
+`_is_dialog_host_client()` deliberately excludes it (along with `NSPlayer`/WMP 7-9)
+and it is answered with the MDR-CD document rather than a redirect to an HTML page
+it cannot render. The cover fields WMP uses — `largeCoverParams` /
+`smallCoverParams` — are how it locates artwork, and they are already in the
+document.
+
+| Route | Purpose |
+|---|---|
+| `/toc/getmdrcd.aspx` | WMC's `toc.music.metaservices.microsoft.com` entry point |
+| `/redir/QueryTOC.asp`, `/redir/GetMDRCD.asp`, `/redir/submittoc.asp` | Legacy TOC submission, XML to WMC |
+| `/redir/GetMDRCDPOSTURLBackground.asp` | The `.asp` post-url handshake (was unhandled) |
+
+WMP 12 is unaffected: its IE control still gets the dialog, verified by
+`wmp12-legacy-path-still-opens-the-dialog`.
+
+> **Not verified end to end.** WMC only ever shipped with Windows 7 (and the
+> Windows 8 upgrade), and this machine is Windows 11, so the client itself could
+> not be run here. The routes, the User-Agent handling and TLS for the new hosts
+> are all tested; whether WMC's own request shape matches has **not** been
+> confirmed against a real install. Treat this as *implemented, unproven*.
+
 ### Automatic TOC lookup (WMP only)
 
 When WMP names a disc (`?cd=` / `?toc=`) and **nothing is staged for it**, the
@@ -1030,7 +1066,9 @@ $env:AUTO_TOC_LOOKUP = '0'
 - **There is no dialog for Zune.** Zune ships no browser host for the FAI UI, so
   it cannot offer album selection; it consumes the MDR-CD XML directly.
 - **Windows Media Player 11 and earlier.** Only WMP 12 is supported; the COM
-  surface and the dialog host differ on older players.
+  surface and the dialog host differ on older players. The legacy `.asp` endpoints
+  and XML delivery for WMP 7-9 are implemented, but untested against a real
+  install — see [Windows Media Center](#windows-media-center--windows-media-player-7-9).
 - **No multi-user or remote access.** The server binds `0.0.0.0` but has **no
   authentication whatsoever**. See [Security notes](#security-notes).
 

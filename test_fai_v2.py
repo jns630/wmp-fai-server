@@ -439,6 +439,64 @@ fai.lookup_by_discid_or_toc = _real_lookup
 fai.AUTO_TOC_CACHE.clear()
 fai.AUTO_TOC_MISS.clear()
 
+# 11e. Windows Media Center and WMP 7-9 are NOT browser clients. They ask for
+#      the legacy .asp endpoints and toc.music.metaservices.microsoft.com, and
+#      Microsoft retired those services in 2019 (KB 4488539). They must be
+#      answered with the MDR-CD document; redirecting them at the FAI dialog
+#      gives them an HTML page with no browser to render it.
+WMC_UA = {"User-Agent": "Windows-Media-Center/6.0.8002.0"}
+WMP9_UA = {"User-Agent": "NSPlayer/9.0.0.4509"}
+
+check("wmc-is-not-a-dialog-client",
+      fai._is_dialog_host_client(WMC_UA["User-Agent"]) is False
+      and fai._is_dialog_host_client(WMP9_UA["User-Agent"]) is False,
+      "WMC/WMP9 must not be treated as a browser that renders the dialog")
+check("wmp12-browser-is-still-a-dialog-client",
+      fai._is_dialog_host_client("Mozilla/4.0 (compatible; MSIE 7.0)") is True,
+      "WMP 12's IE control must still get the dialog")
+
+_legacy_album = {"id": "W1", "title": "Legacy Delivered", "artist": "WMC Path",
+                 "year": "2001", "genre": "Rock", "art_url": "",
+                 "tracks": [{"number": 1, "name": "One", "duration_ms": 1000,
+                             "disc": 1}], "source": "itunes"}
+_legacy_toc = "B+96+43DA+71A4+105D1+15498+19A64+1F0B3+23C14+29CD4+2EB21+33B0F+37106"
+c.post("/store_staged_xml", content_type="application/json",
+       data=json.dumps({"album": _legacy_album,
+                        "selected_tracks": _legacy_album["tracks"],
+                        "request_id": "REQ_LEGACY", "session_id": "S",
+                        "toc": _legacy_toc}))
+
+# Every legacy path must deliver XML to a WMC caller, using 'CD' - which is what
+# WMC actually sends, and which these routes did not read before.
+for _p in ("/toc/getmdrcd.aspx", "/redir/QueryTOC.asp", "/redir/GetMDRCD.asp",
+           "/redir/submittoc.asp"):
+    r = c.get(f"{_p}?CD={_legacy_toc}&locale=409", headers=WMC_UA)
+    check(f"wmc-gets-xml-from{_p}",
+          r.status_code == 200 and r.mimetype == "text/xml"
+          and "Legacy Delivered" in r.data.decode("utf-8", "ignore"),
+          f"code={r.status_code} type={r.mimetype} body={r.data[:160]!r}")
+
+# The .asp post-url handshake had no route at all and fell through to the
+# unmapped-/redir/ catch-all, which answers with a sentence rather than a URL.
+r = c.get("/redir/GetMDRCDPOSTURLBackground.asp", headers=WMC_UA)
+check("wmc-post-url-handshake-returns-a-url",
+      r.status_code == 200 and r.data.decode().strip().startswith("http://"),
+      f"code={r.status_code} body={r.data[:120]!r}")
+
+# The cover fields are how WMC finds artwork. They must survive on this path.
+r = c.get(f"/toc/getmdrcd.aspx?CD={_legacy_toc}", headers=WMC_UA)
+_body = r.data.decode("utf-8", "ignore")
+check("wmc-document-carries-cover-fields",
+      "<largeCoverParams>" in _body and "<smallCoverParams>" in _body,
+      "WMC has no other way to locate the cover art")
+
+# ...and WMP 12's browser must still be redirected to the dialog, not answered.
+r = c.get(f"/redir/QueryTOC.asp?CD={_legacy_toc}",
+          headers={"User-Agent": "Mozilla/4.0 (compatible; MSIE 7.0)"})
+check("wmp12-legacy-path-still-opens-the-dialog",
+      r.status_code in (301, 302) and "/FAI/ui" in r.headers.get("Location", ""),
+      f"code={r.status_code} loc={r.headers.get('Location')}")
+
 # 12. Staged XML keyed by a '+' TOC is retrievable by that same TOC
 payload_plus = {"album": dict(album, title="Plus TOC Album"),
                 "selected_tracks": [album["tracks"][0]],
@@ -857,8 +915,19 @@ check("close-is-single-shot",
       "var CLOSING = false;" in done_html and "if (CLOSING) return;" in done_html,
       "dialog close must fire ReturnToMainTask at most once")
 check("cert-has-san",
-      "x509.SubjectAlternativeName([" in open(BASE, encoding="utf-8").read(),
+      "x509.SubjectAlternativeName(" in open(BASE, encoding="utf-8").read(),
       "certificate must carry a SubjectAlternativeName (CN alone is ignored by Windows)")
+# Every host the server answers for must be in the certificate. This used to
+# assert the literal text 'x509.SubjectAlternativeName([' , which broke when the
+# SAN list was generated from TLS_HOSTS instead of being written out by hand -
+# the check now follows the list the code actually uses.
+check("cert-covers-every-served-host",
+      all(f'"{h}"' in open(BASE, encoding="utf-8").read() for h in (
+          "musicmatch-ssl.xboxlive.com", "redir.metaservices.microsoft.com",
+          "images.metaservices.microsoft.com",
+          "toc.music.metaservices.microsoft.com",
+          "info.music.metaservices.microsoft.com")),
+      "a host this server answers for is missing from the certificate SANs")
 check("cert-is-own-ca",
       "x509.BasicConstraints(ca=True" in open(BASE, encoding="utf-8").read(),
       "self-signed cert needs BasicConstraints(ca=True) to be a trust anchor")
