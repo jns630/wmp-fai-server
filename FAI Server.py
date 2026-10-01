@@ -464,14 +464,25 @@ _COVER_SEQ = 0
 # It IS switchable from the environment, because "direct" makes artwork fetching
 # invisible: the client fetches the image straight from the upstream CDN and this
 # server never sees the request, so there is no [IMAGE] line to prove or disprove
-# anything. Running with WMP_ART_MODE=proxy routes every fetch back through
-# /cover/ and makes it observable. That is the only way to tell "the client never
-# asked" apart from "the client asked and the image failed" - which is exactly the
-# question Windows Media Center's missing cover art leaves open.
+# anything. The proxy and relative forms route every fetch back through /cover/
+# and make it observable.
 #
-#   $env:WMP_ART_MODE='proxy'
-_ART_MODE = (os.environ.get("WMP_ART_MODE", "relative").strip().lower()
-             or "relative")
+# 'direct' stays the default. It was tried and out on Windows Media Player 12.
+#
+# 'relative' was briefly made the default on the theory that WMC ignores absolute
+# URLs because PyZuneMetadataServer emits a scheme-less path. That was wrong, and
+# it cost WMP its cover art. The inference was circular: WMC made no /cover/
+# request, but under 'direct' it would not have regardless of whether artwork
+# WORKED or FAILED, because a successful direct fetch happens at the CDN and never
+# reaches this server. "No [IMAGE] line" was therefore never evidence of failure,
+# only evidence of the mode already in use. Do not make this switch on the
+# strength of an unrun test again.
+#
+#   $env:WMP_ART_MODE='direct'    # upstream URL verbatim (default; proven on WMP)
+#   $env:WMP_ART_MODE='proxy'     # absolute URL, but fetched through this server
+#   $env:WMP_ART_MODE='relative'  # scheme-less path for clients that resolve one
+_ART_MODE = (os.environ.get("WMP_ART_MODE", "direct").strip().lower()
+             or "direct")
 
 def _remember_wmid(value):
     """Record the most recent wmid WMP asked us about."""
