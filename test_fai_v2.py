@@ -1538,10 +1538,21 @@ check("library-xml-uses-wmid-collection",
 #     "Find album information" anatomy: the blue lead-in, the two
 #     hairline-separated columns, the filter strip, the command strip with
 #     the privacy link + Next, and the per-row 'More.../Buy' link pair.
+# REWRITTEN: the lead-in noun now follows the active tab, so there is no longer
+# a literal 'Album(s) containing' in the script. The previous assertion passed
+# only because that sentence survives inside a COMMON_CSS *comment*, which gets
+# injected into the page - i.e. it had quietly stopped testing anything. Assert
+# the behaviour instead, and forbid the comment-substitute from satisfying it.
 check("fai-leadin-copy",
-      'id="leadIn"' in ui_html and "Album(s) containing" in ui_html
-      and "function applyTotals" in ui_html,
+      'id="leadIn"' in ui_html and "function applyTotals" in ui_html
+      and "var noun = CURRENT_VIEW === 'artist' ? 'Artist'" in ui_html
+      and "(s) containing &quot;" in ui_html,
       "the authentic blue lead-in sentence is missing")
+check("fai-leadin-noun-follows-the-active-tab",
+      all(v in ui_html for v in ("'Artist'", "'Track'", "'Album'"))
+      and "'(s) containing &quot;'" in ui_html,
+      "the reference dialog reads 'Track(s)' on the Tracks tab, so the noun has "
+      "to be chosen from CURRENT_VIEW instead of hardcoded")
 check("fai-two-columns",
       'class="section-label">Existing Information' in ui_html
       and 'class="section-label">Search' in ui_html,
@@ -1575,6 +1586,14 @@ check("fai-search-box-has-clear",
 # be float based; the only flexbox allowed is the outer flex COLUMN context
 # (body + the three direct children), which the IE7 block flips to display:block.
 _CSS_BLOCK = _src.split("COMMON_CSS = ")[1].split('\n"""')[0]
+# The search dialog carries its OWN stylesheet, injected after COMMON_CSS on
+# /FAI/ui only. The visual-fidelity checks below are asserted against THAT
+# block, not the shared one: the shared rules it overrides are no longer what
+# governs this page, so checking COMMON_CSS would keep passing long after the
+# dialog stopped using those rules at all. That is not a theoretical risk - it
+# is exactly what happened to the lead-in check when the noun became dynamic.
+_UI_CSS_BLOCK = _src.split("FAI_UI_CSS = ")[1].split('\n"""')[0]
+_UI_CSS_RULES = dict(re.findall(r"^([.\w#, :\[\]\-]+?)\s*\{([^}]*)\}", _UI_CSS_BLOCK, re.M))
 _CSS_RULES = dict(re.findall(r"^([.\w#, :\[\]\-]+?)\s*\{([^}]*)\}", _CSS_BLOCK, re.M))
 _flex_sel = [s for s, d in _CSS_RULES.items() if "display: flex" in d or "display:inline-flex" in d]
 _flex1_sel = [s for s, d in _CSS_RULES.items() if re.search(r"(^|;)\s*flex:\s*1", d)]
@@ -1593,19 +1612,50 @@ check("fai-flex-only-in-outer-column",
 # scrollbar the authentic one has. IE7 has no flexbox, so the conditional
 # block MUST put it back to display:block and give the list a fixed height,
 # otherwise IE7 would lose the scrollbar entirely.
+# RESCOPED: this now guards COMMON_CSS, which /confirm still uses. The SEARCH
+# dialog no longer relies on any of it - FAI_UI_CSS uses no flexbox at all - so
+# the IE7 undo block below matters for the confirm page's list, not this one.
 check("ie7-undoes-the-pane-flexbox",
       ".main-container, .header-area, .footer, .left-pane, .right-pane { display: block; }" in _src
       and ".results-scroll { height: 260px; overflow-y: scroll; }" in _src,
       "the IE7 conditional must reset the pane to display:block and give "
       ".results-scroll an explicit height so it still scrolls")
+# The columns and rows below are asserted against FAI_UI_CSS, the sheet that
+# actually governs /FAI/ui. They previously matched COMMON_CSS, which the dialog
+# now overrides, so they would have kept passing without testing the layout.
 check("fai-columns-are-floats",
-      ".left-pane { float: left;" in _src and ".right-pane { margin-left: 48%;" in _src,
-      "the two columns must be float/margin based so IE7 lays them out")
+      ".left-pane { display: block; float: left; width: 416px;" in _UI_CSS_BLOCK
+      and ".right-pane { display: block; float: left; width: 405px; margin-left: 18px;" in _UI_CSS_BLOCK,
+      "the two columns must be float based so IE7 lays them out, and must use the "
+      "reference geometry: 416px left column, 1px divider, 18px gutter")
 check("fai-list-rows-are-floats",
-      ".album-item { position: relative; float: left; width: 100%; padding: 4px 6px; overflow: hidden;" in _src
-      and ".album-thumb { width: 48px; height: 48px; float: left;" in _src
-      and ".track-num { float: left;" in _src,
-      "result and track rows must be float based so IE7 lays them out")
+      ".album-item { position: relative; display: block; float: left; width: 100%;" in _UI_CSS_BLOCK
+      and "padding: 6px; overflow: hidden;" in _UI_CSS_BLOCK,
+      "each result row must clear its own 56px cover float")
+# The dialog no longer uses flexbox at all - the sheet is floats and fixed
+# pixels throughout - so what matters now is that nothing modern leaked in and
+# that the list still has the explicit height IE7 needs to draw its scrollbar.
+check("ui-css-has-no-flex-or-grid",
+      "display: flex" not in _UI_CSS_BLOCK and "display: grid" not in _UI_CSS_BLOCK
+      and "inline-flex" not in _UI_CSS_BLOCK,
+      f"the search dialog stylesheet must be IE7-legal; found "
+      f"flex/grid selectors: "
+      f"{[s for s, d in _UI_CSS_RULES.items() if 'flex' in d or 'grid' in d]}")
+check("ui-css-pins-the-list-height",
+      "height: 280px; overflow-y: scroll;" in _UI_CSS_BLOCK,
+      "IE7 has no flexbox to hand the list the leftover height, so .results-scroll "
+      "needs the reference 280px explicitly or it loses its scrollbar entirely")
+check("ui-css-has-no-custom-properties",
+      "var(--" not in _UI_CSS_BLOCK and not re.search(r"(^|[;{\s])--[\w-]+\s*:", _UI_CSS_BLOCK),
+      "CSS custom properties are a syntax error in IE7 and would take the whole "
+      "rule with them, not merely be ignored")
+# REPLACED for the album half: .album-item / .album-thumb on the SEARCH page are
+# now governed by FAI_UI_CSS and are asserted above. This check keeps only the
+# TRACK rows, which belong to /confirm and are still styled by COMMON_CSS.
+check("fai-track-rows-are-floats",
+      ".track-num { float: left;" in _src
+      and ".track-row { padding:" in _src,
+      "the confirm page's track rows must be float based so IE7 lays them out")
 # .track-title and .track-artist are siblings in the markup. Once the row stops
 # being a flex container they must both float, or the artist drops onto its own
 # line and the row stops matching the previous rendering.

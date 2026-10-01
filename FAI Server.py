@@ -3576,6 +3576,175 @@ body { display: block; height: auto; overflow: auto; }
 <![endif]-->
 """
 
+# ==========================================================
+# FAI SEARCH DIALOG - DEDICATED STYLESHEET
+# ==========================================================
+# Kept separate from COMMON_CSS on purpose. COMMON_CSS is shared with /confirm
+# (see the confirm template), and this task is scoped to the SEARCH dialog, so
+# nothing here may reach the confirmation page. This block is injected AFTER
+# COMMON_CSS in the /FAI/ui template only, and overrides it by source order.
+#
+# GEOMETRY is the reference dialog's, measured from the 1024x672 screenshot:
+#   dialog 926x530 at (48,67); the frame, title bar and address bar belong to
+#   WMP's WebBrowser host and are deliberately NOT reproduced here. The white
+#   content area below is the only part this stylesheet owns.
+#     left column 416px | 1px divider | right column starts 434px
+#     search field 405x23 | result list 405x280 | thumbs 56x56
+#     heading 18px/23px #315D96 | footer 48px, buttons 72x24
+#
+# ENGINE. WMP 12 hosts this page in an IE7 WebBrowser control - real sessions
+# log 'MSIE 7.0; Trident/7.0'. IE7 has no flexbox, no grid, no border-radius,
+# no box-shadow and no linear-gradient(). So this block is floats, fixed pixel
+# widths and plain background colours throughout; the one nested conditional at
+# the end supplies filter-based gradients. COMMON_CSS already carries a similar
+# fallback, but this page is laid out differently enough to own its own.
+#
+# No CSS custom properties either: they are a syntax error in IE7 and would
+# take the whole rule with them, not merely be ignored.
+FAI_UI_CSS = """
+html { height: 100%; }
+body { display: block; height: auto; overflow: auto; margin: 0; padding: 0;
+  font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 13px;
+  line-height: 1.35; color: #1A1A1A; background-color: #FFFFFF; }
+
+/* ---- 4. Lead-in ----------------------------------------------------------
+   'Found 500+ Track(s) containing "Sleep Away Jazz Music Bob Acri".'
+   18px, normal weight, muted Microsoft blue. Not bold - the original leans on
+   size and colour, not weight. Fixed 23px line-height keeps it on one line
+   at the reference width instead of wrapping unpredictably. */
+.header-area { display: block; overflow: hidden; padding: 12px 0 10px 25px;
+  border-bottom: 1px solid #E4E9EF; background-color: #FFFFFF; }
+.header-text { margin: 0; font-size: 18px; font-weight: 400; line-height: 23px;
+  color: #315D96; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The picked album's cover, rendered beside the lead-in here too, so the
+   cover state matches on both steps of the dialog. */
+.found-cover { float: right; width: 56px; height: 56px; margin: 0 25px 0 10px;
+  border: 1px solid #C9D3DE; background-color: #F0F3F7; }
+
+/* ---- 5. Two columns ------------------------------------------------------
+   Fixed 416px left column rather than a percentage: the dialog is a fixed-size
+   window, and a percentage column drifts as result counts change text width.
+   zoom:1 is the IE7 hasLayout trigger for the float container. */
+.main-container { display: block; overflow: hidden; zoom: 1; }
+.left-pane { display: block; float: left; width: 416px; padding: 14px 0 0 25px;
+  border-right: 1px solid #E4E9EF; }
+.right-pane { display: block; float: left; width: 405px; margin-left: 18px;
+  padding: 14px 0 0 0; }
+/* Column captions: 13px, normal weight, dark grey. No rule, no caps. */
+.section-label { display: block; margin: 0 0 9px 0; padding: 0; font-size: 13px;
+  font-weight: 400; color: #333333; border: 0; background: none; }
+/* ---- 6. Existing Information ---------------------------------------------
+   56x56 cover, metadata immediately to its right, 13px, Edit / Buy links. */
+.existing-info { display: block; overflow: hidden; padding: 0; zoom: 1;
+  border: 0; background-color: transparent; }
+.existing-thumb { display: block; float: left; width: 56px; height: 56px;
+  margin: 0 12px 4px 0; border: 1px solid #C9D3DE; background-color: #F0F3F7; }
+.existing-body { margin-left: 68px; }
+.existing-title { font-size: 13px; color: #1A1A1A; }
+.existing-artist { margin-top: 1px; font-size: 13px; color: #1A1A1A; }
+.existing-sub { margin-top: 1px; font-size: 13px; color: #333333; }
+.existing-links { margin-top: 5px; font-size: 13px; }
+.existing-source { margin-top: 4px; font-size: 12px; color: #6A7B8C; }
+.existing-empty { font-size: 13px; color: #6A7B8C; font-style: italic; }
+.existing-edit { margin-top: 8px; padding-top: 8px; border-top: 1px solid #E4E9EF; }
+.edit-label { display: block; font-size: 12px; color: #404A55; margin-bottom: 2px; }
+.edit-input { width: 200px; padding: 2px 4px; font-family: "Segoe UI", Tahoma, Arial, sans-serif;
+  font-size: 13px; color: #1A1A1A; border: 1px solid #ADADBD; background-color: #FFFFFF; }
+.edit-note { margin-top: 6px; font-size: 12px; color: #5A6B7B; }
+
+/* ---- 7. Search panel -----------------------------------------------------
+   405x23 field with a 1px border and zero radius. The clear control sits to
+   its right rather than inside the box, which is how the original does it and
+   avoids overlaying the typed text. */
+.search-box-row { display: block; overflow: hidden; margin-bottom: 7px; zoom: 1; }
+.search-input { display: inline-block; width: 405px; height: 23px; padding: 2px 4px;
+  font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 13px; color: #1A1A1A;
+  vertical-align: middle; border: 1px solid #ADADBD; border-radius: 0;
+  background-color: #FFFFFF; }
+.search-clear { display: inline-block; width: 17px; height: 17px; margin-left: 4px;
+  padding: 0; font-family: Tahoma, Arial, sans-serif; font-size: 11px; line-height: 15px;
+  text-align: center; color: #5A6B7B; vertical-align: middle; cursor: pointer;
+  border: 1px solid #C3CFDA; border-radius: 0; background-color: #F1F4F8; }
+.search-clear:hover { background-color: #E4EFFA; }
+/* Tabs are plain blue text links - the original has no pills, no underline at
+   rest and no chrome. Active is distinguished by weight and colour only. */
+.filter-row { display: block; margin: 0 0 7px 0; padding: 0 0 6px 0;
+  font-size: 13px; color: #1A1A1A; border-bottom: 1px solid #E4E9EF; }
+.filter-tab { cursor: pointer; padding: 1px 1px; }
+.filter-tab:hover { text-decoration: underline; }
+.filter-active { font-weight: 700; color: #315D96; }
+.filter-sep { margin: 0 6px; color: #9AA7B4; }
+
+/* ---- 8. Results ----------------------------------------------------------
+   405x280 with 'overflow-y: scroll' so the bar is ALWAYS drawn, arrows and
+   all, exactly as in the reference - 'auto' would hide it on a short result
+   set and the dialog would change height between searches. */
+.results-scroll { display: block; width: 405px; height: 280px; overflow-y: scroll;
+  border: 1px solid #E4E9EF; background-color: #FFFFFF; }
+/* Rows are floats so the 56px cover is contained and the stack stays
+   measurable inside the scroll box; overflow:hidden creates the formatting
+   context that makes the float contribute to the scroll height. */
+.album-item { position: relative; display: block; float: left; width: 100%;
+  padding: 6px; overflow: hidden; cursor: pointer; zoom: 1;
+  border: 1px solid transparent; background-color: #FFFFFF; }
+.album-item:hover { border-color: #C6D8EA; background-color: #F4F8FC; }
+.album-item.sel { border-color: #9CC4E4; background-color: #E8F4FC; }
+.album-thumb { display: block; float: left; width: 56px; height: 56px;
+  margin: 0 12px 0 0; border: 1px solid #C9D3DE; background-color: #F0F3F7; }
+.album-meta { display: block; margin-left: 68px; }
+.album-artist { font-size: 13px; font-weight: 700; color: #1A1A1A; }
+.album-title { font-size: 13px; color: #1A1A1A; }
+.album-sub { margin-top: 1px; font-size: 12px; color: #7F7F7F; }
+.item-links { margin-top: 2px; font-size: 12px; }
+.badge { font-size: 11px; }
+.badge-itunes { color: #7A6A3E; }
+.badge-mb { color: #4A6B52; }
+.badge-dg { color: #6B4A7A; }
+.tick { display: none; }
+.album-item:hover .tick, .album-item.sel .tick { display: block; position: absolute;
+  left: 4px; top: 24px; font-size: 13px; color: #315D96; }
+.empty-msg { display: block; padding: 18px 8px; font-size: 13px; color: #7F7F7F;
+  text-align: center; }
+.nav-steps { display: block; padding: 6px 8px; margin: 0 0 8px 0; font-size: 12px;
+  color: #404040; border-bottom: 1px solid #E4E9EF; background-color: #F7F9FB; }
+/* ---- 9. Footer -----------------------------------------------------------
+   Fixed 48px strip, very light grey, hairline rule above. Privacy link left,
+   Search / Cancel right. */
+.footer { display: block; clear: both; height: 48px; padding: 0 25px 0 25px;
+  overflow: hidden; zoom: 1; border-top: 1px solid #E4E9EF; background-color: #F7F9FB; }
+.footer-left { float: left; padding-top: 17px; font-size: 12px; }
+.footer-right { float: right; padding-top: 12px; }
+.link { color: #315D96; cursor: pointer; text-decoration: none; }
+.link:hover { text-decoration: underline; }
+.link-gap { color: #315D96; }
+/* 72x24, square corners, hairline grey edge. The default command carries the
+   Aero focus blue, which is how the original marks the button you can press. */
+.btn { display: inline-block; width: 72px; height: 24px; margin-left: 8px;
+  padding: 0; font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 12px;
+  color: #1A1A1A; text-align: center; line-height: 22px; cursor: pointer;
+  overflow: visible; border: 1px solid #ADADAD; border-radius: 0;
+  background-color: #F0F0F0; }
+.btn:hover { border-color: #7EB4EA; background-color: #F3F8FD; }
+.btn:active { background-color: #E8E8E8; }
+.btn-default { border-color: #7EB4EA; background-color: #EFF6FD; }
+.btn[disabled] { color: #A6A6A6; cursor: default; border-color: #D6D6D6;
+  background-color: #F0F0F0; }
+
+/* ---- IE7 only -----------------------------------------------------------
+   Everything above is already IE7-legal (floats, fixed widths, no radii), so
+   this block only supplies gradient fallbacks for the plain colours above.
+   'btn[disabled]' is a CSS3 selector IE7 cannot parse and is simply dropped
+   there, which is why the disabled look is applied inline in markup instead. */
+<!--[if lt IE 8]>
+body { overflow: auto; }
+.btn, .search-input, .search-clear, .album-item, .existing-thumb, .album-thumb {
+  border-radius: 0; }
+.btn { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FCFCFC', endColorstr='#E0E0E0', type='0'); }
+.btn-default, .btn:hover { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#DCEAF9', type='0'); }
+.album-item:hover { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#E8F4FC', type='0'); }
+.album-item.sel { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#E8F4FC', endColorstr='#E8F4FC', type='0'); }
+<![endif]-->
+"""
 @app.route("/FAI/ui")
 def unified_ui():
     # Zune does NOT reach this dialog. It has no browser host: of every binary in
@@ -3643,7 +3812,7 @@ def unified_ui():
 <head>
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <title>Find Album Information</title>
-  <style>{{ css|safe }}</style>
+  <style>{{ css|safe }}{{ ui_css|safe }}</style>
 </head>
 <body>
   <div class="header-area">
@@ -3683,7 +3852,7 @@ def unified_ui():
   <div class="footer">
     <div class="footer-left"><span class="link" title="How Windows Media Player uses the data you supply">Read the privacy statement.</span></div>
     <div class="footer-right">
-      <button class="btn btn-default" onclick="nextToSearch();">Next</button>
+      <button class="btn btn-default" onclick="nextToSearch();">Search</button>
       <button class="btn" onclick="cancelToMainTask()">Cancel</button>
     </div>
   </div>
@@ -3729,6 +3898,7 @@ def unified_ui():
       var resultsDiv = document.getElementById('results_area');
       var scrollBox = document.getElementById('results_scroll');
       var target = scrollBox || resultsDiv;
+      SELECTED_INDEX = -1;
       target.innerHTML = '<div class="empty-msg">Searching Apple Music &amp; MusicBrainz...</div>';
       var xhr = new XMLHttpRequest();
       xhr.open('GET', '/api_search?q=' + encodeURIComponent(query) + '&view=' + CURRENT_VIEW, true);
@@ -3736,6 +3906,7 @@ def unified_ui():
         if (xhr.readyState == 4) {
           target.innerHTML = xhr.responseText;
           applyTotals(xhr.getResponseHeader('X-Search-Totals'), query);
+          applySelection();
           target.scrollTop = 0;
         }
       };
@@ -3760,6 +3931,7 @@ def unified_ui():
           target.innerHTML = '<div class="nav-steps"><span class="link" '
             + 'onclick="backToArtists()">&#8592; Back to artists</span></div>'
             + xhr.responseText;
+          applySelection();
           target.scrollTop = 0;
         }
       };
@@ -3767,6 +3939,7 @@ def unified_ui():
     }
 
     function backToArtists() {
+      SELECTED_INDEX = -1;
       doSearch();
     }
 
@@ -3814,17 +3987,29 @@ def unified_ui():
         return;
       }
       var albums = toNum(t.albums), tracks = toNum(t.tracks), artists = toNum(t.artists);
-      var shown = toNum(t.albums_shown) || 0;
-      var exact = (t.albums_exact === true);
+      // The noun follows the ACTIVE TAB. The reference dialog reads
+      // 'Found 500+ Track(s) containing "..."' while the Tracks tab is showing,
+      // so a fixed 'Album(s)' is simply wrong whenever another category is up.
+      // totals.albums merges iTunes and MusicBrainz, which is what albums_exact
+      // guards; tracks and artists are MusicBrainz-only counts taken with
+      // limit=0, so they are exact on their own and need no such guard. Nothing
+      // here ever invents a number - an unknown count still degrades to
+      // 'Found at least N', exactly as before.
+      var noun = CURRENT_VIEW === 'artist' ? 'Artist'
+               : CURRENT_VIEW === 'track' ? 'Track' : 'Album';
+      var total = CURRENT_VIEW === 'artist' ? artists
+                : CURRENT_VIEW === 'track' ? tracks : albums;
+      var shown = toNum(CURRENT_VIEW === 'track' ? t.tracks_shown : t.albums_shown) || 0;
+      var exact = (t.albums_exact === true) || CURRENT_VIEW !== 'album';
       if (lead) {
-        if (albums === null || !exact) {
-          lead.innerHTML = 'Found at least ' + shown + ' Album(s) containing &quot;'
+        if (total === null || !exact) {
+          lead.innerHTML = 'Found at least ' + shown + ' ' + noun + '(s) containing &quot;'
                            + escHtml(query) + '&quot;.';
-        } else if (albums > shown) {
-          lead.innerHTML = 'Found ' + groupDigits(albums) + ' Album(s) containing &quot;'
+        } else if (total > shown) {
+          lead.innerHTML = 'Found ' + groupDigits(total) + ' ' + noun + '(s) containing &quot;'
                            + escHtml(query) + '&quot; - showing the top ' + shown + '.';
         } else {
-          lead.innerHTML = 'Found ' + groupDigits(albums) + ' Album(s) containing &quot;'
+          lead.innerHTML = 'Found ' + groupDigits(total) + ' ' + noun + '(s) containing &quot;'
                            + escHtml(query) + '&quot;.';
         }
       }
@@ -4054,6 +4239,78 @@ def unified_ui():
         + 'first &mdash; on the next screen you can edit its title, artist, year '
         + 'and genre before applying.</div>';
     }
+    // ---- Result selection (reference screenshot shows one row highlighted) --
+    // Rows are floats emitted server-side by /api_search, so selection is a
+    // class toggle rather than any CSS trick. The list is replaced wholesale by
+    // innerHTML on every search, so the selected INDEX is remembered and
+    // re-applied when the new markup lands; without that the highlight blinks
+    // out on every tab switch.
+    var SELECTED_INDEX = -1;
+    // No querySelectorAll in IE7, and getElementsByTagName returns the nested
+    // divs too, so the rows are collected by class name.
+    function resultRows() {
+      var box = document.getElementById('results_scroll'), out = [], all, i, el;
+      if (!box) { return out; }
+      all = box.getElementsByTagName('div');
+      for (i = 0; i < all.length; i++) {
+        el = all[i];
+        if (el.className && el.className.indexOf('album-item') !== -1) {
+          out[out.length] = el;
+        }
+      }
+      return out;
+    }
+    function applySelection() {
+      var rows = resultRows(), i;
+      for (i = 0; i < rows.length; i++) {
+        rows[i].className = (i === SELECTED_INDEX) ? 'album-item sel' : 'album-item';
+      }
+    }
+    function moveSelection(delta) {
+      var rows = resultRows();
+      if (!rows.length) { return; }
+      SELECTED_INDEX = (SELECTED_INDEX < 0) ? 0 : SELECTED_INDEX + delta;
+      if (SELECTED_INDEX < 0) { SELECTED_INDEX = 0; }
+      if (SELECTED_INDEX > rows.length - 1) { SELECTED_INDEX = rows.length - 1; }
+      applySelection();
+      var box = document.getElementById('results_scroll');
+      var el = rows[SELECTED_INDEX];
+      if (!box || !el) { return; }
+      // Keep the highlighted row inside the 280px viewport without scrolling
+      // the whole dialog - the list has its own scrollbar for exactly this.
+      var top = el.offsetTop - box.offsetTop;
+      if (top < box.scrollTop) { box.scrollTop = top; }
+      else if (top + el.offsetHeight > box.scrollTop + box.clientHeight) {
+        box.scrollTop = top + el.offsetHeight - box.clientHeight;
+      }
+    }
+    // Enter re-runs the row's OWN onclick rather than re-implementing the
+    // routing here. That handler (pick / pickTrack / showArtist) is emitted by
+    // /api_search and is the single source of truth for what a click means;
+    // duplicating it would be a second place to keep in step with the server.
+    function activateRow(el) {
+      if (el && el.onclick) { el.onclick(); }
+    }
+    document.onkeydown = function(ev) {
+      var e = ev || window.event;
+      var k = e.keyCode;
+      var t = e.srcElement || e.target;
+      var inField = t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA');
+      if (k === 38 || k === 40) {
+        // Inside the search field Up/Down belong to the caret, not to the list.
+        if (inField) { return true; }
+        moveSelection(k === 40 ? 1 : -1);
+        return false;
+      }
+      if (k === 27) { SELECTED_INDEX = -1; applySelection(); return true; }
+      if (k === 13 && SELECTED_INDEX >= 0) {
+        // Only consumed once a row has actually been highlighted, so a plain
+        // Enter in the empty search box still just runs the search.
+        activateRow(resultRows()[SELECTED_INDEX]);
+        return false;
+      }
+      return true;
+    };
     function pick(source, id) {
       var url = "/confirm?source=" + encodeURIComponent(source) + "&id=" + encodeURIComponent(id) + "&" + window.location.search.substring(1);
       window.location.href = url;
@@ -4075,7 +4332,7 @@ def unified_ui():
     };
   </script>
 </body>
-</html>""", css=COMMON_CSS, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, flow=flow, request_id=request_id, session_id=session_id, disc_summary=disc_summary, disc_track_count=disc_track_count)
+</html>""", css=COMMON_CSS, ui_css=FAI_UI_CSS, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, flow=flow, request_id=request_id, session_id=session_id, disc_summary=disc_summary, disc_track_count=disc_track_count)
 # ==========================================================
 # UNIFIED CONFIRMATION & TRACK SELECTION PAGE
 # ==========================================================
