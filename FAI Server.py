@@ -5918,7 +5918,12 @@ if __name__ == "__main__":
         context.load_cert_chain(CERT_FILE, KEY_FILE)
 
         print(f"[*] Starting HTTPS server on port {HTTPS_PORT}...")
-        print("[*] WMP FAI Metadata Server 2.0 READY")
+        # Must track VERSION in build_exe.py. It read "2.0" through every
+        # released build - including 1.0.0 - so anyone checking the console to
+        # confirm which build they were running was told the wrong one. It is a
+        # literal rather than a read of build_version.txt because that file is
+        # not shipped inside the EXE.
+        print("[*] WMP FAI Metadata Server 1.1.1 READY")
         app.run(host=HOST, port=HTTPS_PORT, ssl_context=context, debug=False, use_reloader=False)
     except Exception as e:
         print(f"[!] HTTPS server startup warning (running HTTP only): {e}")

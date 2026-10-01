@@ -37,7 +37,7 @@ DIST = ROOT / "dist"
 # 1.0.0 in their version resource - Windows shows that in the file properties,
 # so a user on 1.0.3 was told they were running 1.0.0. Bump this and the
 # version resource follows.
-VERSION = (1, 1, 0)
+VERSION = (1, 1, 1)
 VERSION_STR = ".".join(str(n) for n in VERSION)
 
 
