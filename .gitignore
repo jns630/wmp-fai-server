@@ -70,6 +70,19 @@ dist/
 # PyInstaller. Reproducible from the build script, not source.
 build_version.txt
 
+# The Windows 7/8 TEST build (build_exe_win7.py). Kept in its own directories
+# so that script's cleanup pass cannot reach the official build/ and dist/ - it
+# wipes whatever it is pointed at before running. Same reasoning as the three
+# entries above, for the same generated-artifact reasons.
+dist-win7/
+build-win7/
+build_version_win7.txt
+
+# Python 3.8 virtualenv for the Win7 build. Recreate it with the commands in
+# build_exe_win7.py's docstring; committing a venv would drag ~40 MB of
+# interpreter and site-packages into the repo.
+.venv38/
+
 # Scratch files written by the node --check regression tests. They are
 # rewritten on every run and must never be committed.
 _syntaxcheck_*.js
