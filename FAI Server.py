@@ -3380,6 +3380,8 @@ html { height: 100%; }
 body { font-family: "Segoe UI", Tahoma, Arial, sans-serif; font-size: 9pt; line-height: 1.35; color: #1A1A1A; margin: 0; padding: 0; height: 100%; overflow: hidden; background-color: #FFFFFF; display: flex; flex-direction: column; }
 /* Lead-in: 'Found 500+ Album(s) containing "...",' in FAI link blue. */
 .header-area { flex-shrink: 0; padding: 11px 12px 9px 12px; border-bottom: 1px solid #DCE6F0; background-color: #FFFFFF; background-image: linear-gradient(to bottom, #FFFFFF 0%, #F4F8FC 100%); }
+.found-cover { float: left; width: 48px; height: 48px; margin: 0 10px 4px 0; border: 1px solid #C6D2E0; background: #fff; }
+.header-area .header-text { overflow: hidden; }
 .header-text { margin: 0; font-size: 12pt; font-weight: 400; color: #0B5AA6; line-height: 1.4; }
 .header-tag { font-size: 12pt; color: #0B5AA6; }
 /* Two hairline separated columns, 48 / 52. Only the RESULT LIST scrolls, so
@@ -4222,6 +4224,7 @@ def confirm():
 </head>
 <body>
   <div class="header-area">
+    {% if proxy_art %}<img src="{{ proxy_art|e }}" class="found-cover" alt="" onerror="this.style.display='none';">{% endif %}
     <div class="header-text">Found the album &quot;{{ details.title|e }}&quot; by {{ details.artist|e }}.</div>
   </div>
   <div id="discBanner" style="display:none;margin:0;padding:9px 12px;font-size:8.5pt;line-height:1.4;border-bottom:1px solid #E4E9EF;background:#FDF6E3;color:#7A5B12;">
@@ -5054,6 +5057,12 @@ def confirm():
 </html>""",
       css=COMMON_CSS,
       details=details,
+      # The cover of the album being APPLIED. proxy_art was computed here since
+      # long ago and never passed to the template, so the confirm page showed no
+      # artwork at all - the 'Existing Information' thumbnail beside it is
+      # hardcoded to the placeholder, correctly, because that panel describes what
+      # is on the DISC rather than what is about to be written to it.
+      proxy_art=proxy_art,
       tracks=tracks,
       track_html=track_html,
       tracks_json=json.dumps(tracks),
