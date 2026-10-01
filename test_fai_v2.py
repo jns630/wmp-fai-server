@@ -300,6 +300,52 @@ check("zunesearch-endpoint-removed",
       r.status_code == 200 and "no handler" in r.data.decode("utf-8", "ignore"),
       f"code={r.status_code} body={r.data[:120]!r}")
 
+# 11c. WMP and Zune send the CD TOC as HEX; MusicBrainz's ?toc= lookup wants
+#      DECIMAL in a different field order, so the raw string is always rejected
+#      with `400 Invalid TOC`. to_musicbrainz_toc() ports the transform from
+#      PyZuneMetadataServer (JarHead4/PyZuneMetadataServer, utils.py to_mb_toc),
+#      a working reimplementation of the retired Microsoft TOC service.
+#
+#      These are the exact TOCs real Zune sent (fai_server.log), so the
+#      conversion is pinned to observed traffic rather than a synthetic example.
+#      Both resolve against the live API; asserted here as pure string logic so
+#      the suite stays offline.
+_zune_toc = "B+96+43DA+71A4+105D1+15498+19A64+1F0B3+23C14+29CD4+2EB21+33B0F+37106"
+check("toc-hex-is-converted-for-musicbrainz",
+      fai.to_musicbrainz_toc(_zune_toc)
+      == "1+11+225542+150+17370+29092+67025+87192+105060+127155+146452+171220+191265+211727",
+      f"got {fai.to_musicbrainz_toc(_zune_toc)!r}")
+
+# The reordering is the part a plain hex->decimal pass gets wrong: the lead-out
+# moves to position two and a leading "1" is added.
+check("toc-conversion-reorders-the-leadin",
+      fai.to_musicbrainz_toc("3+96+45EA+B624+10E8E") == "1+3+69262+150+17898+46628",
+      f"got {fai.to_musicbrainz_toc('3+96+45EA+B624+10E8E')!r}")
+
+# WMP sends the same TOC space-separated and, in legacy URLs, '-' delimited.
+check("toc-space-separated-matches",
+      fai.to_musicbrainz_toc(_zune_toc.replace("+", " "))
+      == fai.to_musicbrainz_toc(_zune_toc),
+      "a space-separated WMP TOC must convert identically")
+check("toc-dash-delimited-matches",
+      fai.to_musicbrainz_toc(_zune_toc.replace("+", "-"))
+      == fai.to_musicbrainz_toc(_zune_toc),
+      "a '-' delimited TOC must convert identically")
+
+# Junk must return None rather than raising - this is fed straight from a query
+# string, so it cannot be trusted.
+check("toc-conversion-rejects-junk",
+      all(fai.to_musicbrainz_toc(x) is None
+          for x in ("", "garbage", "1+2", "TOC_A", "ANOTHER-FRESH-GUID")),
+      "a non-TOC argument must return None, not raise")
+
+# The delivery lookup must send the CONVERTED toc. Before this, every request
+# was a 400 and no disc could ever be matched automatically.
+_src_toc = open(BASE, encoding="utf-8").read()
+check("toc-lookup-uses-the-converted-toc",
+      "toc={mb_toc}" in _src_toc and "toc={clean_toc}" not in _src_toc,
+      "lookup_by_discid_or_toc must query with the converted TOC")
+
 # 12. Staged XML keyed by a '+' TOC is retrievable by that same TOC
 payload_plus = {"album": dict(album, title="Plus TOC Album"),
                 "selected_tracks": [album["tracks"][0]],

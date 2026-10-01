@@ -1877,6 +1877,60 @@ def get_discogs_album_details(album_ref):
         return None
 
 
+def to_musicbrainz_toc(toc_string):
+    """Convert a WMP/Zune CD TOC into the form MusicBrainz will accept.
+
+    WMP and Zune both send the TOC as HEX values in this layout:
+
+        <first track> <lead-in> <track offset> ... <lead-out>
+        B+96+43DA+71A4+...+37106
+
+    MusicBrainz's ?toc= lookup wants DECIMAL, in a different order:
+
+        1 <first track> <lead-out> <lead-in> <track offset> ...
+
+    Sending the raw string gets `400 Invalid TOC` from every request, so the
+    lookup below could never have succeeded. The reordering is the subtle part -
+    it is not a straight hex->decimal pass, which is why that alone still fails:
+
+        PyZuneMetadataServer (github.com/JarHead4/PyZuneMetadataServer, utils.py
+        `to_mb_toc`) is a working reimplementation of the retired Microsoft
+        toc.music.metaservices.microsoft.com service and does exactly this
+        transform. Ported verbatim so the behaviour matches a service Zune and
+        WMP are both known to have worked against.
+
+    Verified against the live API using the two TOCs real Zune sent
+    (fai_server.log, 15:57:24): both resolve once converted, one to a single
+    unambiguous release.
+    """
+    # WMP and Zune both delimit with '+', but WMP also sends the TOC
+    # space-separated in some of its own URLs (seen in fai_server.log). The
+    # reference implementation splits on '+' first, so normalise whitespace to
+    # '+' BEFORE splitting - otherwise a space-separated TOC reaches int() as
+    # one long field and raises.
+    clean = re.sub(r'[\s]+', '+', toc_string.strip())
+    parts = clean.split("-") if "-" in clean else clean.split("+")
+    parts = [p for p in parts if p != ""]
+    if len(parts) < 4:
+        return None
+
+    try:
+        # Every field is hex on the wire. Note that a decimal TOC is
+        # indistinguishable from hex here ('225542' is valid hex too), so this
+        # assumes the caller sends the on-the-wire form - which is all WMP and
+        # Zune ever send, and all this function is fed.
+        parts = [str(int(p, 16)) for p in parts]
+    except ValueError:
+        return None
+
+    count = len(parts)
+    # Move the lead-out (currently last) to position two...
+    parts.insert(1, parts.pop(count - 1))
+    # ...and MusicBrainz always wants disc one first.
+    parts.insert(0, "1")
+    return "+".join(parts)
+
+
 def lookup_by_discid_or_toc(toc_string):
     cache_key = f"toc_lookup_{toc_string.strip()}"
     cached = album_cache.get(cache_key)
@@ -1884,22 +1938,29 @@ def lookup_by_discid_or_toc(toc_string):
         return cached
 
     try:
-        clean_toc = re.sub(r'[\s+]+', '+', toc_string.strip())
-        url = f"{MUSICBRAINZ_BASE_URL}discid/-?toc={clean_toc}&fmt=json"
+        mb_toc = to_musicbrainz_toc(toc_string)
+        if not mb_toc:
+            return None
+        url = f"{MUSICBRAINZ_BASE_URL}discid/-?toc={mb_toc}&fmt=json"
         # Rate-limited like every other MusicBrainz call. This one used to be
         # a raw session.get, and it immediately calls
         # get_musicbrainz_album_details() - two MusicBrainz requests back to
         # back, which is precisely the pattern the 1 req/sec limit rejects.
         resp = _mb_get(url, timeout=6)
-        if resp is not None:
+        if resp is not None and resp.status_code == 200:
             data = resp.json()
             releases = data.get("releases", [])
             if releases:
-                rel_id = releases[0].get("id")
+                # Prefer the best-scoring release when MusicBrainz offers a
+                # score; otherwise the first, as before.
+                best = max(releases, key=lambda r: r.get("score", 0) or 0)
+                rel_id = best.get("id")
                 details = get_musicbrainz_album_details(rel_id)
                 if details:
                     album_cache.set(cache_key, details, ttl=86400)
                     return details
+            else:
+                log_line("TOC", f"no-release mb_toc={mb_toc[:60]}")
     except Exception as e:
         print(f"[CD TOC] Lookup error: {e}")
     return None

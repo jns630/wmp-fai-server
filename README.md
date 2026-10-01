@@ -951,12 +951,42 @@ Please read this section before assuming something is broken.
   even though the dialog is built for an IE7-era host — treat it as untested
   rather than supported.
 
+### TOC lookup
+
+When WMP or Zune sends a CD TOC, the server can look the disc up on
+MusicBrainz. This requires a format conversion: **both clients send the TOC as
+hexadecimal, and MusicBrainz's `?toc=` endpoint wants decimal in a different
+field order.**
+
+```
+WMP / Zune   B+96+43DA+71A4+105D1+15498+19A64+1F0B3+23C14+29CD4+2EB21+33B0F+37106
+MusicBrainz  1+11+225542+150+17370+29092+67025+87192+105060+127155+146452+171220+191265+211727
+```
+
+Sending the raw string returns `400 Invalid TOC` from every request, so this
+path could never have succeeded before it was fixed. The reordering is the
+subtle part — a straight hex→decimal pass still fails, because the lead-out has
+to move to position two and a leading `1` is added.
+
+`to_musicbrainz_toc()` ports this transform from
+[PyZuneMetadataServer](https://github.com/JarHead4/PyZuneMetadataServer)
+(`utils.py`, `to_mb_toc`), a working reimplementation of Microsoft's retired
+`toc.music.metaservices.microsoft.com` service that Zune and WMP are both known
+to have worked against. Both TOC encodings the clients use are handled: `+`
+(Zune), and `-` or spaces (WMP).
+
+Verified against the live API using the two TOCs real Zune sent — both now
+resolve to a release with a full track list.
+
+> The result is **logged but not applied**. Applying it would mean auto-tagging a
+> disc the user never chose, which is how discs end up sharing one album.
+
 ### Not implemented
 
 - **Automatic disc identification.** There is no fingerprinting (AcoustID,
   MusicBrainz recording IDs). You must search and pick the album yourself.
-  Automatic TOC-based matching is **deliberately disabled** — a TOC match is
-  logged and otherwise ignored, because a wrong automatic match silently
+  TOC lookup *is* performed — see [TOC lookup](#toc-lookup) — but a TOC match is
+  logged and otherwise **not** applied, because a wrong automatic match silently
   mis-tags a disc.
 - **Track-level art or acoustic matching.** The whole album's cover is applied.
 - **Lyrics, release-group selection, or "best match" ranking.** Results are ordered
