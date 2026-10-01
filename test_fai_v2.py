@@ -456,16 +456,34 @@ fai._auto_toc_details_for_disc = lambda disc_id: _ui_disc
 _r = c.get("/FAI/ui?cd=UI_AUTOFILL_TOC")
 _h = _r.data.decode("utf-8", "ignore")
 _box = re.search(r'<input[^>]*id="sq"[^>]*value="([^"]*)"', _h)
-_lead = re.search(r'id="leadIn">([^<]*)</div>', _h)
-check("fai-autofills-the-search-box-from-the-disc-toc",
-      _box and _box.group(1) == "Course of Nature Damaged",
-      f"a bare ?cd= must prefill the box from the disc's own TOC resolution; "
-      f"got {_box.group(1) if _box else None!r}")
-check("fai-lead-in-names-the-disc-it-was-opened-for",
-      _lead and "Course of Nature Damaged" in _lead.group(1)
-      and 'Searching for &quot;&quot;' not in _lead.group(1),
-      f"the lead-in must not read 'Searching for \"\"...'; got "
-      f"{_lead.group(1) if _lead else None!r}")
+# REWRITTEN. These two used to assert the box was ALREADY filled in the page
+# render, which is exactly what had to stop happening: doing the TOC lookup
+# inline made the dialog block on MusicBrainz (measured 6911ms cold vs 51ms
+# warm) and WMP presents that as a hung window. The lookup now runs AFTER the
+# page is on screen, so the render must be blank and the answer must arrive
+# over /api_toc_identity instead.
+check("fai-page-does-not-block-on-the-toc-lookup",
+      _box and _box.group(1) == ""
+      and "/api_toc_identity" in _h
+      and "function autofillFromDisc" in _h,
+      f"a bare ?cd= must render with an EMPTY box and fetch the identity "
+      f"asynchronously, or the dialog blocks on MusicBrainz; box was "
+      f"{_box.group(1) if _box else None!r}")
+check("fai-autofill-runs-only-when-nothing-was-named",
+      re.search(r"if \(document\.getElementById\('sq'\)\.value\.trim\(\)\)\s*\{\s*"
+                r"doSearch\(\);\s*\}\s*else\s*\{\s*autofillFromDisc\(\);", _h) is not None,
+      "the TOC fallback must run only when WMP named nothing; a rip WMP DID "
+      "name must go straight to the search")
+check("fai-says-it-is-identifying-the-disc",
+      "Identifying this disc from its table of contents" in _h,
+      "the results pane must not sit on 'Enter a search and press Enter.' while "
+      "the TOC lookup is still in flight - that is the blank state that reads "
+      "as a broken dialog")
+_lead_js = re.search(r"lead\.innerHTML = 'Searching for &quot;' \+ escHtml\(data\.query\)", _h)
+check("fai-lead-in-names-the-disc-when-the-identity-arrives",
+      _lead_js is not None,
+      "the lead-in must be rewritten from the resolved identity, instead of "
+      "staying on 'Searching for \"\"...'")
 check("fai-autofilled-box-triggers-the-search",
       re.search(r"if \(document\.getElementById\('sq'\)\.value\.trim\(\)\)\s*\{\s*doSearch\(\);\s*\}",
                 _h) is not None,
@@ -486,8 +504,30 @@ _r = c.get("/FAI/ui")
 _h3 = _r.data.decode("utf-8", "ignore")
 check("fai-autofill-stays-silent-with-nothing-to-resolve",
       'id="sq" class="search-input" value=""' in _h3
-      and "Enter a search and press Enter." in _h3,
-      "with no disc and no rip name the dialog must behave exactly as before")
+      and "Enter a search and press Enter." in _h3
+      and re.search(r'var DISC_REF = "";', _h3) is not None,
+      "with no disc and no rip name the dialog must behave exactly as before: "
+      "DISC_REF must be empty so the client never even asks")
+
+# The endpoint itself. It is what the page now waits on, so its contract is
+# 'artist + album or nothing' - never an error, because an unidentifiable disc
+# is a normal outcome and not a failure the user should see a traceback for.
+_r = c.get("/api_toc_identity?cd=UI_AUTOFILL_TOC")
+_j = json.loads(_r.data.decode("utf-8", "ignore"))
+check("toc-identity-endpoint-returns-the-resolved-query",
+      _r.status_code == 200
+      and _j.get("query") == "Course of Nature Damaged"
+      and _j.get("artist") == "Course of Nature"
+      and _j.get("title") == "Damaged",
+      f"the endpoint must hand the client a ready-made query; got {_j!r}")
+fai._auto_toc_details_for_disc = lambda disc_id: None
+for _u in ("/api_toc_identity?cd=NO_SUCH_DISC", "/api_toc_identity"):
+    _res = c.get(_u)
+    _j2 = json.loads(_res.data.decode("utf-8", "ignore"))
+    check(f"toc-identity-degrades-quietly{'(no-arg)' if 'cd=' not in _u else ''}",
+          _res.status_code == 200 and _j2.get("query") == "",
+          f"an unidentifiable disc must return an empty query, not an error; "
+          f"got status={_res.status_code} body={_j2!r}")
 # Restore before anything else runs: this stub answers for EVERY disc id.
 fai._auto_toc_details_for_disc = _orig_details
 fai.AUTO_TOC_DETAILS.clear()

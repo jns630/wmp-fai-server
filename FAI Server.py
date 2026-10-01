@@ -2843,6 +2843,36 @@ def legacy_redirects():
 # ==========================================================
 # CONCURRENT HYBRID SEARCH API (ITUNES + MUSICBRAINZ)
 # ==========================================================
+@app.route("/api_toc_identity")
+def api_toc_identity():
+    """Artist + album for a bare disc TOC, or nothing at all.
+
+    Deliberately its own request, called by /FAI/ui AFTER the page is on
+    screen. Resolving a TOC is a MusicBrainz discid lookup followed by an album
+    lookup, and doing it inline in the page render made the dialog sit blank for
+    seconds - measured 6911ms cold against 51ms warm on the same disc, which WMP
+    presents as a hung window.
+
+    Returns {"query": ""} rather than an error for anything it cannot resolve:
+    an unknown disc is a normal outcome here, not a failure, and the caller
+    simply leaves the search box empty for the user to type into.
+    """
+    key = (raw_query_arg('cd') or raw_query_arg('CD')
+           or raw_query_arg('toc') or raw_query_arg('TOC') or "").strip()
+    if not key:
+        return jsonify({"query": ""})
+    details = _auto_toc_details_for_disc(key)
+    if not details:
+        return jsonify({"query": ""})
+    artist = str(details.get("artist") or "").strip()
+    title = str(details.get("title") or "").strip()
+    # Artist first: it is the narrower term and gives the better result set,
+    # which is what this dialog is for.
+    query = " ".join(x for x in (artist, title) if x)
+    log_line("FAI-UI", f"toc identity {key[:40]!r} -> {query!r}")
+    return jsonify({"query": query, "artist": artist, "title": title})
+
+
 @app.route("/api_search")
 def api_search():
     q = request.args.get("q", "").strip()
@@ -3853,26 +3883,16 @@ def unified_ui():
     #
     # Only a fallback: a rip WMP DID name always wins, so nothing is overridden.
     # And it is a hint, not an answer - the user still chooses in the list.
-    toc_query = ""
-    disc_identity = ""
-    if not rip_name and (wmp_cd or wmp_toc):
-        _det = _auto_toc_details_for_disc(wmp_cd or wmp_toc)
-        if _det:
-            _artist = str(_det.get("artist") or "").strip()
-            _title = str(_det.get("title") or "").strip()
-            # Artist first: it is the narrower term and gives the better result
-            # set, which is what this dialog is for.
-            toc_query = " ".join(x for x in (_artist, _title) if x)
-            # Same shape as a WMP-supplied rip_name, so the lead-in reads
-            # 'Searching for "Course of Nature Damaged"...' rather than naming
-            # the artist alone.
-            disc_identity = toc_query
-    if toc_query:
-        log_line("FAI-UI", f"autofilled search from disc TOC: {toc_query!r}")
-    # The lead-in and the search box both read from these. The TOC fallback is
-    # applied LAST and only fills a blank, so a rip WMP named is never overridden.
-    q = q or toc_query
-    rip_name = rip_name or disc_identity
+    # Autofill from the disc's TOC runs ASYNCHRONOUSLY - the client asks
+    # /api_toc_identity once the page is already on screen. Doing this inline
+    # made the page BLOCK on MusicBrainz: measured 6911ms cold against 51ms
+    # warm for the very same disc, because resolving a TOC is a discid lookup
+    # plus an album lookup. WMP shows the dialog as soon as the response starts,
+    # so a multi-second blank page reads as a hung one.
+    #
+    # Only handed over when WMP named nothing: if WMP sent a rip name the box
+    # is already filled and there is nothing to fall back to.
+    toc_ref = (wmp_cd or wmp_toc) if not rip_name else ""
 
     session_id = get_session_id()
     track_fai_navigation(session_id, 'ui_search', {
@@ -3919,7 +3939,7 @@ def unified_ui():
       </div>
       <div id="results_area">
         <div class="results-scroll" id="results_scroll">
-          {% if q %}<div class="empty-msg">Searching metadata databases...</div>{% else %}<div class="empty-msg">Enter a search and press Enter.</div>{% endif %}
+          {% if q %}<div class="empty-msg">Searching metadata databases...</div>{% elif toc_ref %}<div class="empty-msg">Identifying this disc from its table of contents&#8230;</div>{% else %}<div class="empty-msg">Enter a search and press Enter.</div>{% endif %}
         </div>
       </div>
     </div>
@@ -4390,6 +4410,48 @@ def unified_ui():
       var url = "/confirm?source=" + encodeURIComponent(source) + "&id=" + encodeURIComponent(id) + "&" + window.location.search.substring(1);
       window.location.href = url;
     }
+    // ---- Async autofill from the disc's TOC ---------------------------------
+    // The dialog was opened for a CD WMP could not tag, so the URL carried only
+    // ?cd= and the box starts empty. The disc is still identifiable from its
+    // TOC, but that is a MusicBrainz round trip - measured 6911ms cold against
+    // 51ms warm for the SAME disc - so it must NOT sit on the page render or
+    // WMP presents the dialog as hung. The page is already on screen by the
+    // time this runs; the box is filled when the answer lands.
+    var DISC_REF = {{ toc_ref|tojson }};
+    function autofillFromDisc() {
+      if (!DISC_REF) { return; }
+      var el = document.getElementById('sq');
+      if (!el || el.value.replace(/^\s+|\s+$/g, '')) { return; }
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', '/api_toc_identity?cd=' + encodeURIComponent(DISC_REF), true);
+      xhr.onreadystatechange = function() {
+        if (xhr.readyState != 4) { return; }
+        var box = document.getElementById('results_scroll')
+               || document.getElementById('results_area');
+        var data = null;
+        try { data = eval('(' + xhr.responseText + ')'); } catch (e) { data = null; }
+        // An unidentifiable disc is a normal outcome, not an error: say so in
+        // the results pane and leave the box for the user to type into.
+        if (!data || !data.query) {
+          if (box) {
+            box.innerHTML = '<div class="empty-msg">This disc could not be '
+              + 'identified automatically. Enter a search and press Enter.</div>';
+          }
+          return;
+        }
+        // Never clobber something the user typed while this was in flight.
+        var now = document.getElementById('sq');
+        if (!now || now.value.replace(/^\s+|\s+$/g, '')) { return; }
+        now.value = data.query;
+        var lead = document.getElementById('leadIn');
+        if (lead) {
+          lead.innerHTML = 'Searching for &quot;' + escHtml(data.query) + '&quot;...';
+        }
+        doSearch();
+      };
+      xhr.send();
+    }
+
     window.onload = function() {
       // Fill 'Existing Information' from the disc / library album WMP is
       // actually asking about. A library update carries only ?requestid=,
@@ -4403,11 +4465,13 @@ def unified_ui():
       } catch (e) { try { renderExistingInfo(''); } catch (e2) {} }
       if (document.getElementById('sq').value.trim()) {
         doSearch();
+      } else {
+        autofillFromDisc();
       }
     };
   </script>
 </body>
-</html>""", css=COMMON_CSS, ui_css=FAI_UI_CSS, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, flow=flow, request_id=request_id, session_id=session_id, disc_summary=disc_summary, disc_track_count=disc_track_count)
+</html>""", css=COMMON_CSS, ui_css=FAI_UI_CSS, toc_ref=toc_ref, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, flow=flow, request_id=request_id, session_id=session_id, disc_summary=disc_summary, disc_track_count=disc_track_count)
 # ==========================================================
 # UNIFIED CONFIRMATION & TRACK SELECTION PAGE
 # ==========================================================
