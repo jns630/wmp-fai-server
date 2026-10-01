@@ -461,25 +461,28 @@ _COVER_SEQ = 0
 # The proxy is kept as a fallback in case an upstream host is found to refuse WMP.
 # It should not be reinstated as the default on the strength of a theory.
 #
-# It IS switchable from the environment, because "direct" makes artwork fetching
-# invisible: the client fetches the image straight from the upstream CDN and this
-# server never sees the request, so there is no [IMAGE] line to prove or disprove
-# anything. The proxy and relative forms route every fetch back through /cover/
-# and make it observable.
+# It IS switchable from the environment. It was originally switchable on the
+# theory that "direct" makes artwork fetching invisible - the claim being that the
+# client fetches the image straight from the upstream CDN and this server never
+# sees the request, so there is no [IMAGE] line to prove or disprove anything.
 #
-# 'direct' stays the default. It was tried and out on Windows Media Player 12.
+# THAT THEORY WAS WRONG, and a Windows 7 screenshot is what killed it. WMP asked
+# this server for
 #
-# 'relative' was briefly made the default on the theory that WMC ignores absolute
-# URLs because PyZuneMetadataServer emits a scheme-less path. That was wrong, and
-# it cost WMP its cover art. The inference was circular: WMC made no /cover/
-# request, but under 'direct' it would not have regardless of whether artwork
-# WORKED or FAILED, because a successful direct fetch happens at the CDN and never
-# reaches this server. "No [IMAGE] line" was therefore never evidence of failure,
-# only evidence of the mode already in use. Do not make this switch on the
-# strength of an unrun test again.
+#     GET /cover/https://i.discogs.com/....jpeg?locale=409   -> 404, once a second
 #
-#   $env:WMP_ART_MODE='direct'    # upstream URL verbatim (default; proven on WMP)
-#   $env:WMP_ART_MODE='proxy'     # absolute URL, but fetched through this server
+# i.e. WMP had not gone to the CDN at all - it had rewritten the absolute cover
+# URL back onto this host and asked us for it. So 'direct' mode, the mode
+# believed to be the artwork fix, was 404ing here exactly like the others:
+# get_image() only ever read ?url=. 'Fetched behind our back' was the wrong
+# model - the fetch was never invisible, it was a 404 this log did not explain.
+# get_image() now accepts the URL in the path as well as in the query.
+#
+# 'direct' stays the default. It is the shape a real FAI server sends, it is what
+# WMP 12 was given, and nothing observed since has beaten it.
+#
+#   $env:WMP_ART_MODE='direct'    # upstream URL verbatim (default)
+#   $env:WMP_ART_MODE='proxy'     # absolute URL to our own /cover/ endpoint
 #   $env:WMP_ART_MODE='relative'  # scheme-less path for clients that resolve one
 _ART_MODE = (os.environ.get("WMP_ART_MODE", "direct").strip().lower()
              or "direct")
@@ -2247,10 +2250,14 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
         # That is the working shape, and it is also the only one we can observe:
         # a relative URL resolves to musicmatch-ssl.xboxlive.com or
         # redir.metaservices.microsoft.com, both of which the hosts file points
-        # here, so every fetch arrives at /cover/ and is logged. An absolute
-        # upstream URL is fetched by the client behind our back and leaves no
-        # trace at all - which is why "no artwork" could not be diagnosed from
-        # the log at all.
+        # here, so every fetch arrives at /cover/ and is logged.
+        #
+        # It used to be argued that an absolute upstream URL is instead fetched by
+        # the client behind our back and leaves no trace at all - which is why
+        # "no artwork" could not be diagnosed from the log. The Windows 7 run
+        # disproved that: WMP fetched /cover/https://i.discogs.com/... once a
+        # second, i.e. it rewrote the absolute URL back onto this host rather
+        # than dialling the CDN. There is no mode in which a fetch is invisible.
         #
         # The version token stays in the PATH so the value still contains exactly
         # one '?' and no '&'. A bare '&' here made the document not-well-formed,
@@ -2412,12 +2419,36 @@ def noart():
 @app.route("/cover/<path:ignore>")
 def get_image(ignore=None):
     url = request.args.get("url")
+
+    # THE PATH FORM. WMP does not fetch an absolute largeCoverParams itself - it
+    # rewrites the URL back onto THIS server and asks us for it, with the whole
+    # upstream URL in the path and no query parameter at all:
+    #
+    #   GET /cover/https://i.discogs.com/....jpeg?locale=409
+    #
+    # Captured from WMP 12 on Windows 7 running the Win7 test build, 2026-10-01
+    # 21:59, retried once a second for as long as the window stayed open. Reading
+    # only the query string 404'd every one of them, so 'direct' mode - the mode
+    # believed to be the artwork fix - produced no artwork either. It was not
+    # fetching the CDN behind our back; every fetch was coming here and failing.
+    #
+    # `locale=409` (and `geoid`) are WMP's own trailing parameters, as in the
+    # ?url= form above; they are ignored, exactly as they already were.
+    if not url and ignore:
+        _in_path = ignore.strip()
+        # 'http' as a prefix covers every spelling of the same thing: the plain
+        # 'https://host/...', and the re-encoded 'https%3A%2F%2F...' forms that
+        # the decode step below unwraps.
+        if _in_path[:4].lower() == "http":
+            url = _in_path
+            log_line("IMAGE", f"url arrived in the PATH: {url[:70]}")
+
     if url:
         # WMP hands the URL back exactly as we gave it. Older staged documents
         # (and any client that re-encodes) can arrive double-encoded, i.e.
         # 'https%3A%2F%2F...', which is not a fetchable URL. Unwrap once so a
         # 404 upstream never turns into a missing album cover.
-        if url.startswith("http%3A") or url.startswith("https%3A"):
+        if url.lower().startswith(("http%3a", "https%3a")):
             try:
                 url = requests.utils.unquote(url)
             except Exception:

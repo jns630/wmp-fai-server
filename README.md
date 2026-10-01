@@ -592,6 +592,23 @@ FAI server sends. The proxy remains as the fallback in case an upstream host tur
 out to refuse WMP. `[STAGED] … art=direct|proxy` records which shape produced each
 document, so a log always says what WMP was actually offered.
 
+**How WMP actually fetches a cover — established on Windows 7, 2026-10-01.** Given
+an absolute `largeCoverParams`, WMP does **not** dial the CDN. It rewrites the URL
+back onto the metadata host and asks us for it, with the whole upstream URL in the
+**path** and none of it in the query:
+
+```text
+GET /cover/https://i.discogs.com/….jpeg?locale=409
+```
+
+`locale=409` (and `geoid`) are WMP's own trailing parameters. This matters twice
+over. `get_image()` used to read only `?url=`, so this shape 404'd — once a second,
+for as long as the window stayed open. And it disproves the model this section
+above relied on: because the fetch arrives *here* even in `direct` mode, a missing
+`[IMAGE]` line meant an unexplained 404, not a successful fetch at the CDN. The
+handler now accepts the URL from the path as well as the query, and from the
+double-encoded spelling of either.
+
 But the confirming sequence is what it took to see it, and only because the user
 renewed WMP's database files and the art appeared:
 
@@ -652,12 +669,22 @@ URL header.
 **A mechanism with N failures and no successes, alongside an untried alternative,
 is a conclusion — not a hypothesis to hedge.**
 
-The proxy had 62 fetches and 0 attachments. The direct URL had 0 fetches. That
-asymmetry was the answer from the moment the user-agent counts were taken, and it
-was available well before the change was made. Instead the change shipped labelled
-"a diagnostic, not a proven fix", with a fallback plan for "the remainder is inside
-WMP" — which points the next person at exactly the wrong place, at the cost of
-three commits re-deriving what the log already said.
+The proxy had 62 fetches and 0 attachments. The direct URL had 0 fetches *in
+this log*. That asymmetry was the answer from the moment the user-agent counts
+were taken, and it was available well before the change was made. Instead the
+change shipped labelled "a diagnostic, not a proven fix", with a fallback plan
+for "the remainder is inside WMP" — which points the next person at exactly the
+wrong place, at the cost of three commits re-deriving what the log already said.
+
+> **Corrected by a Windows 7 run.** "The direct URL had 0 fetches" was read as
+> *WMP never asked for it*. It only meant *this server never saw the request*.
+> WMP in fact rewrites an absolute cover URL back onto the metadata host and
+> fetches `/cover/<the-url>?locale=409` — see
+> [the two cover-URL modes](#the-diagnostic-rule-this-thread-should-have-followed)
+> above. So `direct` mode was 404ing here too, and "0 direct fetches" was never
+> evidence that direct mode avoided the proxy. The conclusion (the loopback proxy
+> was not the problem) was right; the inference drawn from the count was wrong,
+> and it is worth separating the two.
 
 The supporting evidence was no weaker: a loopback `http://` URL inside a document
 fetched over `https`, from a proxy that existed only to work around a `quote()` bug

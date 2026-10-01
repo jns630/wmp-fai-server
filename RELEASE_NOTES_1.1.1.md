@@ -57,9 +57,41 @@ circular: Media Center made no `/cover/` request, but under `direct` it could no
 have whether artwork worked or failed, because a successful direct fetch happens
 at the upstream CDN. Absence of a log line was evidence of the mode in use, never
 of failure. Move defaults off an observed-working path only on a run test, not a
-theory.
+theory. (That premise was itself wrong - see the Windows 7 artwork bug below.)
 
 **Media Center artwork remains undiagnosed.** Nothing here is claimed to fix it.
+
+## The Windows 7 artwork bug
+
+A tester running the Win7 test build on Windows 7 produced the first real client
+evidence of the artwork problem, and it disproved the reasoning the cover-mode
+default rested on. WMP asked this server for:
+
+```text
+GET /cover/https://i.discogs.com/....jpeg?locale=409   -> 404, once a second
+```
+
+Two things follow from that one line.
+
+**The URL arrives in the path, not the query.** No code here emits that shape - the
+only forms built are `/cover/album.jpg?url=` and
+`/cover/fai-<token>/album.jpg?url=`. The `/cover/` prefix is added by the client.
+`get_image()` read only `?url=`, found nothing, and returned 404. It now accepts
+the upstream URL from the path as well, and from the double-encoded spelling of
+it. A path that is not a URL still 404s.
+
+**In `direct` mode WMP does not fetch the CDN itself.** The premise behind making
+`direct` the default was that the client fetched the image straight from the
+upstream host, leaving no trace here - so "no `[IMAGE]` line" was read as "no
+problem". That was wrong. WMP rewrites the absolute cover URL back onto this
+server under `/cover/` and asks us for it. Every artwork fetch arrives here in
+every mode, and every one was 404ing. The absence of a log line was never
+evidence of a working fetch; it was evidence of an unexplained 404.
+
+`direct` remains the default. It is the shape a real FAI server sends, and
+nothing observed has beaten it - but it was never the thing that fixed artwork,
+and this release does not claim otherwise. WMP on Windows 7 still needs a
+confirming run to show artwork attached.
 
 ## Known limitations
 
@@ -75,8 +107,11 @@ theory.
 
 ## Testing
 
-523 passed, 0 failed.
+526 passed, 0 failed.
 
 Three assertions were passing for the wrong reason and were rewritten to match
 the stylesheet and behaviour that actually govern the page - one of them matched a
 literal that survived only inside a CSS comment.
+
+Three more were added for the Windows 7 artwork bug: the path form, its
+double-encoded spelling, and the token path that must still 404.

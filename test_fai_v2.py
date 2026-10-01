@@ -2522,6 +2522,40 @@ check("proxy-serves-the-path-token-form",
       f"the proxy must serve the tokenised path form, got {_rp.status_code}, "
       f"{len(_rp.data)}B")
 
+# 47a. REGRESSION, from a real Windows 7 run. In 'direct' mode WMP does NOT fetch
+#      the upstream image itself. It rewrites the absolute cover URL back onto
+#      the metadata host and asks THIS server for it, with the whole URL in the
+#      path and no query parameter at all:
+#
+#        GET /cover/https://i.discogs.com/....jpeg?locale=409   -> 404
+#
+#      retried once a second for as long as the window stayed open. get_image()
+#      read only ?url=, found nothing, and 404'd every fetch - so the default
+#      mode produced no artwork either. This is the shape that was never handled,
+#      and it is pinned here verbatim rather than described.
+_PATH_FORM = "/cover/" + _ARTU + "?locale=409"
+_rp2 = c.get(_PATH_FORM)
+check("proxy-serves-the-url-from-the-path",
+      _rp2.status_code == 200 and len(_rp2.data) > 1000,
+      f"WMP fetches /cover/<absolute-url>?locale=409 - the whole upstream URL is "
+      f"in the PATH with no ?url= at all, which is what WMP 12 does on Windows 7. "
+      f"Reading only the query string 404'd every artwork fetch. got "
+      f"{_rp2.status_code}, {len(_rp2.data)}B for {_PATH_FORM[:90]}")
+# The re-encoded spelling of the same path form must work too: a client that
+# percent-encodes the value must not 404 where the plain one succeeds.
+_rp3 = c.get("/cover/" + urllib.parse.quote(urllib.parse.quote(_ARTU, safe=""),
+                                            safe=""))
+check("proxy-serves-a-double-encoded-path-url",
+      _rp3.status_code == 200 and len(_rp3.data) > 1000,
+      f"a double-encoded URL in the path must be unwrapped like the ?url= form, "
+      f"got {_rp3.status_code}, {len(_rp3.data)}B")
+# A path that is NOT a URL must still 404 rather than being fetched blindly.
+_rp4 = c.get("/cover/fai-deadbeef/album.jpg")
+check("proxy-still-rejects-a-token-path-with-no-url",
+      _rp4.status_code == 404,
+      f"the tokenised path alone carries no upstream URL, so it must 404, got "
+      f"{_rp4.status_code}")
+
 # 47b. REGRESSION. MusicBrainz was the only provider whose artwork URL is a
 #      REDIRECT rather than an image, and WMP was handed the redirecting URL:
 #
