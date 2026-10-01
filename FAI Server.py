@@ -2253,29 +2253,55 @@ def get_image(ignore=None):
 @app.route("/redir/ZuneFAI/", methods=["GET", "POST"])
 @app.route("/redir/zunefai/", methods=["GET", "POST"])
 def zune_fai_probe():
-    """Log everything Zune sends to the Find Album Info endpoint."""
-    q = sorted(request.args.items())
-    hdrs = {k: v for k, v in request.headers.items()
-            if k.lower() in ("user-agent", "referer", "origin", "accept",
-                             "content-type", "host", "accept-language")}
-    log_line("ZUNE", f"=== {request.method} {request.url}")
-    log_line("ZUNE", f"  path   = {request.path}")
-    log_line("ZUNE", f"  query  = {q}")
-    log_line("ZUNE", f"  headers= {hdrs}")
-    body = request.get_data(cache=False) or b""
-    if body:
-        log_line("ZUNE", f"  body   ({len(body)}B) = {body[:600]!r}")
-    print(f"[ZUNE] {request.method} {request.url} query={q}")
+    """Tell Zune WHERE to POST its album search - the same trick WMP uses.
 
-    # Echo what was received so the dialog is visibly doing something rather
-    # than failing silently, which would send the user hunting in the wrong
-    # place for a rendering bug that is really a routing one.
+    Observed: Zune calls this with `apiVersion=1.0` and NOTHING else - no
+    album, no artist, no request id - and then shows "Can't connect to the
+    server" even though we answered 200. Reading those together: Zune is not
+    searching, it is asking WHERE to search. Returning an HTML page fails it,
+    which is why it reported a connection error despite the 200.
+
+    The WMP flow in this server already does exactly that: get_post_url()
+    answers /redir/getmdrcdposturlbackground with a bare URL that WMP then
+    POSTs to. This is the Zune equivalent, and it hands back a URL on the host
+    Zune already reaches us through, so nothing new has to resolve.
+    """
+    log_line("ZUNE", f"=== post-url probe {request.method} {request.url} "
+                     f"query={sorted(request.args.items())}")
+    print(f"[ZUNE] post-url probe query={sorted(request.args.items())}")
+    target = "http://redir.metaservices.microsoft.com/redir/zunesearch/"
+    return Response(target, mimetype="text/plain")
+
+
+@app.route("/redir/zunesearch/", methods=["GET", "POST"])
+def zune_search_probe():
+    """Where Zune POSTS the album once it has our URL. Log everything.
+
+    This is the request that carries the real parameter names - the ones the
+    binaries did not contain. Once it lands, the Zune flow can be built from
+    evidence instead of guesswork.
+    """
+    q = sorted(request.args.items())
+    form = sorted((request.form or {}).items())
+    hdrs = {k: v for k, v in request.headers.items()
+            if k.lower() in ("user-agent", "referer", "content-type",
+                             "content-length", "accept", "host")}
+    body = request.get_data(cache=False) or b""
+    log_line("ZUNE", f"=== SEARCH {request.method} {request.url}")
+    log_line("ZUNE", f"  query   = {q}")
+    if form:
+        log_line("ZUNE", f"  form    = {form}")
+    if body:
+        log_line("ZUNE", f"  body    ({len(body)}B) = {body[:800]!r}")
+    log_line("ZUNE", f"  headers = {hdrs}")
+    print(f"[ZUNE] SEARCH {request.method} query={q} form={form} "
+          f"body={len(body)}B")
+
     rows = "".join(f"<tr><td>{esc(k)}</td><td>{esc(v)}</td></tr>"
-                   for k, v in q) or "<tr><td colspan=2>(no query string)</td></tr>"
+                   for k, v in (q + form)) or "<tr><td colspan=2>(nothing)</td></tr>"
     return Response(
         '<html><body style="font-family:Segoe UI,Tahoma,sans-serif;padding:16px">'
-        '<h3>Zune FAI endpoint reached</h3>'
-        '<p>The server logged this request. Query parameters:</p>'
+        '<h3>Zune search endpoint reached</h3>'
         '<table border=1 cellpadding=4 style="border-collapse:collapse">'
         + rows + '</table></body></html>', mimetype="text/html")
 
