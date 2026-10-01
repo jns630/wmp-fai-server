@@ -2231,10 +2231,10 @@ def get_image(ignore=None):
     return Response("", 404)
 
 # ==========================================================
-# ZUNE FAI - RECONNAISSANCE
+# ZUNE FAI
 # ==========================================================
 # WMP reaches this server at musicmatch-ssl.xboxlive.com. Zune does not: its
-# metadata client (ZuneMBR.dll) hardcodes
+# metadata client hardcodes a different host entirely,
 #
 #     http://redir.metaservices.microsoft.com/redir/ZuneFAI/?apiVersion=1.0
 #
@@ -2243,13 +2243,19 @@ def get_image(ignore=None):
 # Zune dialling a retired Microsoft service and reporting exactly what the
 # screenshot shows: "Can't connect to the server."
 #
-# The parameter names Zune sends are NOT in the binaries - apiVersion is there,
-# but requestId / albumTitle / albumArtist / mbrId are not, because it builds
-# the query at runtime. So these routes LOG what actually arrives rather than
-# guessing at it. Everything goes to fai_server.log under the [ZUNE] tag.
+# That much was inferred from the network. The protocol below was NOT - it is
+# read out of the installed client (C:\Program Files\Zune), where the four FAI
+# paths, the &CD=/&wmid=/&requestID= query and the text/xml response type are
+# all present as literal strings in ZuneNativeLib.dll and ZuneNss.exe.
 #
-# The response is a deliberately plain page: the point of this pass is to see
-# the request, not to render a dialog the protocol may not match yet.
+# The important consequence: Zune asks for the same MDR-CD XML WMP does, on a
+# different host. It has no browser and no dialog - not one Zune binary contains
+# this app's UI, and its client feeds the reply straight to SaveMDRCD. So every
+# Zune path below is wired to the SAME handlers WMP uses. There is no separate
+# Zune dialog, and there is nothing left to guess at.
+#
+# Unmapped /redir/ paths are still logged, so anything this pass missed shows up
+# rather than 404ing quietly.
 @app.route("/redir/ZuneFAI/", methods=["GET", "POST"])
 @app.route("/redir/zunefai/", methods=["GET", "POST"])
 def zune_fai_probe():
@@ -2261,49 +2267,29 @@ def zune_fai_probe():
     searching, it is asking WHERE to search. Returning an HTML page fails it,
     which is why it reported a connection error despite the 200.
 
-    The WMP flow in this server already does exactly that: get_post_url()
-    answers /redir/getmdrcdposturlbackground with a bare URL that WMP then
-    POSTs to. This is the Zune equivalent, and it hands back a URL on the host
-    Zune already reaches us through, so nothing new has to resolve.
+    Zune's FAI client is ZuneNativeLib.dll (and ZuneNss.exe for the background
+    path). Read straight out of those binaries, the whole protocol is four
+    paths under http://redir.metaservices.microsoft.com/redir, which pairs up
+    exactly the way WMP's own four do:
+
+        /getmdrcdposturlzune/?            -> "where do I POST the disc?"
+        /getmdrcdposturlbackgroundzune/?  -> same, background variant
+        /getmdrcdzune/?                   -> the MDR-CD XML itself
+        /getmdrcdbackgroundzune/?         -> same, background variant
+
+    The query it appends is &CD= / &wmid= / &requestID=, it asks for text/xml,
+    and it hands the result to SaveMDRCD. So this is the same XML contract WMP
+    uses, on a different host - which is why every WMP endpoint here is reused
+    for Zune instead of being written twice.
     """
     log_line("ZUNE", f"=== post-url probe {request.method} {request.url} "
                      f"query={sorted(request.args.items())}")
     print(f"[ZUNE] post-url probe query={sorted(request.args.items())}")
-    target = "http://redir.metaservices.microsoft.com/redir/zunesearch/"
+    # Zune ignores this body - it fires on launch, before any disc is inserted,
+    # and the log shows it re-asking with no parameters at all. Answering with a
+    # URL keeps it harmless: if a future build does read it, it gets a real one.
+    target = "http://redir.metaservices.microsoft.com/redir/getmdrcdposturlzune/"
     return Response(target, mimetype="text/plain")
-
-
-@app.route("/redir/zunesearch/", methods=["GET", "POST"])
-def zune_search_probe():
-    """Where Zune POSTS the album once it has our URL. Log everything.
-
-    This is the request that carries the real parameter names - the ones the
-    binaries did not contain. Once it lands, the Zune flow can be built from
-    evidence instead of guesswork.
-    """
-    q = sorted(request.args.items())
-    form = sorted((request.form or {}).items())
-    hdrs = {k: v for k, v in request.headers.items()
-            if k.lower() in ("user-agent", "referer", "content-type",
-                             "content-length", "accept", "host")}
-    body = request.get_data(cache=False) or b""
-    log_line("ZUNE", f"=== SEARCH {request.method} {request.url}")
-    log_line("ZUNE", f"  query   = {q}")
-    if form:
-        log_line("ZUNE", f"  form    = {form}")
-    if body:
-        log_line("ZUNE", f"  body    ({len(body)}B) = {body[:800]!r}")
-    log_line("ZUNE", f"  headers = {hdrs}")
-    print(f"[ZUNE] SEARCH {request.method} query={q} form={form} "
-          f"body={len(body)}B")
-
-    rows = "".join(f"<tr><td>{esc(k)}</td><td>{esc(v)}</td></tr>"
-                   for k, v in (q + form)) or "<tr><td colspan=2>(nothing)</td></tr>"
-    return Response(
-        '<html><body style="font-family:Segoe UI,Tahoma,sans-serif;padding:16px">'
-        '<h3>Zune search endpoint reached</h3>'
-        '<table border=1 cellpadding=4 style="border-collapse:collapse">'
-        + rows + '</table></body></html>', mimetype="text/html")
 
 
 @app.route("/redir/<path:rest>", methods=["GET", "POST"])
@@ -2329,11 +2315,36 @@ def zune_unmapped_probe(rest):
 @app.route("/cdinfo/GetMDRCDPOSTURL.aspx")
 @app.route("/redir/getmdrcdposturl/")
 @app.route("/redir/getmdrcdposturlbackground/")
+@app.route("/redir/getmdrcdposturlzune/")
 @app.route("/redir/getmdrcdposturlbackgroundzune/")
 def get_post_url():
-    if "zune" in request.path.lower():
-        return Response("http://127.0.0.1/redir/getmdrcdbackgroundzune/", mimetype="text/plain")
-    return Response("http://127.0.0.1/redir/getmdrcdbackground/", mimetype="text/plain")
+    """Hand back the URL the client will POST the disc to. Text/plain, no HTML.
+
+    Zune's two post-url paths are not guesses - they are the literal strings in
+    ZuneNativeLib.dll and ZuneNss.exe, which pair up exactly as WMP's do:
+
+        /redir/getmdrcdposturlzune/?           -> /redir/getmdrcdzune/
+        /redir/getmdrcdposturlbackgroundzune/? -> /redir/getmdrcdbackgroundzune/
+
+    getmdrcdposturlzune/ was MISSING from this list, so Zune's first FAI
+    handshake fell through to the /redir/ catch-all below and got a plain-text
+    sentence instead of a URL. A client asking "where do I POST?" cannot parse
+    that, and gives up before it ever reaches the endpoint that would work.
+
+    The pairing matters: the non-background path must NOT be handed the
+    background endpoint, or Zune fetches metadata without ever opening the
+    dialog.
+    """
+    path = request.path.lower()
+    if "zune" in path:
+        target = ("/redir/getmdrcdbackgroundzune/" if "background" in path
+                  else "/redir/getmdrcdzune/")
+    else:
+        target = "/redir/getmdrcdbackground/"
+    # 127.0.0.1 rather than the requested Host: both musicmatch-ssl.xboxlive.com
+    # and redir.metaservices.microsoft.com resolve to it via the hosts file, and
+    # this is the form WMP has always been served.
+    return Response("http://127.0.0.1" + target, mimetype="text/plain")
 
 def _retarget_collection_id(xml, wmid):
     """Point every album-level collection GUID in the document at WMP's wmid.
@@ -2371,6 +2382,7 @@ def _retarget_collection_id(xml, wmid):
 @app.route("/cdinfo/GetMDRCD.aspx", methods=["GET", "POST"])
 @app.route("/redir/getmdrcdbackground/", methods=["GET", "POST"])
 @app.route("/redir/getmdrcdbackgroundzune/", methods=["GET", "POST"])
+@app.route("/redir/getmdrcdzune/", methods=["GET", "POST"])
 @app.route("/redir/getmdrcd/", methods=["GET", "POST"])
 def mdr_post():
     global LAST_XML
@@ -3260,45 +3272,14 @@ body { display: block; height: auto; overflow: auto; }
 <![endif]-->
 """
 
-@app.route("/redir/getmdrcdzune/")
-def zune_cd_dialog():
-    """Zune reaches the SAME dialog through /redir/getmdrcdzune/.
-
-    Logged from a real request, not guessed:
-        GET /redir/getmdrcdzune/?CD=3+96+45EA+B624+10E8E&locale=409&geoid=be
-            &system=ZuneClient&userlocale=2000&version=4.8.2345.0
-
-    That CD parameter is the disc table of contents, and unified_ui() already
-    reads raw_query_arg("CD"), so Zune gets the same search, the same track
-    selection and the same staged document as WMP with no second page.
-
-    This is a wrapper rather than a second @app.route on unified_ui itself: two
-    rules on one view make url_for("unified_ui") resolve to whichever is
-    registered last, which silently turned every legacy browser redirect to
-    /FAI/ui into /redir/getmdrcdzune/.
-
-    /redir/ZuneFAI/?apiVersion=1.0 is a different thing entirely. Zune calls it
-    first, with no album and no artist, and ignores whatever it answers - it is
-    a capability probe, not the dialog. The CD flow is the one that matters.
-    """
-    return unified_ui()
-
-
 @app.route("/FAI/ui")
 def unified_ui():
-    # Zune reaches the SAME dialog through /redir/getmdrcdzune/ - logged from a
-    # real request, not guessed:
-    #   GET /redir/getmdrcdzune/?CD=3+96+45EA+B624+10E8E&locale=409&geoid=be
-    #       &system=ZuneClient&userlocale=2000&version=4.8.2345.0
-    # That CD parameter is the disc table of contents, and this handler already
-    # reads raw_query_arg("CD"), so serving the dialog here needs no separate
-    # page and no duplicated template - Zune gets the same search, the same
-    # track selection and the same staged document as WMP.
-    #
-    # /redir/ZuneFAI/?apiVersion=1.0 is a different thing entirely: Zune calls
-    # it first, with no album and no artist, and ignores whatever it answers.
-    # It is a capability probe, not the dialog, and returning HTML from it is
-    # harmless. The CD flow is the one that matters.
+    # Zune does NOT reach this dialog. It has no browser host: of every binary in
+    # C:\Program Files\Zune, none contains this page's title, and only
+    # msidcrl40.dll (the Windows Update component) even mentions WebBrowser. Its
+    # FAI client is ZuneNativeLib.dll, which POSTs a disc id and reads MDR-CD XML
+    # back through SaveMDRCD. So /redir/getmdrcdzune/ is XML delivery - it is
+    # routed to mdr_post(), not here.
     q = (request.args.get("artist", "") + " " + request.args.get("album", "")).strip()
     wmp_artist = request.args.get("artist", "")
     wmp_album = request.args.get("album", "")

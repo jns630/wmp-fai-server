@@ -177,22 +177,21 @@ python build_exe.py
 Produces `dist/WMP-FAI-Server\`. The build is committed so it is reproducible
 rather than something you have to reverse-engineer.
 
-### Zune (reconnaissance — not yet a working flow)
+### Zune
 
-Zune is **not** WMP with a different skin. Its metadata client, `ZuneMBR.dll`,
-hardcodes a completely separate endpoint (the strings are UTF-16, which is why a
-plain text search of the install finds nothing):
+Zune is **not** WMP with a different skin. Its metadata client hardcodes a
+completely separate host (the strings are UTF-16, which is why a plain text
+search of the install finds nothing):
 
 ```text
 http://redir.metaservices.microsoft.com/redir/ZuneFAI/?apiVersion=1.0
 http://images.metaservices.microsoft.com/cover        ← artwork host
 ```
 
-Different host, different path, and plain **HTTP** with no TLS — so the hosts
-entry for WMP's `musicmatch-ssl.xboxlive.com` does nothing for Zune, and Zune
-dialled a retired Microsoft service. That is the whole of the *"Can't connect to
-the server. Please try again later."* dialog: **the request never reached this
-server.**
+Different host, and plain **HTTP** with no TLS — so the hosts entry for WMP's
+`musicmatch-ssl.xboxlive.com` does nothing for Zune, and Zune dialled a retired
+Microsoft service. That is the whole of the *"Can't connect to the server.
+Please try again later."* dialog: **the request never reached this server.**
 
 You need two more hosts entries alongside the WMP one:
 
@@ -201,27 +200,56 @@ You need two more hosts entries alongside the WMP one:
 127.0.0.1 images.metaservices.microsoft.com
 ```
 
-`/redir/ZuneFAI/` is served and **logs every request it receives** — method,
-path, query parameters, relevant headers and body — to `fai_server.log` under
-the `[ZUNE]` tag. It replies with a plain page listing what arrived, so a
-successful connection is obvious rather than looking like another failure.
+#### The protocol is WMP's, on a different host
 
-Trigger the Zune dialog once, then look for `[ZUNE]` lines in the log:
+The rest was read out of the installed client rather than guessed.
+`C:\Program Files\Zune\ZuneNativeLib.dll` (and `ZuneNss.exe`, for the background
+path) contain the whole FAI protocol as literal strings:
+
+```text
+/getmdrcdposturlbackgroundzune/?   /getmdrcdposturlzune/?
+/getmdrcdbackgroundzune/?          /getmdrcdzune/?
+&requestID=   &wmid=   &CD=   text/xml            SaveMDRCD
+```
+
+Four paths that pair up exactly the way WMP's own four do, the same `&CD=` /
+`&wmid=` / `&requestID=` query, the same `text/xml` reply, handed to
+`SaveMDRCD`. So **every Zune route here serves the same handler WMP uses** —
+there is no separate Zune implementation to drift out of sync.
+
+#### Zune has no dialog
+
+An earlier version of this document claimed Zune would open the FAI dialog, and
+a route was added to serve it at `/redir/getmdrcdzune/`. That was wrong, and it
+was the reason Zune kept reporting a connection error while the log showed a
+`200`:
+
+- **No Zune binary contains this app's UI.** Not one of them contains the
+  dialog's title, and the only one that even mentions `WebBrowser` is
+  `msidcrl40.dll`, the Windows Update component.
+- **`/redir/getmdrcdzune/` is metadata delivery.** The binary pairs it with
+  `text/xml` and `SaveMDRCD`, exactly like WMP's `/redir/getmdrcd/`. Serving it
+  HTML gave Zune a 200 it could not parse, which it reports as a failure.
+- **`getmdrcdposturlzune/` was missing entirely.** Zune's first handshake — *"where
+  do I POST the disc?"* — fell through to the unmapped-`/redir/` catch-all, which
+  answers with a sentence rather than a URL. It never reached the endpoint that
+  would have worked.
+
+An earlier `/redir/zunesearch/` endpoint was also invented; that path exists in
+no Zune binary and has been removed.
+
+Unmapped `/redir/<path>` requests are still logged under the `[ZUNE]` tag, so
+anything missed shows up rather than 404ing quietly. Flask prefers explicit
+routes over that catch-all, so **every WMP endpoint is unaffected** — verified.
 
 ```powershell
 Select-String -Path fai_server.log -Pattern '\[ZUNE\]' | Select-Object -Last 20
 ```
 
-An unmapped `/redir/<path>` is logged too, so if Zune wants anything beyond
-`ZuneFAI` it will show up rather than 404 quietly. Flask prefers explicit routes
-over that catch-all, so **every WMP endpoint is unaffected** — verified.
-
-> The parameter names Zune sends are **not** in its binaries (`apiVersion` is,
-> but `requestId` / `albumTitle` / `artist` / `mbrId` are not — it builds the
-> query at runtime), which is exactly why the endpoint logs rather than guesses.
-> Nothing is written back to Zune yet: WMP tags through
-> `IWMPCDDVDWizardExternal`, and whether Zune exposes an equivalent COM object is
-> **unverified**. Do not assume this can tag anything until that is confirmed.
+> Zune has no equivalent of WMP's `IWMPCDDVDWizardExternal`, so nothing is
+> written *back* to it — the tags land in the MDR-CD XML Zune consumes, which is
+> the same mechanism WMP uses, but there is no separate Zune tagging path to
+> verify.
 
 ---
 
@@ -840,10 +868,12 @@ and also recovers URLs that arrive double-encoded from older staged documents.
 | `/cdinfo/GetMDRCDPOSTURL.aspx` | GET | Discovery — tells WMP where to fetch metadata |
 | `/redir/getmdrcdposturl/` | GET | Same, legacy path |
 | `/redir/getmdrcdposturlbackground/` | GET | Same, background variant |
-| `/redir/getmdrcdposturlbackgroundzune/` | GET | Zune variant |
+| `/redir/getmdrcdposturlzune/` | GET | Zune variant |
+| `/redir/getmdrcdposturlbackgroundzune/` | GET | Zune variant, background |
 | `/cdinfo/GetMDRCD.aspx` | GET/POST | Metadata delivery (`MDR-CD` XML) |
 | `/redir/getmdrcdbackground/` | GET/POST | Metadata delivery, legacy |
 | `/redir/getmdrcdbackgroundzune/` | GET/POST | Metadata delivery, Zune |
+| `/redir/getmdrcdzune/` | GET/POST | Metadata delivery, Zune |
 | `/redir/getmdrcd/` | GET/POST | Metadata delivery, legacy |
 | `/cdinfo/submittoc.aspx` and friends | GET/POST | Legacy TOC submission → dialog |
 
@@ -931,8 +961,12 @@ Please read this section before assuming something is broken.
 - **Track-level art or acoustic matching.** The whole album's cover is applied.
 - **Lyrics, release-group selection, or "best match" ranking.** Results are ordered
   by provider score; there is no re-ranking across sources.
-- **Zune flows are only partially wired.** The Zune redirect routes exist and
-  respond, but the Zune client has not been tested end to end.
+- **Zune has not been tested end to end.** Every Zune route now serves the same
+  handler as its WMP twin, and the paths are taken from the installed client's
+  own binaries — but the Zune software itself has not yet been driven through a
+  real disc, so treat this as *protocol-matched*, not *proven*.
+- **There is no dialog for Zune.** Zune ships no browser host for the FAI UI, so
+  it cannot offer album selection; it consumes the MDR-CD XML directly.
 - **Windows Media Player 11 and earlier.** Only WMP 12 is supported; the COM
   surface and the dialog host differ on older players.
 - **No multi-user or remote access.** The server binds `0.0.0.0` but has **no

@@ -215,6 +215,91 @@ loc = r.headers.get("Location", "")
 check("toc-plus-survives-redirect", "toc=" + plus_toc in loc,
       f"loc={loc!r}")
 
+# 11b. Zune speaks the same MDR-CD protocol as WMP on a different host. The four
+#      paths below are the literal strings in the installed client
+#      (ZuneNativeLib.dll / ZuneNss.exe), so these tests are pinned to what the
+#      binary actually asks for rather than to a guess.
+#
+#      Zune's two post-url paths pair up the way WMP's do. getmdrcdposturlzune/
+#      was missing entirely, which sent the first handshake to the /redir/
+#      catch-all - which answers with a sentence, not a URL, so Zune gave up
+#      before ever reaching the endpoint that would have worked.
+r = c.get("/redir/getmdrcdposturlzune/")
+check("zune-post-url",
+      r.status_code == 200 and r.data.decode().strip().endswith("/redir/getmdrcdzune/"),
+      f"code={r.status_code} body={r.data[:120]!r}")
+
+r = c.get("/redir/getmdrcdposturlbackgroundzune/")
+check("zune-background-post-url",
+      r.status_code == 200
+      and r.data.decode().strip().endswith("/redir/getmdrcdbackgroundzune/"),
+      f"code={r.status_code} body={r.data[:120]!r}")
+
+# The non-background path must not be handed the background endpoint, or Zune
+# fetches metadata and never opens the dialog.
+check("zune-post-url-pairs-are-distinct",
+      c.get("/redir/getmdrcdposturlzune/").data
+      != c.get("/redir/getmdrcdposturlbackgroundzune/").data,
+      "both Zune post-url paths returned the same endpoint")
+
+# Zune is NOT a browser client: it wants the XML, not the dialog. It appends
+# &CD= / &wmid= / &requestID= and feeds the reply straight to SaveMDRCD.
+#
+# These deliberately reuse the documents staged in section 7 instead of posting
+# a new one. Staging sets LAST_XML and rewrites PENDING_WRITE, and the suite's
+# later write-ownership tests (33/34) assert against that shared state, so
+# inserting a document here makes the run reach a live provider lookup and hang.
+# Keying off REQ_A/TOC_A proves the same thing - the Zune path resolves staged
+# XML and returns it as XML - with no side effects.
+zune_toc = urllib.parse.quote("TOC_A")
+r = c.get("/redir/getmdrcdzune/?requestid=REQ_A")
+zune_body = r.data.decode("utf-8", "ignore")
+check("zune-delivers-mdr-xml",
+      r.status_code == 200 and "Test Album Alpha" in zune_body
+      and r.mimetype == "text/xml",
+      f"code={r.status_code} mimetype={r.mimetype} body={r.data[:200]!r}")
+
+# Zune names the disc with &CD=, the same argument WMP uses - read raw so the
+# TOC survives intact.
+r = c.get("/redir/getmdrcdzune/?CD=" + zune_toc)
+check("zune-delivers-by-toc",
+      r.status_code == 200 and "Test Album Alpha" in r.data.decode("utf-8", "ignore"),
+      f"code={r.status_code} body={r.data[:200]!r}")
+
+r = c.get("/redir/getmdrcdbackgroundzune/?toc=" + zune_toc)
+check("zune-background-delivers-mdr-xml",
+      r.status_code == 200 and "Test Album Alpha" in r.data.decode("utf-8", "ignore"),
+      f"code={r.status_code} body={r.data[:200]!r}")
+
+# The dialog must NOT be served to Zune. No Zune binary contains this app's UI,
+# so an HTML page here is exactly the wrong answer and is what made Zune report
+# a connection error despite a 200.
+r = c.get("/redir/getmdrcdzune/?requestid=REQ_A")
+check("zune-never-gets-the-dialog",
+      "Find Album Information" not in r.data.decode("utf-8", "ignore"),
+      "the HTML dialog leaked into the Zune XML endpoint")
+
+# ...and the dialog itself is untouched for WMP.
+r = c.get("/FAI/ui")
+check("wmp-dialog-still-served",
+      r.status_code == 200 and "Find Album Information" in r.data.decode("utf-8", "ignore"),
+      f"code={r.status_code}")
+
+# Zune's capability probe answers with a URL, not a page, and points at a path
+# that actually exists rather than at an invented one.
+r = c.get("/redir/ZuneFAI/?apiVersion=1.0")
+check("zune-fai-probe-returns-a-url",
+      r.status_code == 200 and r.data.decode().strip().startswith("http://")
+      and "zunesearch" not in r.data.decode(),
+      f"code={r.status_code} body={r.data[:120]!r}")
+
+# The invented /redir/zunesearch/ endpoint is gone; unmapped paths still log
+# rather than 404ing quietly.
+r = c.get("/redir/zunesearch/")
+check("zunesearch-endpoint-removed",
+      r.status_code == 200 and "no handler" in r.data.decode("utf-8", "ignore"),
+      f"code={r.status_code} body={r.data[:120]!r}")
+
 # 12. Staged XML keyed by a '+' TOC is retrievable by that same TOC
 payload_plus = {"album": dict(album, title="Plus TOC Album"),
                 "selected_tracks": [album["tracks"][0]],
