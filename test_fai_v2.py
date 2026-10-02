@@ -10,7 +10,7 @@ import re
 import sys
 import urllib.parse
 
-BASE = r"d:\WMC_EPG\New folder (4)\red alert 3 patch dx 10\FAI Server.py"
+BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FAI Server.py")
 _DIR = os.path.dirname(BASE)
 _req_pkgs = set()
 try:
@@ -3733,3 +3733,4 @@ if FAIL:
     for f in FAIL:
         print(f"  FAILED: {f}")
     sys.exit(1)
+

@@ -29,9 +29,19 @@ PyInstaller installed. Create one with:
 
     py -3.8 -m venv .venv38
     .venv38\\Scripts\\python -m pip install -U pip
-    .venv38\\Scripts\\python -m pip install flask requests urllib3 cryptography pyinstaller
+    .venv38\\Scripts\\python -m pip install flask requests urllib3 cryptography pyinstaller chardet
 
-Then run it with that interpreter:
+`chardet` is not in the original list above, and it is there because of
+something observed while building this: `requests` emits a
+`RequestsDependencyWarning: Unable to find acceptable character detection
+dependency (chardet or charset_normalizer)` on every single launch without it,
+and on a test build that warning lands in the console of someone trying to
+work out why their store is not appearing. `charset_normalizer` is the usual
+answer, but its current releases have dropped Python 3.8, so on this
+interpreter it installs and then fails to import. `chardet` is pure Python,
+still supports 3.8, and satisfies `requests` properly.
+
+Run it with that interpreter:
 
     .venv38\\Scripts\\python build_exe_win7.py
 
@@ -121,6 +131,10 @@ def main():
         "--workpath", str(WORK),
         "--specpath", str(WORK),
         "--version-file", str(VERSION_FILE),
+        # online_store.ini is DATA, not an import, so PyInstaller's dependency
+        # analysis cannot see it. Same reason and same fix as build_exe.py.
+        # "." is the data root, which is _internal\ in an onedir build.
+        "--add-data", "%s;." % (ROOT / "online_store.ini"),
         # No "--": PyInstaller's parser rejects one, and the entry path is a
         # single argv element so its spaces and parentheses are already safe.
         str(ENTRY),
@@ -134,9 +148,44 @@ def main():
     if not exe.exists():
         raise SystemExit(f"build reported success but {exe} is missing")
 
+    # Ship the registration script beside the EXE. It is not bundled INTO the
+    # binary: it has to stay an editable text file the user can read before
+    # running, and it has to live next to the EXE because that is how it finds
+    # it. Everything this project added to the Windows 7 workflow has to be in
+    # the folder, or the tester ends up on a Windows 7 machine with a store
+    # they cannot register.
+    installer = ROOT / "install-online-store-win7.bat"
+    if not installer.exists():
+        raise SystemExit(f"missing registration script: {installer}")
+    out_dir = DIST / NAME
+    shutil.copy2(installer, out_dir / installer.name)
+
+    # A run of the installer leaves a record of the hosts entries IT added, so
+    # that uninstall can remove exactly those. That file is per-machine state:
+    # if one is present here it describes edits made on the machine that built
+    # this, and shipping it means the tester on Windows 7 uninstalls hosts
+    # entries this script never added - the precise damage the record exists to
+    # prevent, arriving as a "clean" build. It must never ship.
+    stale_record = out_dir / "online-store-hosts-installed.txt"
+    if stale_record.exists():
+        stale_record.unlink()
+        print(f"removed stale {stale_record.name} (per-machine installer state)")
+
+    # The Discogs token is deliberately NOT copied into the distribution. It is
+    # a credential and this artifact gets copied between machines; the build
+    # says out loud that a tester has to supply their own instead.
+    settings = ROOT / "local_settings.py"
+    print("\nNOTE: Discogs will be OFF in this build unless the tester copies")
+    print(f"      {settings.name} (containing DISCOGS_TOKEN) next to the .exe.")
+    if settings.exists():
+        print("      A copy exists in the source tree - copy it manually.")
+    else:
+        print("      No copy exists in the source tree either.")
+
     mb = exe.stat().st_size / (1024 * 1024)
     print(f"\nbuilt {exe}  ({mb:.1f} MB exe, onedir)")
     print(f"built from commit {COMMIT} on Python {sys.version.split()[0]}")
+    print(f"shipped {installer.name} beside it")
     print("\nTEST BUILD for Windows 7/8/8.1 - not the official release.")
     print(f"The official 1.1.1 build in {ROOT / 'dist'} was not touched.")
     print("Untested on a real Windows 7 machine: see the notes below.")

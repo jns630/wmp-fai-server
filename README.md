@@ -27,6 +27,7 @@ actually tag discs, run the server on your own Windows machine.
 - [Screenshot](#screenshot)
 - [Quick start](#quick-start)
 - [How to use](#how-to-use)
+- [WMP Online Store](#wmp-online-store)
 - [How it works](#how-it-works)
 - [Route reference](#route-reference)
 - [What works](#what-works)
@@ -59,6 +60,9 @@ server stands in for that service and provides:
 - **Direct COM writes** so the tags land even when WMP's own HTTP fetch path is
   unreliable.
 - **A diagnostics dashboard** at `/fai_status` plus a self-rotating log file.
+- **An optional WMP Online Store** — see [WMP Online Store](#wmp-online-store).
+  Off by default; a local fake music storefront that WMP 11/12 can discover
+  through its native Online Stores tab.
 
 
 
@@ -342,6 +346,23 @@ http://127.0.0.1/FAI/ui?artist=The+Beatles&album=Abbey+Road
 
 ### Optional: Discogs as a third provider
 
+Discogs needs a personal access token, so it is **off unless one is
+configured**. Without a token every Discogs code path returns empty and the
+dialog behaves exactly as it did before Discogs existed — which is the whole
+point of gating it, so a missing credential can never break search.
+
+The token is read from, in order: the `DISCOGS_TOKEN` environment variable,
+then `local_settings.py` **beside the executable**, then `local_settings.py`
+next to `FAI Server.py`. A frozen build needs the file beside the `.exe` —
+copy it into the same folder. A build with no token shows no error at all, it
+simply has no Discogs results, which is very easy to misread as "Discogs has
+nothing for this album".
+
+```python
+# local_settings.py - git-ignored, never committed
+DISCOGS_TOKEN = "your-token"
+```
+
 By default the Albums list is built from **iTunes** and **MusicBrainz**. If you
 have a [Discogs personal access token](https://www.discogs.com/settings/developers),
 Discogs joins as a **third** provider in the same list, with its own purple
@@ -389,6 +410,163 @@ providers.
 ### Choosing which tracks to write
 
 On the confirmation page:
+
+---
+
+## WMP Online Store
+
+> [!NOTE]
+> **Optional, and off by default.** Everything else on this page works exactly
+> as it did before this feature existed. If `online_store.ini` is missing or
+> `enabled = false`, the store is simply absent and the FAI server is
+> untouched.
+
+WMP 11/12 has a second, separate legacy subsystem: **Online Stores**. It is
+unrelated to album metadata — it is the tab WMP shows a music store's webpage
+in, and it is still present in WMP 12 on Windows 11.
+
+This project implements a **Type 2 commerce store** called *Legacy Music
+Store*: a completely local, working fake music storefront that WMP can
+discover, display and browse through its native Online Stores tab. It is a
+development target, not a real store, and it is deliberately not named after
+any commercial provider.
+
+```
+Windows Media Player
+        |
+        v   Online Stores tab
+   Fake Digital Music Store          (Type 2 commerce, this project)
+        |
+        v   ServiceTask1 URL -> http://127.0.0.1/online-store/
+   HTML storefront
+        |
+        v
+   Existing Flask server              (same process, same port 80)
+```
+
+### No COM component is involved
+
+Microsoft's own feature matrix marks the `IWMPSubscriptionService` plug-in
+**"No"** for a Type 2 commerce store. The plug-in exists to vend DRM licences,
+and a commerce store has none. Everything needed is a **ServiceInfo XML
+document** plus a few **registry entries**, both of which this project
+generates. The installer has a `--register-plugin-dll` option for a future
+Type 2 *music* store that genuinely ships one; this project ships no DLL.
+
+### Trying it
+
+```powershell
+# 1. Enable it (see online_store.ini for every option)
+notepad online_store.ini          # set enabled = true
+
+# 2. Preview exactly what will be written - no changes made
+python "FAI Server.py" install-online-store --dry-run
+
+# 3. Install. The HKLM half needs an elevated console.
+python "FAI Server.py" install-online-store
+
+# 4. Start the server, then browse the store in any browser first
+python "FAI Server.py"
+Start-Process http://127.0.0.1/online-store/
+
+# 5. Restart Windows Media Player and open the Online Stores tab
+```
+
+To remove it again — only the entries this project wrote are touched:
+
+```powershell
+python "FAI Server.py" uninstall-online-store
+```
+
+**On Windows 7, use the shipped script instead.** `install-online-store-win7.bat`
+sits beside the EXE and does the whole job in one double-click:
+
+```
+install-online-store-win7.bat              install (asks for Administrator)
+install-online-store-win7.bat /D           preview only, changes nothing
+install-online-store-win7.bat uninstall    remove it again
+```
+
+It elevates itself, adds the **hosts entries** WMP needs — including
+`images.metaservices.microsoft.com`, without which Windows 7 delivers no
+artwork at all — and then calls the EXE's own `install-online-store`. The EXE
+stays the single source of truth for what gets written; the script only handles
+the elevation, the hosts file and the reporting.
+
+Run it with `/D` first. It prints every change without making any, which is the
+sane thing to do before a script edits a system file you did not write.
+
+It records which hosts lines it added, so `uninstall` removes exactly those.
+With no record — say you copied the folder from another machine — it removes all
+five and says so, rather than silently leaving a half-registered store or
+quietly deleting an entry that was already there.
+
+Diagnostics, which answer most "my store does not appear" questions:
+
+```powershell
+python "FAI Server.py" online-store-status
+Invoke-RestMethod http://127.0.0.1/online-store/api/status | ConvertTo-Json -Depth 6
+```
+
+#### Discogs is off until you supply a token
+
+If the album dialog shows MusicBrainz and Cover Art Archive results but **no
+Discogs rows at all**, that is almost always a missing token rather than a
+network problem. Discogs is gated on a personal access token, and with no token
+every Discogs code path returns empty rather than raising — so the provider is
+simply *absent* from the list, with no error anywhere.
+
+This bites a built EXE specifically. A source checkout finds
+`local_settings.py` next to `FAI Server.py`, but a PyInstaller build puts
+`__file__` inside `_internal\` while your settings file sits beside the `.exe`.
+The loader searches both, so copying `local_settings.py` next to the EXE is all
+it takes. Confirm with:
+
+```bat
+WMP-FAI-Server-Win7Test.exe online-store-status
+```
+
+which prints either `discogs : configured` or `discogs : NO TOKEN`. The token
+itself is never printed — only whether one was found.
+
+### Routes
+
+| Route | Purpose |
+|---|---|
+| `/online-store/` | The storefront — the URL advertised as `ServiceTask1` |
+| `/online-store/album/<id>` | One album and its track list |
+| `/online-store/search?q=` | Search the active provider |
+| `/online-store/serviceinfo.xml` | The ServiceInfo document WMP fetches |
+| `/online-store/nav` | Base for `External.NavigateTaskPaneURL()` |
+| `/online-store/downloads` | The `DownloadStatus` target |
+| `/online-store/art/<id>` | Generated cover art (PNG) |
+| `/online-store/buy` (POST) | Resolve a track to a playable file |
+| `/online-store/api/albums`, `/api/album/<id>`, `/api/search` | JSON catalog |
+| `/online-store/api/status` | Config, provider, and registry diagnostics |
+
+### The catalog is synthesised, not shipped
+
+Every track is a decaying sine tone generated at purchase time with the stdlib
+`wave` module from a hash of its own id. The repository stays small, the
+content is provably not anyone's copyrighted recording, and the delivery path
+(provider → disk → playable file) is genuinely exercised rather than mocked.
+The test suite opens a bought file with `wave` and checks its header.
+
+### Adding a real store later
+
+The seam is `online_store/providers/base.py`: a `StoreProvider` with six
+methods, registered with `@register_provider`, selected by `provider =` in
+`online_store.ini`. Nothing else changes — not the storefront, not the
+ServiceInfo document, not the installer, not the WMP-facing URLs. A real
+adapter (7digital, Bandcamp, Qobuz, Juno Download) must use that provider's
+**official API**: no scraping, no working around authentication or rate limits,
+no DRM handling.
+
+`docs/ONLINE_STORE.md` has the full research notes, and — importantly — marks
+every claim as **documented**, **verified against the WMP 12 binaries on this
+machine**, or **inferred**. The largest inferred piece is how a locally-hosted
+store's ServiceInfo URL is resolved; that file explains exactly how to test it
+and what to try if the guess is wrong.
 
 ---
 
@@ -533,6 +711,129 @@ What that leaves is the one thing the server cannot see: WMP fetched the cover
 at 15:43:43 and 15:43:45 and still did not attach it. Re-applying the *same*
 album at 15:52 produced a byte-identical cover URL (the token is
 `md5(album_id)[:8]` = `51822f10`), so WMP did not re-fetch it at all.
+
+#### Artwork on Windows 7 — the hosts entry, and the cover URL shape
+
+Two separate things had to be fixed, and only the second was a code bug. On
+Windows 7 the album came back with **no picture at all**, and the log showed
+the request arriving and then being refused:
+
+```
+GET /cover/i.discogs.com/some-image.jpg?locale=409   -> 404
+```
+
+**1. The hosts entry (setup, not code).** Windows 7 delivers artwork through
+`images.metaservices.microsoft.com`, so that name must resolve to this server
+or the request goes to a dead Microsoft host and nothing is delivered:
+
+```
+127.0.0.1 images.metaservices.microsoft.com
+```
+
+It belongs alongside the other entries, and the generated certificate already
+covers it (see `TLS_HOSTS` in `ensure_ssl_certificates()`), so no certificate
+work is needed. `install-online-store-win7.bat` adds it for you — see
+[WMP Online Store](#wmp-online-store).
+
+**2. The cover URL shape (the actual bug).** With that host pointed here, WMP
+does **not** send back the URL we handed it in the document. It sends the
+*partial* URL — no scheme — terminated with an image extension:
+
+| Sent by the client | Before | Now |
+|---|---|---|
+| `/cover/i.discogs.com/x.jpg` | 404, no fetch attempted | fetches `https://i.discogs.com/x.jpg` |
+| `/cover/coverartarchive.org/release/1234/front-500.jpg` | 404 | fetches `https://coverartarchive.org/release/1234/front-500.jpg` |
+
+`get_image()` required the path to start with `http`, so every scheme-less
+request was discarded **before any fetch was attempted** and answered a bare
+404 — precisely the reported symptom. The scheme is now restored (these hosts
+are all HTTPS) and the trailing extension is kept, because on every artwork
+URL this project emits it is genuinely part of the path.
+
+An internal path that merely *looks* like a URL — `/cover/fai-<token>/album.jpg`,
+our own relative art path — is deliberately **not** rewritten into a fetch, so
+the two forms cannot collide.
+
+#### There is no COM route for artwork (checked, not assumed)
+
+It is tempting to wonder whether the artwork could be handed over through COM
+instead — WMP 12 uses COM heavily for the tag write
+(`IWMPCDDVDWizardExternal`), so the question is fair. It was checked against
+the installed binaries rather than reasoned about:
+
+* `IWMPCDDVDWizardExternal`'s full member list in `wmp.dll` is `WriteNames`,
+  `WriteNamesEx`, `ReturnToMainTask`, `GetMDQByRequestID`, `EditMetadata`,
+  `BuyCD`, `RenameRegroupFiles`, `IsMetadataAvailableForEdit`,
+  `OnChangeViewError`, `OnChangeViewOnlineListError`. **There is no artwork
+  member.** COM writes *tags*, not pictures.
+* `SetArtwork`, `GetArtwork`, `PutAlbumArt`, `WriteArtwork`, `IWMPArtwork`,
+  `IWMPMetadataReader`, `IWMPMetadataWriter` — **zero occurrences**, ASCII or
+  UTF-16, anywhere in `wmp.dll`.
+* `AlbumArt` does appear 40 times, which looks promising until its neighbours
+  are read: `NewAlbumArt` sits inside a run of **UPnP / DIDL-Lite** strings
+  (`upnp:album`, `ContentDirectory`, `urn:schemas-upnp-org`), and
+  `AlbumArtSmall.jpg` / `Folder.jpg` sit beside `largeCoverParams`,
+  `smallCoverParams`, `dataProviderLogo`. Those are the names WMP uses for its
+  own **local cache files** and for DLNA advertisements — not an injection API.
+* `IWMPCDDVDWizardExternal` is itself labelled *"Not Public. Internal interface
+  used by Windows Media Player."*
+
+So the metadata document is the only artwork channel WMP offers, which is why
+the fixes above are worth the trouble. The COM plug-in
+(`IWMPSubscriptionService`) licenses *playback*, is explicitly not required for
+a commerce store, and would not carry artwork either.
+
+
+
+On Windows 7 the album came back with **no picture at all**, and the log showed
+why:
+
+```
+GET /cover/https://i.discogs.com/....jpeg?locale=409   -> 404, once a second
+```
+
+WMP was not going to the CDN. It took the absolute URL out of
+`largeCoverParams`, **rewrote it back onto this host** under `/cover/`, and
+asked us for it — so with the default `direct` mode the artwork only ever
+appears if that client-side rewrite succeeds, and on Windows 7 it does not.
+
+The rewrite itself is *not* the bug: `get_image()` accepts the URL in the path
+as well as in the query, and that was verified over a real socket, not only
+through the test client. Relying on a client to construct the fetch URL is
+simply the fragile shape. For Windows 7 the document now **points at the cover
+endpoint itself**:
+
+```xml
+<largeCoverParams>/cover/fai-1a2b3c4d/album.jpg?url=https%3A%2F%2F...%2Fart.jpg</largeCoverParams>
+```
+
+There is no rewriting left for the client to get wrong.
+
+**This is scoped to Windows 7 and cannot leak.** WMP 12 on Windows 7 sends an
+identical User-Agent to WMP 12 on Windows 11 (`WindowsMediaPlayer/12.0...`), so
+the client genuinely *cannot* be identified from the request — any rule keyed on
+the User-Agent would change Windows 11 behaviour too. What does differ is the
+**artifact**: the Windows 7 test build is a separate binary with `Win7Test` in
+its name. So the switch keys off that:
+
+| Deployment | Cover URL |
+|---|---|
+| Windows 7 test EXE (`…-Win7Test.exe`) | `/cover/…` (via this server) |
+| Official EXE, Windows 11 | upstream URL, unchanged |
+| Source checkout, Windows 11 | upstream URL, unchanged |
+| WMC / WMP 7-9 (no browser host) | `/cover/…` — same fragile rewrite |
+
+`$env:WMP_ART_MODE` overrides all of it, as before (`direct`, `proxy`,
+`relative`).
+
+`test_art_win7.py` asserts all of it: the scheme-less form is served *and*
+fetches the right `https://` URL (not merely that something came back), the
+internal paths are not rewritten, the old full-URL rewrite still works, and the
+Win7 build gets the `/cover/` shape while **nothing else does** — the official
+build, the source checkout and a Windows 11 WMP 12 User-Agent all still get the
+direct URL. It also checks the emitted URL still carries no bare `&`, which
+would make the whole document not-well-formed and cost you the *tags* as well
+as the artwork.
 
 #### Artwork on a CD rip
 
@@ -929,6 +1230,21 @@ The legacy `submittoc` / `GetMDRCD.asp` / `QueryTOC.asp` routes are
 | `/get_image`, `/cover/album.jpg` | GET | Cached artwork proxy |
 | `/static/noart.png` | GET | Generated "no artwork" placeholder |
 
+### Online Store (only when `enabled = true`)
+
+| Route | Method | Purpose |
+|---|---|---|
+| `/online-store/` | GET | The storefront, advertised as `ServiceTask1` |
+| `/online-store/album/<id>` | GET | One album and its track list |
+| `/online-store/search?q=` | GET | Search the active provider |
+| `/online-store/serviceinfo.xml` | GET | The ServiceInfo document WMP fetches |
+| `/online-store/nav` | GET | Base for `External.NavigateTaskPaneURL()` |
+| `/online-store/downloads` | GET | The `DownloadStatus` target |
+| `/online-store/art/<id>` | GET | Generated cover art (PNG) |
+| `/online-store/buy` | POST | Resolve a track to a playable file |
+| `/online-store/api/albums`, `/api/album/<id>`, `/api/search` | GET | JSON catalog |
+| `/online-store/api/status` | GET | Config, provider and registry diagnostics |
+
 ---
 
 ## What works
@@ -1137,7 +1453,15 @@ will be skipped or fall back if you are offline.
 
 ```powershell
 python test_fai_v2.py
+python test_online_store.py
 ```
+
+`test_online_store.py` covers the Online Store subsystem: the config contract,
+the ServiceInfo document against the documented schema, the exact registry
+plan (and what it must *not* write), the provider contract, every route, the
+CLI, and a **non-regression section** that asserts the pre-existing FAI routes
+still answer. That last part matters most: a store-only suite would not notice
+if adding the store broke the FAI server.
 
 Expected result:
 
@@ -1524,10 +1848,25 @@ period will be slow while the dyno cold-starts.
 FAI Server.py     the entire server (single file by design)
 wsgi.py           WSGI entry point for Linux/cloud hosts (gunicorn wsgi:app)
 test_fai_v2.py    the test suite
+test_online_store.py  Online Store tests (config, ServiceInfo, registry, routes)
+test_art_win7.py  Windows 7 artwork tests (cover URL shapes, art mode scoping)
 render.yaml       Render blueprint (demo only - see "Deploying to the cloud")
 Procfile          Same start command as a fallback for other PaaS
 requirements.txt  runtime dependencies
 fai_server.log    runtime log, self-rotating at 5 MB (git-ignored)
+install-online-store-win7.bat  self-elevating store registration for Windows 7,
+                                shipped beside the Win7 build
+
+online_store.ini  Online Store configuration template (store off by default)
+online_store/     the WMP Online Store subsystem - see docs/ONLINE_STORE.md
+  config.py       validated [online_store] configuration
+  models.py       Album / Track / Purchase value objects
+  providers/      pluggable catalog backends; base.py is the provider contract
+  serviceinfo.py  the ServiceInfo XML document WMP fetches
+  registry.py     install / uninstall of the WMP registry entries
+  views.py        the Flask Blueprint, mounted on the existing app
+  cli.py          install-online-store / uninstall-online-store / status
+docs/ONLINE_STORE.md  Online Store research notes and evidence
 ```
 
 ---

@@ -106,6 +106,12 @@ def main():
         "--console",
         "--name", NAME,
         "--version-file", str(VERSION_FILE),
+        # online_store.ini is DATA, not an import, so PyInstaller's dependency
+        # analysis cannot see it and would ship an EXE whose store is stuck on
+        # the built-in defaults. "." is PyInstaller's data root, which lands in
+        # _internal\ for an onedir build - and config.candidate_dirs() looks
+        # there as well as beside the EXE itself.
+        "--add-data", "%s;." % (ROOT / "online_store.ini"),
         # No "--": PyInstaller's parser rejects one, and the entry path is a
         # single argv element so its spaces and parentheses are already safe.
         str(ENTRY),

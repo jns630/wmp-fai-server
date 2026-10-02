@@ -83,6 +83,19 @@ build_version_win7.txt
 # interpreter and site-packages into the repo.
 .venv38/
 
+# Online Store: audio synthesised by the fake provider, and any per-machine
+# store INI a user writes to enable the store locally. Neither belongs in git:
+# the audio is regenerable from the catalog definition, and a machine's
+# base_url / purchases_dir are machine-specific. The committed
+# online_store.ini is the documented template and IS tracked.
+online_store_purchases/
+*.wav
+
+# Written by install-online-store-win7.bat next to the EXE. It records which
+# hosts entries that script added, so uninstall removes exactly those and does
+# not delete a line that was already there. Per-machine state, never committed.
+online-store-hosts-installed.txt
+
 # Scratch files written by the node --check regression tests. They are
 # rewritten on every run and must never be committed.
 _syntaxcheck_*.js

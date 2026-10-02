@@ -114,6 +114,31 @@ def _mb_get(url, params=None, timeout=8, attempts=3):
 app = Flask(__name__)
 
 # ==========================================================
+# WMP ONLINE STORE (optional)
+# ==========================================================
+# A Type 2 *commerce* store: WMP shows an Online Stores tab, the tab hosts a
+# webpage this server serves, and that webpage is a working (fake) music
+# storefront. It is registered as a Blueprint on the app above rather than as
+# a second server, so it shares port 80/443, the certificate and the log, and
+# there is nothing extra to start.
+#
+# No COM component is involved. Microsoft's own feature matrix marks the
+# IWMPSubscriptionService plug-in "No" for a Type 2 commerce store, and this
+# store has no DRM to vend.
+#
+# The store is OFF unless online_store.ini sets enabled = true, and a missing or
+# broken store config never prevents the FAI server from starting - a feature
+# that is switched off must not be able to take the FAI feature down with it.
+# See docs/ONLINE_STORE.md for the research behind all of this.
+_ONLINE_STORE_ENABLED = False
+try:
+    import online_store
+    _ONLINE_STORE_ENABLED = bool(online_store.init_store(app))
+except Exception as _store_exc:  # pragma: no cover - defensive
+    print(f"[!] Online Store could not be initialised ({_store_exc}). "
+          f"The Find Album Info server is unaffected.")
+
+# ==========================================================
 # THREAD-SAFE TTL CACHE
 # ==========================================================
 class TTLCache:
@@ -278,6 +303,12 @@ def _log_request(response):
     try:
         qs = request.query_string.decode("utf-8", "replace")
         ua = request.headers.get("User-Agent", "")
+        # Remember who is asking, for the artwork-mode decision. Recorded here
+        # rather than in each view because this hook already sees every
+        # request, including the XML fetches that never reach a view.
+        global _LAST_CLIENT_UA
+        if ua:
+            _LAST_CLIENT_UA = ua
         log_line("REQ", f"{request.method} {request.path}"
                         f"{'?' + qs if qs else ''} -> {response.status_code}"
                         f" | UA={ua[:100]}")
@@ -315,10 +346,56 @@ DISCOGS_BASE_URL = "https://api.discogs.com/"
 # spending it on a non-MusicBrainz request would both misidentify the client and
 # blur that guard.
 DISCOGS_USER_AGENT = "WMPFaiServer/2.0 +https://github.com/jns630/wmp-fai-server"
+def _load_local_settings():
+    """Return the local_settings module, or None.
+
+    A plain `import local_settings` only works when the file happens to be on
+    sys.path - true for a source checkout, false for a frozen build. PyInstaller
+    puts __file__ inside _internal, while the user's settings file is a sibling
+    of the .exe. The result was that the Windows 7 test build shipped with no
+    Discogs token at all and Discogs results simply were not there: a missing
+    provider is indistinguishable from a provider returning nothing, which is
+    why it went unnoticed until someone ran the built EXE.
+
+    Both locations are searched - the folder holding the executable, and this
+    file's own directory - and sys.path is tried too, since an existing user
+    installation may rely on that.
+    """
+    import importlib.util
+    import sys as _sys
+
+    candidates = []
+    if getattr(_sys, "frozen", False):
+        candidates.append(os.path.dirname(os.path.abspath(_sys.executable)))
+    candidates.append(os.path.dirname(os.path.abspath(__file__)))
+    try:
+        candidates.extend(p for p in _sys.path if p)
+    except Exception:
+        pass
+
+    seen = set()
+    for directory in candidates:
+        if not directory or directory in seen:
+            continue
+        seen.add(directory)
+        path = os.path.join(directory, "local_settings.py")
+        if not os.path.exists(path):
+            continue
+        try:
+            spec = importlib.util.spec_from_file_location("local_settings", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+        except Exception as exc:
+            print(f"[!] local_settings.py could not be loaded from {path}: {exc}")
+    return None
+
+
 DISCOGS_TOKEN = ""
 try:
-    import local_settings  # git-ignored
-    DISCOGS_TOKEN = (getattr(local_settings, "DISCOGS_TOKEN", "") or "").strip()
+    _local_settings = _load_local_settings()
+    if _local_settings is not None:
+        DISCOGS_TOKEN = (getattr(_local_settings, "DISCOGS_TOKEN", "") or "").strip()
 except Exception:
     pass
 DISCOGS_TOKEN = (os.environ.get("DISCOGS_TOKEN") or DISCOGS_TOKEN or "").strip()
@@ -486,6 +563,93 @@ _COVER_SEQ = 0
 #   $env:WMP_ART_MODE='relative'  # scheme-less path for clients that resolve one
 _ART_MODE = (os.environ.get("WMP_ART_MODE", "direct").strip().lower()
              or "direct")
+
+# ---- Artwork mode for the Windows 7 / legacy clients ----------------------
+# The one behaviour change in this subsystem, and it is deliberately narrow.
+#
+# WHAT WAS REPORTED
+# On Windows 7 the client fetches artwork as
+#
+#     GET /cover/https://some.url/image.jpg?locale=409   -> 404
+#
+# i.e. it takes the absolute URL out of largeCoverParams, rewrites it back
+# onto THIS host under /cover/, and asks us for it. In "direct" mode the
+# artwork is therefore only ever delivered *if that rewrite works*, and on
+# Windows 7 it does not - the album comes back with no picture at all.
+#
+# WHY NOT JUST FIX THE REWRITE
+# The handler already accepts the URL in the path as well as in the query
+# (get_image(), and the reproduction in test_fai_v2.py), and it was verified
+# over a real socket, not only through the test client. So the rewrite is
+# handled; relying on it is simply the fragile shape. What is actually wanted
+# for these clients is a document that already *points at* the cover endpoint,
+# so there is no client-side rewriting left to fail.
+#
+# WHY IT IS SCOPED TO "7"
+# WMP 12 on Windows 7 sends exactly the same User-Agent as WMP 12 on Windows
+# 11 - "WindowsMediaPlayer/12.0..." - so the client CANNOT be told apart from
+# the request. Any rule keyed on the User-Agent would change Windows 11
+# behaviour too, which is exactly what was asked not to happen. The thing that
+# does differ, and that is actually knowable, is the ARTIFACT: the Windows 7
+# test build is a different binary with "Win7Test" in its name. So the switch
+# keys off that, and it is impossible for it to reach the official build or a
+# source checkout.
+#
+# Precedence, most specific first:
+#   1. $env:WMP_ART_MODE          - an operator always wins
+#   2. the Windows 7 test EXE     - this fix
+#   3. a legacy XML client (WMC / WMP 7-9) - same shape, same reason
+#   4. "direct"                   - unchanged Windows 11 behaviour
+_ART_MODE_EXPLICIT = (os.environ.get("WMP_ART_MODE", "").strip().lower())
+
+#: The User-Agent of the most recent request, so the artwork decision can be
+#: made per client. Recorded in the after_request hook, which already runs for
+#: every request. It is a single slot rather than a per-connection map because
+#: one WMP instance drives one flow at a time, which is the same assumption
+#: LAST_WMID and the staged-XML index are already built on.
+_LAST_CLIENT_UA = ""
+
+
+def _is_win7_build():
+    """True only for the frozen Windows 7 test build.
+
+    Checked against sys.executable's own filename, which in a PyInstaller
+    build is the name of the .exe the user double-clicked. A source checkout
+    and the official build both return False, so this cannot leak.
+    """
+    if not getattr(sys, "frozen", False):
+        return False
+    try:
+        return "win7" in os.path.basename(sys.executable).lower()
+    except Exception:
+        return False
+
+
+def _is_legacy_xml_client(user_agent=None):
+    """True for Windows Media Center and WMP 7-9 - the clients with no browser.
+
+    Same marker list _is_dialog_host_client() already refuses, kept as its own
+    name so the artwork decision does not have to borrow a predicate whose
+    meaning is "will this caller render HTML", which is a different question.
+    """
+    ua = (user_agent if user_agent is not None else _LAST_CLIENT_UA) or ""
+    for marker in ("Windows-Media-Center", "WMC", "NSPlayer",
+                   "Windows-Media-Player", "MCE"):
+        if marker.lower() in ua.lower():
+            return True
+    return False
+
+
+def _effective_art_mode():
+    """The artwork mode to actually use for the client being served."""
+    if _ART_MODE_EXPLICIT:
+        return _ART_MODE_EXPLICIT
+    if _is_win7_build():
+        return "relative"
+    if _is_legacy_xml_client():
+        return "relative"
+    return _ART_MODE
+
 
 def _remember_wmid(value):
     """Record the most recent wmid WMP asked us about."""
@@ -2195,8 +2359,13 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
     content_ids = content_ids or {}
 
     art_url = album_data.get("art_url", "")
-    # THE ARTWORK URL. Two shapes, selected by _ART_MODE (see its definition for
-    # why the direct form is now the default):
+    # The mode actually used for THIS client. On the Windows 7 build and for
+    # the legacy XML clients this is "relative", so the document points at our
+    # own /cover/ endpoint instead of relying on the client to rewrite an
+    # absolute URL back onto this host - see _effective_art_mode() for why that
+    # client-side rewrite is the fragile part.
+    art_mode = _effective_art_mode()
+    # THE ARTWORK URL. Three shapes, selected by art_mode:
     #
     #   direct : https://is1-ssl.mzstatic.com/.../600x600bb.jpg
     #   proxy  : http://127.0.0.1/cover/fai-<token>/album.jpg?url=<quoted upstream>
@@ -2228,7 +2397,7 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
     # and the image proxy then fetches an unparseable 'https%3A%2F%2F...' string.
     if not art_url:
         proxy_art = ""
-    elif _ART_MODE == "direct":
+    elif art_mode == "direct":
         # Upstream URLs carry no '&' in practice, but xesc unconditionally, so
         # this cannot reintroduce the well-formedness bug above.
         proxy_art = xesc(art_url)
@@ -2267,7 +2436,7 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
         # 'proxy' keeps the older absolute spelling for clients that do not
         # resolve a relative URL; it points at us either way.
         proxy_art = xesc(f"http://127.0.0.1{_cover_path}"
-                         if _ART_MODE == "proxy" else _cover_path)
+                         if art_mode == "proxy" else _cover_path)
 
     tracks_to_include = selected_tracks if selected_tracks is not None else album_data.get("tracks", [])
 
@@ -2442,6 +2611,38 @@ def get_image(ignore=None):
         if _in_path[:4].lower() == "http":
             url = _in_path
             log_line("IMAGE", f"url arrived in the PATH: {url[:70]}")
+
+    # THE SCHEME-LESS PATH FORM - the Windows 7 shape, and the one that was
+    # returning a bare 404 for every request.
+    #
+    # Once images.metaservices.microsoft.com is pointed at this server, WMP on
+    # Windows 7 does not send the URL we gave it. It sends the *partial* URL -
+    # no scheme - and terminates it with an image extension:
+    #
+    #   GET /cover/i.discogs.com/some-image.jpg?locale=409
+    #   GET /cover/coverartarchive.org/release/1234/front-500.jpg
+    #
+    # The old check below was `startswith("http")`, so every one of those was
+    # discarded before any fetch was attempted and answered 404 - which is
+    # exactly the reported symptom, and the reason the album had no picture
+    # even though the request plainly arrived.
+    #
+    # The scheme is restored rather than guessed at random: these hosts are all
+    # HTTPS, and a failure on http would be a second, separate mystery. The
+    # extension is KEPT, because on every real artwork URL this project emits
+    # (Discogs .jpeg, mzstatic 600x600bb.jpg, coverartarchive front-500.jpg) it
+    # is genuinely part of the path - it is not something the client invented.
+    if not url and ignore:
+        _in_path = ignore.strip()
+        if _in_path and "://" not in _in_path:
+            _candidate = requests.utils.unquote(_in_path)
+            # host.tld/... - a leading label with a dot and a real TLD-ish tail.
+            # Requiring the dot is what keeps '/cover/fai-abc/album.jpg' and
+            # other internal paths from being rewritten into a fetch.
+            if re.match(r"^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}(/|$|\?)", _candidate,
+                        re.IGNORECASE):
+                url = "https://" + _candidate
+                log_line("IMAGE", f"scheme-less path, restored to: {url[:70]}")
 
     if url:
         # WMP hands the URL back exactly as we gave it. Older staged documents
@@ -2693,7 +2894,7 @@ def mdr_post():
         _art = re.search(r"<largeCoverParams>([^<]*)</largeCoverParams>", staged)
         _art = _art.group(1).strip() if _art and _art.group(1).strip() else ""
         log_line("MDR", f"  -> art={('none' if not _art else _art[:110])} "
-                        f"(mode={_ART_MODE})")
+                        f"(mode={_effective_art_mode()})")
         return Response(staged, mimetype='text/xml')
 
     # No metadata is staged for this disc. Return an EMPTY document so WMP
@@ -5929,6 +6130,20 @@ def ensure_ssl_certificates():
 SERVER_START_TIME = time.time()
 
 if __name__ == "__main__":
+    # Sub-commands are handled before any listener starts. A store
+    # install/uninstall must never open port 80 as a side effect, and must not
+    # generate or trust a certificate as a side effect either - it only writes
+    # registry keys.
+    if len(sys.argv) > 1 and sys.argv[1] in (
+            "install-online-store", "uninstall-online-store",
+            "online-store-status"):
+        try:
+            import online_store
+            sys.exit(online_store.main(sys.argv[1:]))
+        except Exception as exc:
+            print(f"[!] online-store command failed: {exc}")
+            sys.exit(1)
+
     def run_http():
         print(f"[*] Starting HTTP server on port {HTTP_PORT}...")
         try:
@@ -5955,6 +6170,10 @@ if __name__ == "__main__":
         # literal rather than a read of build_version.txt because that file is
         # not shipped inside the EXE.
         print("[*] WMP FAI Metadata Server 1.1.1 READY")
+        if _ONLINE_STORE_ENABLED:
+            print("[*] WMP Online Store enabled - /online-store/ serves the "
+                  "storefront, /online-store/api/status reports its config")
+
         app.run(host=HOST, port=HTTPS_PORT, ssl_context=context, debug=False, use_reloader=False)
     except Exception as e:
         print(f"[!] HTTPS server startup warning (running HTTP only): {e}")
