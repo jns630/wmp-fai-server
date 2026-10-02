@@ -8,57 +8,75 @@ it would do before doing it.
 
 What is written, and why each value exists
 ------------------------------------------
-All four locations below are taken from Microsoft's archived "Registry Keys and
-Entries for a Type 2 Online Store" page. That page documents three of them
-directly. The fourth - ``Services\\<keyName>`` with its ``BASEURL`` - is marked
-below as inferred, because it is how this project points WMP at a ServiceInfo
-document served by a local Flask process rather than by Microsoft's CDN.
+The three registry locations that matter are taken from Microsoft's archived
+"Registry Keys and Entries for a Type 2 Online Store" page, which specifies:
 
 1. ``HKLM\\SOFTWARE\\Microsoft\\MediaPlayer\\Subscriptions\\<keyName>``
    ``Capabilities`` (REG_DWORD), ``SubscriptionObjectGUID`` (REG_SZ),
    ``FriendlyName`` (REG_SZ).
    *Documented.* The store's identity. A commerce store has no plug-in, so
    ``Capabilities`` is written as 0: it is a bitmask of IWMPSubscriptionService
-   callbacks, and we implement none of them. Writing a non-zero mask for
-   interfaces we do not implement would have WMP call into nothing.
+   callbacks, and we implement none of them.
 
 2. ``HKCU\\Software\\Microsoft\\MediaPlayer\\Services``
    ``TestParameter`` (REG_SZ) = our test key, appended to any existing
    semicolon-separated list.
-   *Documented.* This is the documented development gate: a store not
-   published by Microsoft is visible only while its test or production key is
-   in this value.
+   *Documented.* An unpublished store is visible only while its test or
+   production key is in this value.
 
-3. ``HKCU\\Software\\Microsoft\\MediaPlayer\\Services\\<keyName>``
-   ``BASEURL``, ``FriendlyName``, and the cosmetic values
-   ``ColorPlayer``, ``ColorPlayerText``, ``ImageMenuURL``, ``ImageLargeURL``,
-   ``ImageSmallURL``, ``Task1ButtonText``, ``Task1ButtonTip``, ``Type``.
-   *Partly inferred.* Every one of these value names is present in
-   ``setup_wm.exe`` on this machine (verified by reading its strings), and
-   ``setup_wm.exe`` is Microsoft's own code for installing a store from a local
-   ServiceInfo document via ``/DefaultService``. The page that documents
-   ``BASEURL`` for a general store is not in the public SDK documentation, so
-   the pairing of key to value names is an inference from the binary. It is
-   isolated in this one function so it is easy to correct if WMP turns out to
-   want something else.
+3. ``HKCU\\Software\\Microsoft\\MediaPlayer\\Subscriptions``
+   ``ActiveService``. Written by WMP when the user activates a store; never by us.
 
-4. ``HKCR\\CLSID\\<SubscriptionObjectGUID>`` with ``InprocServer32`` and
-   ``ThreadingModel = Apartment``.
-   *Documented but deliberately NOT written by default.* The documented layout
-   includes it because a Type 2 *music* store has a COM plug-in. We are a
-   commerce store with no plug-in, so registering a CLSID pointing at a
-   non-existent DLL would be a lie that WMP might act on. The key is available
-   behind ``register_plugin_dll=`` for a future music store that genuinely
-   ships one.
+CORRECTION - what this module used to claim, and why it was wrong
+----------------------------------------------------------------
+An earlier version of this file wrote a fourth location,
+``HKCU\\...\\MediaPlayer\\Services\\<keyName>`` with ``BASEURL`` and ``Type``,
+and described it as an inference from ``setup_wm.exe``'s string table. Both
+the reasoning and the conclusion were wrong, and testing on Windows 7 showed
+it: **the store never appeared.**
+
+* The documented page lists no such key. ``BASEURL`` appears in setup_wm.exe as
+  a *value it reads from* an existing store registration, not as one it
+  requires, so inferring a requirement from its presence was backwards.
+* ``%sserviceinfo.xml`` in that binary is the format string for the
+  ``/ServiceInfo:<path>`` command-line parameter - a LOCAL FILE PATH supplied
+  by the installer. It is not WMP fetching ``<baseURL>serviceinfo.xml`` from
+  our server at runtime. So the whole "point WMP at our own URL" premise was
+  wrong: WMP is pointed at a file, once, at install time.
+* ``TestParameter`` does not filter a local list. The documentation says WMP
+  *retrieves the test ServiceInfo document* named by that key, and that the
+  provider supplies Microsoft with the test and production URLs. The key is a
+  lookup into a store index, so a key Microsoft never issued cannot resolve to
+  our document however it is written.
+
+``describe_install`` therefore no longer writes ``Services\\<keyName>`` or
+``BASEURL``. The documented local-store route is
+``online_store/setupwm.py``, which calls setup_wm.exe with ``/DefaultService``
+and ``/ServiceInfo``.
+
+DANGEROUS BY DEFAULT - the subscription key
+--------------------------------------------
+Microsoft's page specifies that ``SubscriptionObjectGUID`` is "a GUID that is
+the class identifier (CLSID) for the class that implements
+IWMPSubscriptionService in the online store's plug-in", and that the matching
+``HKCR\\CLSID\\<guid>\\InprocServer32`` is part of the required layout.
+
+A commerce store with no plug-in therefore has a ``SubscriptionObjectGUID``
+that resolves to nothing. WMP enumerates ``Subscriptions`` at startup and tries
+to load that class; it is not documented to cope with its absence. Reported
+symptoms on Windows 7 were WMP failing to start cleanly and instability in
+disc handling, so writing the HKLM half is now **opt-in** via
+``register_subscription=True`` and is off by default.
+
+``diagnose()`` reports the state, because "the store does not appear" and "WMP
+misbehaves" are otherwise indistinguishable from a server problem.
 
 Deliberately NOT written
 ------------------------
 * Anything under ``HKLM\\SOFTWARE\\Policies`` - group policy is not a
   per-user feature toggle and must not be used as one.
 * ``ActiveService``. Microsoft documents it as written *by WMP* when the user
-  activates a store, and only in HKCU. Overwriting it would be the installer
-  impersonating the user; the ``--set-active`` flag exists but is separate and
-  says so.
+  activates a store, and only in HKCU.
 * Any WMP setting that is not part of the store's own registration.
 """
 import os
@@ -150,12 +168,18 @@ def read_values(root, path):
         raise RegistryError("cannot read %s\\%s: %s" % (root.upper(), path, exc))
 
 
-def describe_install(config):
+def describe_install(config, register_subscription=False):
     """Return the exact operations install would perform, without doing them.
 
     Each entry is ``{"action", "location", "name", "value", "type", "note"}``.
     Returned rather than printed so the CLI, the tests and ``--dry-run`` all
     see the same list.
+
+    ``register_subscription`` controls the HKLM half and defaults to OFF. See
+    the module docstring: that key carries a CLSID with no registered class,
+    and on Windows 7 it was accompanied by WMP instability. Off by default
+    because a working FAI server is worth more than a store tab that crashes
+    the player.
     """
     store_id = config.store_id
     plans = []
@@ -165,36 +189,23 @@ def describe_install(config):
                       "path": path, "name": name, "value": value,
                       "type": kind, "note": note})
 
-    # 1. Store identity, HKLM.
+    # 1. Store identity, HKLM. Opt-in: see describe_install's docstring.
     sub = "%s\\%s" % (SUBSCRIPTIONS_ROOT, store_id)
-    plan("create", "HKLM", sub, "", "", None, "store identity (machine-wide)")
-    plan("set", "HKLM", sub, "Capabilities", config.capabilities, REG_DWORD,
-         "no IWMPSubscriptionService callbacks: commerce store, no plug-in")
-    plan("set", "HKLM", sub, "SubscriptionObjectGUID",
-         config.subscription_object_guid, REG_SZ, "documented CLSID value")
-    plan("set", "HKLM", sub, "FriendlyName", config.friendly_name, REG_SZ, "")
+    if register_subscription:
+        plan("create", "HKLM", sub, "", "", None,
+             "store identity (machine-wide); OPT-IN, see registry.py")
+        plan("set", "HKLM", sub, "Capabilities", config.capabilities, REG_DWORD,
+             "no IWMPSubscriptionService callbacks: commerce store, no plug-in")
+        plan("set", "HKLM", sub, "SubscriptionObjectGUID",
+             config.subscription_object_guid, REG_SZ,
+             "documented CLSID value - WARNING: resolves to no registered class")
+        plan("set", "HKLM", sub, "FriendlyName", config.friendly_name, REG_SZ, "")
+    else:
+        plan("skip", "HKLM", sub, "", "", None,
+             "not written: a SubscriptionObjectGUID with no CLSID is a dangling "
+             "COM reference; pass register_subscription to force it")
 
-    # 2. Self-hosted ServiceInfo location (inferred from setup_wm.exe strings).
-    svc = "%s\\%s" % (SERVICES_ROOT, store_id)
-    plan("create", "HKCU", svc, "", "", None,
-         "points WMP at our own ServiceInfo.xml (inferred)")
-    plan("set", "HKCU", svc, "BASEURL", config.base_url + "/", REG_SZ,
-         "WMP appends 'serviceinfo.xml' to this")
-    plan("set", "HKCU", svc, "FriendlyName", config.friendly_name, REG_SZ, "")
-    plan("set", "HKCU", svc, "Type", STORE_TYPE_TYPE2, REG_DWORD,
-         "Type 2 store (inferred constant)")
-    plan("set", "HKCU", svc, "ColorPlayer", config.button_color, REG_SZ, "")
-    plan("set", "HKCU", svc, "ColorPlayerText", config.button_text_color,
-         REG_SZ, "")
-    plan("set", "HKCU", svc, "Task1ButtonText", config.friendly_name, REG_SZ, "")
-    plan("set", "HKCU", svc, "Task1ButtonTip",
-         "%s - browse and buy" % config.friendly_name, REG_SZ, "")
-    for value_name, configured in (("ImageMenuURL", config.menu_image_url),
-                                   ("ImageLargeURL", config.large_image_url)):
-        if configured:
-            plan("set", "HKCU", svc, value_name, configured, REG_SZ, "")
-
-    # 3. The documented development gate: append our key to TestParameter.
+    # 2. The documented development gate: append our key to TestParameter.
     existing = read_values("HKCU", SERVICES_ROOT).get("TestParameter", ("",))[0]
     keys = [part for part in str(existing).split(";") if part]
     keys.append(config.test_key)
@@ -210,21 +221,32 @@ def _set_value(root, path, name, value, kind):
             winreg.SetValueEx(key, name, 0, kind, value)
 
 
-def install(config, dry_run=False, register_plugin_dll=None, log=print):
+def install(config, dry_run=False, register_plugin_dll=None,
+            register_subscription=False, log=print):
     """Install the store. Returns a list of human-readable result lines.
 
     ``register_plugin_dll`` is the path to a COM in-process server for a future
     Type 2 *music* store. It is None by default and this project ships no DLL,
     so by default no CLSID is registered.
+
+    ``register_subscription`` opts into the HKLM Subscriptions key. It defaults
+    to False because that key's ``SubscriptionObjectGUID`` points at a class
+    that does not exist; see the module docstring for what that cost on
+    Windows 7.
     """
     if not is_supported():
         raise RegistryError(
             "the Online Store installer needs Windows; this platform is %r. "
             "Run it on the machine that runs WMP." % sys.platform)
 
-    plans = describe_install(config)
+    plans = describe_install(config,
+                             register_subscription=register_subscription)
     results = []
     for step in plans:
+        if step["action"] == "skip":
+            results.append("skip   %-6s %s   # %s"
+                           % (step["root"], step["path"], step["note"]))
+            continue
         line = "%-5s %-6s %s%s = %r" % (
             step["action"], step["root"], step["path"],
             ("\\" + step["name"]) if step["name"] else "", step["value"])
@@ -381,5 +403,80 @@ def uninstall(config, dry_run=False, remove_clsid=False, log=print):
         results.append("       -> would remove %r from TestParameter"
                        % config.test_key)
     return results
+
+
+def diagnose(config):
+    """Report every fact about how this store is (or is not) registered.
+
+    This exists because the two failure modes reported from Windows 7 were
+    indistinguishable from each other and from a server fault:
+
+        * the store does not appear at all, and
+        * WMP ejects discs, and sometimes closes.
+
+    Both are consistent with a *partially* registered store, so a status
+    command that only printed "installed: yes" is not diagnostic. Each entry
+    below is a fact with a severity, so the output says what is wrong rather
+    than only what is present.
+
+    Returns a list of ``(severity, message)``. Severities: ``ok``,
+    ``warn``, ``bad``, ``info``.
+    """
+    out = []
+    if not is_supported():
+        return [("warn", "registry not available on this platform (%s)"
+                 % sys.platform)]
+
+    sub = "%s\\%s" % (SUBSCRIPTIONS_ROOT, config.store_id)
+    values = read_values("HKLM", sub)
+    guid = str(values.get("SubscriptionObjectGUID", ("",))[0]).strip()
+
+    if not values:
+        out.append(("info", "no HKLM Subscriptions\\%s key - the store is NOT "
+                            "registered with WMP" % config.store_id))
+    else:
+        out.append(("ok", "HKLM Subscriptions\\%s exists" % config.store_id))
+
+    # The dangling-CLSID check. This is the important one.
+    if guid:
+        clsid_path = "%s\\%s\\InprocServer32" % (CLSID_ROOT, guid)
+        if read_values("HKCR", clsid_path):
+            out.append(("ok", "SubscriptionObjectGUID %s has a registered "
+                              "InprocServer32" % guid))
+        else:
+            out.append(("bad",
+                        "SubscriptionObjectGUID %s has NO registered COM class. "
+                        "WMP enumerates Subscriptions at startup and will try to "
+                        "load this class; it is not documented to cope with it "
+                        "being absent. This is the most likely cause of WMP "
+                        "closing or misreporting discs. Fix: run "
+                        "`uninstall-online-store` (or delete HKLM\\%s\\%s)."
+                        % (guid, SUBSCRIPTIONS_ROOT, config.store_id)))
+        caps = values.get("Capabilities", (None, None))[0]
+        if caps == 0:
+            out.append(("info", "Capabilities = 0 (no plug-in callbacks claimed)"))
+
+    test = read_values("HKCU", SERVICES_ROOT).get("TestParameter", ("",))[0]
+    keys = [k for k in str(test).split(";") if k]
+    if str(config.test_key) in keys:
+        out.append(("warn",
+                    "TestParameter contains %r, but Microsoft issues test keys - "
+                    "a self-chosen one does not make an unpublished store "
+                    "visible. Expect the store not to appear."
+                    % config.test_key))
+    else:
+        out.append(("warn", "TestParameter does not contain %r"
+                    % config.test_key))
+
+    # The inferred key we used to write. If it is still there, WMP is reading a
+    # BASEURL that the documented layout does not define.
+    legacy = read_values("HKCU", "%s\\%s" % (SERVICES_ROOT, config.store_id))
+    if legacy:
+        out.append(("warn",
+                    "HKCU Services\\%s still exists with values %r. That key is "
+                    "NOT part of the documented Type 2 layout - BASEURL and Type "
+                    "were inferred and are not what WMP reads. Remove it."
+                    % (config.store_id, sorted(legacy))))
+    return out
 
 

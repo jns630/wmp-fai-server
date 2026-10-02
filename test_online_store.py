@@ -239,38 +239,60 @@ def planned(root, path, name):
             if p.startswith(root + "\\") and p.endswith(path) and n == name]
 
 
-# The three documented locations. Exact key paths, because a key in the wrong
-# place is the single most likely way for this to silently do nothing.
-check("registry: writes HKLM Subscriptions keyName",
-      bool(planned("HKLM",
-                   "SOFTWARE\\Microsoft\\MediaPlayer\\Subscriptions\\%s"
-                   % cfg.store_id, "FriendlyName")),
-      location_text)
-check("registry: writes documented Capabilities as a DWORD",
-      any(step["type"] == registry.REG_DWORD
-          and step["name"] == "Capabilities" for step in plan),
-      location_text)
-check("registry: writes documented SubscriptionObjectGUID",
-      bool(planned("HKLM",
-                   "SOFTWARE\\Microsoft\\MediaPlayer\\Subscriptions\\%s"
-                   % cfg.store_id, "SubscriptionObjectGUID")),
-      location_text)
-check("registry: writes documented TestParameter gate",
-      bool(planned("HKCU", "Software\\Microsoft\\MediaPlayer\\Services",
-                   "TestParameter")),
-      location_text)
-check("registry: writes BASEURL for the self-hosted ServiceInfo",
-      bool(planned("HKCU",
-                   "Software\\Microsoft\\MediaPlayer\\Services\\%s" % cfg.store_id,
-                   "BASEURL")),
-      location_text)
+# The HKLM half is now OPT-IN. These tests assert both states, because the
+# failure mode being guarded against is a half-registered store: WMP finding a
+# SubscriptionObjectGUID it cannot resolve. The default must not write it.
+plan_default = registry.describe_install(cfg)
+forced = registry.describe_install(cfg, register_subscription=True)
+plan_text = "\n".join("%s\\%s%s = %r" % (s["root"], s["path"],
+                                       ("\\" + s["name"]) if s["name"] else "",
+                                       s["value"]) for s in plan_default)
+forced_text = "\n".join("%s\\%s%s = %r" % (s["root"], s["path"],
+                                          ("\\" + s["name"]) if s["name"] else "",
+                                          s["value"]) for s in forced)
+
+
+def planned(steps, root, path, name):
+    return [s["value"] for s in steps
+            if ("%s\\%s" % (s["root"], s["path"])) == root + "\\" + path
+            and s["name"] == name]
+
+
+SUB_PATH = "SOFTWARE\\Microsoft\\MediaPlayer\\Subscriptions\\%s" % cfg.store_id
+check("registry: writes the documented TestParameter gate",
+      bool(planned(plan_default, "HKCU",
+                   "Software\\Microsoft\\MediaPlayer\\Services", "TestParameter")),
+      plan_text)
+
+check("registry: DEFAULT does not write the dangling Subscriptions key",
+      not planned(plan_default, "HKLM", SUB_PATH, "SubscriptionObjectGUID")
+      and not planned(plan_default, "HKLM", SUB_PATH, "Capabilities"),
+      "the HKLM half must be opt-in: a SubscriptionObjectGUID naming an "
+      "unregistered COM class is what made WMP close on Windows 7. Plan:\n"
+      + plan_text)
+
+check("registry: opt-in writes the documented HKLM values",
+      bool(planned(forced, "HKLM", SUB_PATH, "SubscriptionObjectGUID"))
+      and bool(planned(forced, "HKLM", SUB_PATH, "FriendlyName"))
+      and any(s["type"] == registry.REG_DWORD and s["name"] == "Capabilities"
+              for s in forced),
+      forced_text)
+
+# The BASEURL inference is removed, and that removal is the point of this test:
+# it is not part of the documented layout, and shipping it made the store
+# invisible on Windows 7 while looking correctly configured.
+check("registry: no longer writes the inferred Services\\keyName\\BASEURL",
+      not any(s["name"] == "BASEURL" for s in plan_default + forced)
+      and not any(s["path"] == "Software\\Microsoft\\MediaPlayer\\Services\\%s"
+                  % cfg.store_id for s in plan_default + forced),
+      "BASEURL/Type were inferred from setup_wm.exe strings and are not what "
+      "WMP reads; WMP takes a local file path via /ServiceInfo instead.\n"
+      + plan_text)
 
 # Capabilities must be 0. A non-zero mask makes WMP call IWMPSubscriptionService
 # methods on a class that does not exist - this store is a commerce store and
 # ships no plug-in.
-cap_value = planned("HKLM",
-                    "SOFTWARE\\Microsoft\\MediaPlayer\\Subscriptions\\%s"
-                    % cfg.store_id, "Capabilities")
+cap_value = planned(forced, "HKLM", SUB_PATH, "Capabilities")
 check("registry: Capabilities is 0 (no plug-in to call)",
       cap_value and cap_value[0] == 0, cap_value)
 
@@ -522,6 +544,21 @@ check("routes: home lists albums from the provider",
       "lms-0001" in home, "no album id in the page")
 check("routes: home links to the album page",
       "/online-store/album/" in home, "no album link")
+
+# Two bugs that shipped together and both returned HTTP 200, so a status check
+# cannot see them:
+#   * the Media Guide CSS was passed to Jinja as a variable named __CSS__,
+#     which is not a template expression, so it reached the browser verbatim
+#     and the page rendered completely unstyled inside WMP's task pane;
+#   * base_url already ends in /online-store, so appending the mount prefix
+#     again produced /online-store/online-store/art/... and every cover 404'd.
+check("routes: storefront CSS is injected, not shipped as a literal placeholder",
+      "__CSS__" not in home and ".mg-titlebar" in home,
+      "Media Guide stylesheet missing from the rendered page")
+check("routes: album art URLs are not double-prefixed",
+      "/online-store/online-store/" not in home
+      and "/online-store/art/" in home,
+      "cover art URLs were double-prefixed and every cover would 404")
 
 # The ServiceInfo document over HTTP - the exact call WMP makes.
 r = on.get("/online-store/serviceinfo.xml")
@@ -917,6 +954,133 @@ def _installer_post_install_block_parses():
 check("installer: the post-install message is valid cmd",
       _installer_post_install_block_parses(),
       "the success block does not parse")
+
+
+# ---- helpers for diagnose() and setup_wm -----------------------------------
+def _with_registry(values_by_path, function):
+    """Run ``function`` with registry.read_values faked to return ``values``.
+
+    diagnose() reads three different keys, so the fake is a lookup table rather
+    than a single canned value. Patching is done by rebinding the module
+    attribute - assignment on the module object - because unittest.mock is not
+    a dependency of this project.
+    """
+    original = registry.read_values
+    registry.read_values = lambda root, path: values_by_path.get(
+        "%s\\%s" % (root.upper(), path), {})
+    try:
+        return function()
+    finally:
+        registry.read_values = original
+
+
+_SUB_KEY = "HKLM\\%s\\%s" % (registry.SUBSCRIPTIONS_ROOT, cfg.store_id)
+_CLSID_KEY = "HKCR\\CLSID\\%s\\InprocServer32" % cfg.subscription_object_guid
+
+
+def _diagnose_flags_dangling_guid():
+    """The subscription key exists and its CLSID does not. Must report 'bad'."""
+    findings = _with_registry(
+        {_SUB_KEY: {"SubscriptionObjectGUID": (cfg.subscription_object_guid.upper(),
+                                              registry.REG_SZ),
+                    "Capabilities": (0, registry.REG_DWORD)}},
+        lambda: registry.diagnose(cfg))
+    return any(s == "bad" and "NO registered COM class" in m
+               for s, m in findings)
+
+
+def _diagnose_clean_is_not_bad():
+    """Fully registered with a real CLSID: nothing may be flagged 'bad'."""
+    findings = _with_registry(
+        {_SUB_KEY: {"SubscriptionObjectGUID": (cfg.subscription_object_guid.upper(),
+                                              registry.REG_SZ),
+                    "Capabilities": (0, registry.REG_DWORD)},
+         _CLSID_KEY: {"": ("C:\\store.dll", registry.REG_SZ)}},
+        lambda: registry.diagnose(cfg))
+    return [m for s, m in findings if s == "bad"]
+
+
+def _diagnose_mentions_test_key():
+    findings = _with_registry({}, lambda: registry.diagnose(cfg))
+    return any("TestParameter" in m for _s, m in findings)
+
+
+def _setupwm_command(path=None):
+    from online_store import setupwm
+    return setupwm.build_command(
+        cfg, path or r"C:\ProgramData\WMP\online_store\ServiceInfo.xml",
+        setup_wm=r"C:\Program Files\Windows Media Player\setup_wm.exe")
+
+
+def _setupwm_writes_valid_document():
+    import tempfile
+    import xml.etree.ElementTree as ET
+    from online_store import setupwm
+
+    directory = tempfile.mkdtemp(prefix="New folder (12) ")
+    path = setupwm.write_service_info(cfg, directory=directory)
+    with open(path, encoding="utf-8") as handle:
+        text = handle.read()
+    root = ET.fromstring(text)          # raises if not well-formed
+    # Microsoft: "This value must match the key name in the Key attribute of
+    # the ServiceInfo element."
+    return (root.tag == "ServiceInfo"
+            and root.get("Key") == cfg.store_id
+            and os.path.isfile(path))
+
+
+def _setupwm_handles_bracketed_path():
+    """A path with spaces and parentheses must stay ONE list element."""
+    cmd = _setupwm_command(r"C:\New folder (12)\ServiceInfo.xml")
+    service = [a for a in cmd if a.startswith("/ServiceInfo:")]
+    return (len(service) == 1
+            and service[0]
+            == "/ServiceInfo:C:\\New folder (12)\\ServiceInfo.xml")
+
+
+# ======================================================================
+# 7. DIAGNOSIS: the command that has to explain the Windows 7 symptoms
+# ======================================================================
+# Both reported failures - "the store does not appear" and "WMP ejects discs
+# and sometimes closes" - come from the registration, not the server. Without
+# a command that names the dangling CLSID, the only way to find it is to guess.
+check("diagnose: flags a SubscriptionObjectGUID with no registered CLSID",
+      _diagnose_flags_dangling_guid(),
+      "diagnose() did not report the dangling COM reference, which is the "
+      "most likely cause of WMP closing on Windows 7")
+
+check("diagnose: a clean store reports no 'bad' findings",
+      not _diagnose_clean_is_not_bad(),
+      "diagnose() reported 'bad' for a store with nothing wrong")
+
+check("diagnose: warns that a self-chosen test key cannot publish a store",
+      _diagnose_mentions_test_key(),
+      "diagnose() did not warn about the self-issued test key")
+
+# ======================================================================
+# 8. setup_wm.exe: the documented local-store route
+# ======================================================================
+# The BASEURL inference was wrong, and this is the replacement. The command is
+# asserted as a LIST because that is the whole defence against a path like
+# "New folder (12)" being re-split by cmd.
+_cmd = _setupwm_command()
+check("setupwm: uses the documented /DefaultService switch",
+      any(a.startswith("/DefaultService:") for a in _cmd), _cmd)
+check("setupwm: passes the ServiceInfo document as a local path",
+      any(a.startswith("/ServiceInfo:") and "\\" in a for a in _cmd), _cmd)
+check("setupwm: the service key matches the config store_id",
+      ("/DefaultService:%s" % cfg.store_id) in _cmd, _cmd)
+check("setupwm: the document path is one argument, spaces intact",
+      any(a.startswith("/ServiceInfo:") and " " not in a[len("/ServiceInfo:"):]
+          for a in _cmd), _cmd)
+check("setupwm: the written document is well-formed and Key matches",
+      _setupwm_writes_valid_document(),
+      "ServiceInfo.xml written for setup_wm.exe is not valid XML, or its Key "
+      "attribute does not match /DefaultService - WMP rejects it")
+check("setupwm: the command list survives a directory with brackets",
+      _setupwm_handles_bracketed_path(),
+      "an argument containing () would be re-parsed by cmd if this were a "
+      "string instead of a list")
 
 print("")
 print("=" * 60)

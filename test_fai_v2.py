@@ -9,6 +9,7 @@ import os
 import re
 import sys
 import urllib.parse
+import xml.etree.ElementTree as ET
 
 BASE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "FAI Server.py")
 _DIR = os.path.dirname(BASE)
@@ -371,23 +372,53 @@ fai.AUTO_TOC_MISS.clear()
 WMP_UA = {"User-Agent": "WindowsMediaPlayer/12.0.16384.0"}
 BROWSER_UA = {"User-Agent": "Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 10.0)"}
 
+
+def _is_empty_metadata(body):
+    """True when the body is our no-metadata document.
+
+    Compared by BEHAVIOUR, not by string equality with EMPTY_METADATA_XML. The
+    empty document is now built per request by empty_metadata_xml() so it can
+    echo the caller's own request id and collection id back - that is what stops
+    WMP ejecting the disc on Play or Rip. A response that leaves a disc alone
+    still satisfies every one of these tests even though it is no longer
+    byte-identical to the module constant, and asserting on the constant would
+    have "protected" the eject.
+    """
+    text = body.decode("utf-8", "ignore")
+    if "<METADATA>" not in text:
+        return False
+    # No album means no album-level fields at all.
+    if "Auto Matched" in text or "<albumTitle>" in text:
+        return False
+    try:
+        root = ET.fromstring(text)
+    except ET.ParseError:
+        return False
+    return (root.tag == "METADATA"
+            and root.findtext("status") != "NOTFOUND"
+            and root.findtext(".//MDR-CD/version") == "5.0"
+            and not root.findall(".//WMTrackTitle"))
+
+
+def _served_empty(response):
+    return _is_empty_metadata(response.data)
+
+
 r = c.get("/redir/getmdrcdbackground/?cd=AUTO_TOC_HEX", headers=WMP_UA)
 check("auto-toc-matches-a-real-disc",
       r.status_code == 200 and "Auto Matched" in r.data.decode("utf-8", "ignore")
-      and fai.EMPTY_METADATA_XML not in r.data.decode("utf-8", "ignore"),
+      and not _is_empty_metadata(r.data),
       f"code={r.status_code} body={r.data[:200]!r}")
 
 # Zune must NOT get it: it has no dialog, so a wrong match there is unfixable.
 r = c.get("/redir/getmdrcdzune/?CD=AUTO_TOC_HEX",
           headers={"User-Agent": "ZuneClient"})
-check("auto-toc-never-fires-for-zune",
-      fai.EMPTY_METADATA_XML in r.data.decode("utf-8", "ignore"),
+check("auto-toc-never-fires-for-zune", _served_empty(r),
       "Zune received an automatic match; it has no dialog to correct one")
 
 # A browser UA means WMP is driving the dialog itself - never answer underneath it.
 r = c.get("/redir/getmdrcdbackground/?cd=AUTO_TOC_HEX", headers=BROWSER_UA)
-check("auto-toc-steps-aside-for-a-browser",
-      fai.EMPTY_METADATA_XML in r.data.decode("utf-8", "ignore"),
+check("auto-toc-steps-aside-for-a-browser", _served_empty(r),
       "a browser request was auto-answered, taking the choice from the dialog")
 
 # A library update names a collection, not a disc. Inferring an album for it
@@ -406,8 +437,7 @@ check("auto-toc-never-fires-for-a-library-update",
 # repeat fetch costs no MusicBrainz request.
 fai.AUTO_TOC_MISS.clear()
 r = c.get("/redir/getmdrcdbackground/?cd=NO_SUCH_DISC", headers=WMP_UA)
-check("auto-toc-leaves-an-unknown-disc-alone",
-      fai.EMPTY_METADATA_XML in r.data.decode("utf-8", "ignore"),
+check("auto-toc-leaves-an-unknown-disc-alone", _served_empty(r),
       "an unidentifiable disc was not left untouched")
 check("auto-toc-remembers-a-miss",
       "NO_SUCH_DISC" in fai.AUTO_TOC_MISS,
@@ -430,10 +460,79 @@ fai.AUTO_TOC_LOOKUP = False
 fai.AUTO_TOC_CACHE.clear()
 fai.AUTO_TOC_MISS.clear()
 r = c.get("/redir/getmdrcdbackground/?cd=AUTO_TOC_KILLSWITCH", headers=WMP_UA)
-check("auto-toc-can-be-switched-off",
-      fai.EMPTY_METADATA_XML in r.data.decode("utf-8", "ignore"),
+check("auto-toc-can-be-switched-off", _served_empty(r),
       "AUTO_TOC_LOOKUP=False still auto-answered")
 fai.AUTO_TOC_LOOKUP = True
+
+# -----------------------------------------------------------------------
+# 41c. THE DISC EJECT. Reported on Windows 7: pressing Play or Rip ejected
+#      the disc - the first track went, the second one ejected - and WMP
+#      sometimes closed. WMP asks for metadata when playback or a rip begins,
+#      so this is the request that did it.
+#
+#      The cause was this project's own "no metadata" answer: a document
+#      declaring <status>NOTFOUND</status> with an empty, unaddressed
+#      <MDR-CD>. NOTFOUND is how WMP is told there is no such media, and with
+#      nothing in the document to correlate it against the disc WMP had asked
+#      about, it discarded the disc.
+#
+#      These assert on the exact request shapes a Play or Rip produces: a
+#      library write carrying only a fresh request id or a collection id, and
+#      a background fetch carrying only a disc TOC.
+# -----------------------------------------------------------------------
+def _play_or_rip_request(query):
+    """GET a metadata request shaped like the ones Play and Rip produce.
+
+    AUTO_TOC_LOOKUP is switched off around these calls. A request naming a disc
+    normally enters the automatic MusicBrainz lookup, which is a real network
+    call: these tests are about the shape of the ANSWER, and paying for a live
+    lookup per assertion made the suite slow and let a MusicBrainz hiccup look
+    like a server regression. It also left AUTO_TOC_MISS entries behind for the
+    rest of the file to trip over.
+    """
+    saved = fai.AUTO_TOC_LOOKUP
+    fai.AUTO_TOC_LOOKUP = False
+    try:
+        return c.get("/cdinfo/GetMDRCD.aspx?" + query, headers=WMP_UA)
+    finally:
+        fai.AUTO_TOC_LOOKUP = saved
+
+
+for _label, _q in (
+        ("a fresh library write id",
+         "requestID=FFFFFFFF-1111-2222-3333-444455556666"),
+        ("a collection id only",
+         "wmid=BBBBBBBB-1111-2222-3333-444455556666"),
+        ("a disc TOC only", "CD=9988+7766+5544")):
+    _body = _play_or_rip_request(_q).data.decode("utf-8", "ignore")
+    check("eject: %s is never answered NOTFOUND" % _label,
+          "<status>NOTFOUND</status>" not in _body,
+          "NOTFOUND tells WMP the disc is not there, so it ejects the disc "
+          "instead of leaving it untagged:\n" + _body[:300])
+
+_root = ET.fromstring(
+    _play_or_rip_request("CD=9988+7766+5544").data.decode("utf-8"))
+check("eject: the empty document is addressed to the disc that was asked about",
+      _root.findtext("requestID") == "9988+7766+5544"
+      and _root.findtext(".//mdr-id") == "9988+7766+5544",
+      "WMP needs its own identifier echoed back to match the answer to the "
+      "disc. Got requestID=%r mdr-id=%r"
+      % (_root.findtext("requestID"), _root.findtext(".//mdr-id")))
+
+_root = ET.fromstring(
+    _play_or_rip_request("wmid=BBBBBBBB-1111-2222-3333-444455556666")
+    .data.decode("utf-8"))
+check("eject: a collection-only request gets its wmid echoed back",
+      _root.findtext(".//WMCollectionID")
+      == "BBBBBBBB-1111-2222-3333-444455556666",
+      "the collection id was not echoed back: %r"
+      % _root.findtext(".//WMCollectionID"))
+
+check("eject: the empty document still carries no tracks",
+      not ET.fromstring(
+          _play_or_rip_request("CD=9988+7766+5544").data.decode("utf-8")
+      ).findall(".//WMTrackTitle"),
+      "the empty document must not tag an album onto a disc with no metadata")
 
 # ---------------------------------------------------------------------------
 # 41b. The SEARCH DIALOG was opened for a disc WMP could not tag, so it arrives
@@ -1062,8 +1161,17 @@ check("lookup-returns-none-when-unmatched",
       "    return None" in _src.split("def _lookup_staged_xml(")[1].split("\ndef ")[0],
       "_lookup_staged_xml must return None rather than the last document")
 check("empty-metadata-defined",
-      "EMPTY_METADATA_XML" in _src and "<status>NOTFOUND</status>" in _src,
-      "unmatched discs must get an empty, track-less metadata document")
+      "def empty_metadata_xml" in _src
+      # Matched as an ASSIGNMENT, not as a bare substring: the comment block
+      # above the function explains the eject and names the old constant, so a
+      # plain search trips on the project's own documentation of what was
+      # removed. What must not exist is the assignment.
+      and not re.search(r"^EMPTY_METADATA_XML\s*=", _src, re.MULTILINE),
+      "there must be no module-level EMPTY_METADATA_XML constant left. An "
+      "unaddressed constant cannot be correct by construction - every response "
+      "needs the caller's own ids - so it would only ever be a wrong document "
+      "waiting for a route to use it, which is how the eject came back after "
+      "being fixed. empty_metadata_xml() is the only way to build it.")
 check("no-auto-apply-from-toc",
       "match-not-applied" in _src,
       "TOC auto-lookup must not write metadata without the user choosing")
@@ -1225,15 +1333,18 @@ check("library-detection-does-not-depend-on-the-mdq",
       "a library track's MDQ carries real titles, so gating on discKnown would "
       "call every TAGGED library album a disc and ask WMP to rename its files")
 
-# 34g. A SUCCESSFUL document declared no <status>. EMPTY_METADATA_XML declares
-#      <status>NOTFOUND</status> in exactly that position, so the asymmetry is
-#      in our own code. With no status WMP read the response as 'no result': it
-#      never completed the collection, never fetched the artwork from
-#      largeCoverParams, and re-opened the FAI dialog for the collection id we
-#      had just supplied.
+# 34g. A SUCCESSFUL document declared no <status>. The empty document declared
+#      one in exactly that position, so the asymmetry was in our own code. With
+#      no status WMP read the response as 'no result': it never completed the
+#      collection, never fetched the artwork from largeCoverParams, and re-opened
+#      the FAI dialog for the collection id we had just supplied.
 #        12:29:30 [STAGED] album='Tiny Cities'   (no [IMAGE] served anywhere)
 #        12:29:45 ReturnToMainTask-ok
 #        12:29:49 GET /FAI/default.aspx?...&wmid=B17CF884-...
+#
+#      Both documents must now place <status> the same way and carry the same
+#      value: OK means "the exchange completed for this disc", NOTFOUND means
+#      "there is no such disc" and ejects it.
 _stat = fai.build_wmp_xml(dict(album), selected_tracks=[album["tracks"][0]])
 check("successful-document-declares-ok-status",
       "<status>OK</status>" in _stat,
@@ -1242,10 +1353,16 @@ check("successful-document-declares-ok-status",
 check("status-sits-before-mdr-cd",
       "<status>OK</status>" in _stat
       and _stat.index("<status>OK</status>") < _stat.index("<MDR-CD>"),
-      "the status must be a sibling of MDR-CD, matching EMPTY_METADATA_XML")
-check("status-mirrors-the-notfound-document",
-      fai.EMPTY_METADATA_XML.index("<status>") < fai.EMPTY_METADATA_XML.index("<MDR-CD>"),
-      "the OK and NOTFOUND documents must declare status in the same place")
+      "the status must be a sibling of MDR-CD, matching the empty document")
+
+_empty_stat = fai.empty_metadata_xml(request_id="RID-1", collection_id="CID-1")
+check("status-mirrors-the-successful-document",
+      "<status>OK</status>" in _empty_stat
+      and _empty_stat.index("<status>OK</status>")
+      < _empty_stat.index("<MDR-CD>")
+      and "NOTFOUND" not in _empty_stat,
+      "the successful and empty documents must declare the same status in "
+      "the same place: NOTFOUND is what makes WMP eject the disc")
 check("requestid-is-still-present",
       "<requestID>" in _stat and "<mdr-id>" in _stat,
       "adding the status must not displace the request identity")

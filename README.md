@@ -444,6 +444,98 @@ Windows Media Player
    Existing Flask server              (same process, same port 80)
 ```
 
+### How WMP is pointed at the store — and what actually blocks it
+
+This is the part worth reading, because an earlier version of this document
+described a mechanism that does not work.
+
+**The documented registry layout has no `BASEURL`.** Microsoft's "Registry Keys
+and Entries for a Type 2 Online Store" page specifies exactly three things:
+
+| Key | Values |
+| --- | --- |
+| `HKLM\SOFTWARE\Microsoft\MediaPlayer\Subscriptions\<keyName>` | `Capabilities`, `SubscriptionObjectGUID`, `FriendlyName` |
+| `HKCU\Software\Microsoft\MediaPlayer\Services` | `TestParameter` |
+| `HKCR\CLSID\<clsid>\InprocServer32` | the plug-in DLL (a *music* store only) |
+
+An earlier build also wrote
+`HKCU\...\MediaPlayer\Services\<keyName>` with `BASEURL` and `Type`, inferred
+from strings in `setup_wm.exe`, on the theory that WMP would fetch
+`<baseURL>serviceinfo.xml`. Three checks killed that:
+
+1. The documented page lists no such key. `BASEURL` appears in `setup_wm.exe`
+   as a value it *reads* from an existing registration, not one it requires.
+2. `%sserviceinfo.xml` in that binary is the format string behind the
+   `/ServiceInfo:<path>` switch — and `<path>` is a **local file path**. WMP is
+   handed a file once, at install time. It is not a runtime URL fetch.
+3. `TestParameter` is not a client-side filter. Microsoft says WMP *retrieves
+   the test ServiceInfo document* named by that key, and that the provider
+   registers test and production URLs with **Microsoft**. A key Microsoft never
+   issued cannot resolve to a local document however it is written.
+
+**So `install-online-store` no longer writes `BASEURL` or `Type`.** The
+documented local-store route is `setup_wm.exe`:
+
+```powershell
+python "FAI Server.py" install-online-store --setup-wm --dry-run
+python "FAI Server.py" install-online-store --setup-wm
+```
+
+which writes `ServiceInfo.xml` to `%APPDATA%\WMP_FAIServer\online_store\` and
+runs Microsoft's own installer:
+
+```
+setup_wm.exe /Q /R:N /DefaultService:<keyName> /ServiceInfo:<full path>
+```
+
+`DefaultService` "must match the key name in the Key attribute of the
+ServiceInfo element" — both are generated from `store_id`, so they cannot drift.
+
+**The honest limitation:** an unpublished store is gated behind a test key that
+**Microsoft issues**. `9100` in `online_store.ini` is a placeholder, and the
+documentation is explicit that the provider supplies Microsoft with the test
+and production ServiceInfo URLs. Without a real key, WMP may simply not show
+the tab. That is not something a local workaround can fix, and
+`online-store-diagnose` says so rather than implying the store is broken.
+
+If the tab is hidden for that reason, the storefront itself still works and is
+fully usable at `http://127.0.0.1/online-store/`.
+
+### The storefront is styled after the Media Guide
+
+WMP hosts the store in a task pane it sizes itself, so the page reproduces the
+Windows Media Player 11 "Media Guide" layout rather than a modern responsive
+site: the solid blue title bar, the left **Media Guide** category rail, the
+inset search field, and the album grid of square covers with the price beneath.
+It is built to survive being squeezed to ~300 px — the rail becomes a horizontal
+row and the grid reflows to one column — because that is the same constraint
+the original Media Guide worked under.
+
+One trap worth recording, since it is not obvious: the CSS is substituted
+*after* Jinja renders the page. Jinja only expands `{{ name }}`, so a `__CSS__`
+placeholder passed in as a template variable is not a template expression at all
+and would ship to the browser literally, leaving the page completely unstyled
+while still returning HTTP 200. `_html_page` asserts the placeholder survived
+and fails loudly if it did not.
+
+### The subscription key is opt-in, and why
+
+`SubscriptionObjectGUID` names the CLSID of the class implementing
+`IWMPSubscriptionService`. A commerce store has no plug-in, so the value points
+at a COM class that does not exist — and WMP enumerates `Subscriptions` at
+startup and tries to load it. On Windows 7 this was accompanied by WMP failing
+to start cleanly and instability in disc handling.
+
+Writing that key is therefore **off by default**:
+
+```powershell
+python "FAI Server.py" install-online-store                      # HKCU only
+python "FAI Server.py" install-online-store --register-subscription  # also HKLM
+```
+
+`online-store-diagnose` reports the state, because "the store does not appear"
+and "WMP misbehaves" were otherwise indistinguishable from a server fault.
+
 ### No COM component is involved
 
 Microsoft's own feature matrix marks the `IWMPSubscriptionService` plug-in
@@ -507,6 +599,61 @@ Diagnostics, which answer most "my store does not appear" questions:
 python "FAI Server.py" online-store-status
 Invoke-RestMethod http://127.0.0.1/online-store/api/status | ConvertTo-Json -Depth 6
 ```
+
+#### If Windows Media Player ejects discs, or closes
+
+Two independent causes, both fixed. Test in this order, because the first is
+one command and the second needs the new build.
+
+**1. The disc is ejected when Play or Rip is pressed.**
+
+The trigger was this project's own "no metadata" answer, not the store
+registration. WMP asks for metadata when playback or a rip begins, so an
+unmatched request arriving at exactly that moment used to return:
+
+```xml
+<METADATA><version>5.0</version><status>NOTFOUND</status>
+<MDR-CD><version>5.0</version></MDR-CD></METADATA>
+```
+
+`NOTFOUND` is how WMP is told *there is no such media*, and with no
+`<requestID>` or `<mdr-id>` in the document it had nothing to match the answer
+against the disc it had asked about — so it discarded the disc. That is the
+reported pattern exactly: the first track plays or rips, and the next request
+comes back "no such disc".
+
+`empty_metadata_xml()` now builds that response per request, echoing the
+caller's own identifiers back, with `<status>OK</status>` meaning "the exchange
+completed for this disc — I have no tags for it". Still zero tracks, so nothing
+is written to an untagged disc; it just no longer tells WMP to throw the disc
+away. There is deliberately **no** `EMPTY_METADATA_XML` constant any more — an
+unaddressed constant cannot be correct by construction, and leaving one behind
+is how the eject came back after being fixed once already.
+
+**2. WMP fails to start cleanly, or closes.**
+
+Run:
+
+```bat
+WMP-FAI-Server-Win7Test.exe online-store-diagnose
+```
+
+It exits non-zero when it finds something wrong. If it reports
+
+- **`[BAD] SubscriptionObjectGUID ... has NO registered COM class`** — that key
+  was written by an earlier build. Microsoft's spec says `SubscriptionObjectGUID`
+  names "the class identifier (CLSID) for the class that implements
+  IWMPSubscriptionService in the online store's plug-in", and a commerce store
+  has no plug-in — so the value pointed at nothing, and WMP enumerates
+  `Subscriptions` at startup and tries to load it.
+
+  Fix: `install-online-store-win7.bat uninstall`, or delete
+  `HKLM\SOFTWARE\Microsoft\MediaPlayer\Subscriptions\legacy_music_store`. The
+  installer now removes that key automatically on install, so upgrading to a
+  current build is enough.
+
+- **`[!] TestParameter contains '9100'`** — expected, and unfixable locally.
+  See the note about test keys below.
 
 #### Discogs is off until you supply a token
 

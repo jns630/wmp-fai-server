@@ -34,6 +34,7 @@ would mean changing the packaging contract for a feature that does not need it.
 """
 import json
 import os
+from xml.sax.saxutils import escape
 
 from flask import (Blueprint, Response, jsonify, redirect, render_template_string,
                    request, url_for)
@@ -55,12 +56,12 @@ _state = {"config": None, "provider": None, "error": None}
 
 
 def _html_page(title, body, config, nav_active=""):
-    """Wrap a page in the storefront chrome.
+    """Wrap a page in the Media Guide chrome.
 
     Deliberately plain, self-contained HTML with no external CSS, JS or fonts.
-    WMP hosts this page inside a browser control whose document is created
-    from a local URL, and a page that reaches out to a CDN can be slow, blocked
-    or render differently depending on the machine's security zone.
+    WMP hosts this page inside a browser control whose document is created from
+    a local URL, and a page that reaches out to a CDN can be slow, blocked or
+    render differently depending on the machine's security zone.
 
     The placeholders are Jinja (``{{ }}``) because this goes through
     ``render_template_string``, which is Jinja and NOT Python's ``%``-formatting.
@@ -69,71 +70,51 @@ def _html_page(title, body, config, nav_active=""):
     empty in WMP's task pane while still returning HTTP 200. Hence the test
     that asserts the store name is actually in the served bytes.
     """
-    accent = config.button_color
-    return render_template_string("""<!DOCTYPE html>
+    css = _MEDIA_GUIDE_CSS % {
+        "accent": config.button_color,
+        "accent_text": config.button_text_color,
+    }
+    provider = _state.get("provider")
+    provider_label = provider.display_name if provider else "no provider"
+    # The CSS is interpolated AFTER Jinja renders, not passed in as a variable.
+    # Jinja only substitutes {{ name }}, so a bare __CSS__ placeholder is not a
+    # template expression and would ship to the browser literally - the page
+    # would render completely unstyled. Doing the substitution here, on the
+    # rendered result, is the only ordering that works.
+    page = render_template_string("""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ title }}</title>
-<style>
- :root { --accent: {{ accent }}; --text: #FFFFFF; }
- * { box-sizing: border-box; }
- body { margin:0; font: 13px/1.5 "Segoe UI", Tahoma, sans-serif;
-        background:#1E1E24; color:#E8E8EC; }
- header { background:var(--accent); color:var(--text); padding:10px 14px; }
- header h1 { margin:0; font-size:15px; font-weight:600; }
- header .sub { opacity:.85; font-size:11px; margin-top:2px; }
- nav { background:#2A2A33; padding:0 8px; border-bottom:1px solid #3A3A46; }
- nav a { display:inline-block; padding:8px 12px; color:#BFC0C8;
-         text-decoration:none; font-size:12px; }
- nav a.on, nav a:hover { color:#FFF; background:#3A3A46; }
- main { padding:14px; }
- a { color:#7AB7FF; }
- input[type=text], input[type=search] { background:#17171C; color:#E8E8EC;
-   border:1px solid #3A3A46; padding:6px 8px; border-radius:3px; width:220px; }
- button { background:var(--accent); color:var(--text); border:0;
-   padding:6px 12px; border-radius:3px; cursor:pointer; font-size:12px; }
- button:disabled { background:#45454F; cursor:default; }
- .grid { display:flex; flex-wrap:wrap; gap:14px; }
- .card { background:#26262E; border:1px solid #33333D; border-radius:4px;
-   padding:10px; width:200px; }
- .card img { width:100%; height:200px; object-fit:cover; border-radius:3px;
-   display:block; background:#17171C; }
- .card .t { font-weight:600; margin:8px 0 2px; }
- .card .a { color:#9A9AA6; font-size:12px; }
- .card .p { color:#9FD39A; font-size:12px; margin-top:6px; }
- table { width:100%; border-collapse:collapse; }
- th, td { text-align:left; padding:7px 8px; border-bottom:1px solid #33333D;
-   font-size:12px; }
- th { color:#9A9AA6; font-weight:600; }
- .dur { color:#9A9AA6; }
- .note { color:#9A9AA6; font-size:11px; margin-top:10px; }
- .err { background:#3A2020; border:1px solid #6A3030; color:#FFB0B0;
-   padding:10px; border-radius:3px; }
- .flash { background:#1F3320; border:1px solid #2F5A30; color:#B0E8B0;
-   padding:8px 10px; border-radius:3px; margin-bottom:12px; }
-</style>
+<style>__CSS__</style>
 </head>
 <body>
-<header>
+<div class="mg-top"><div class="mg-titlebar">
   <h1>{{ store }}</h1>
-  <div class="sub">Type 2 commerce store &middot; {{ provider_label }}</div>
-</header>
-<nav>
-  <a href="{{ prefix }}/" class="{{ on_home }}">Browse</a>
-  <a href="{{ prefix }}/downloads" class="{{ on_dl }}">Downloads</a>
-  <a href="{{ prefix }}/api/status">Status</a>
-</nav>
-<main>{{ body|safe }}</main>
+  <span class="mg-sub">{{ provider_label }}</span>
+  <span class="mg-crumb">{{ title }}</span>
+</div></div>
+<div class="mg-body">
+  <nav class="mg-rail">
+    <div class="mg-railhead">Media Guide</div>
+    <a href="{{ prefix }}/" class="{{ on_home }}">Browse Music</a>
+    <a href="{{ prefix }}/search" class="{{ on_search }}">Search</a>
+    <a href="{{ prefix }}/downloads" class="{{ on_dl }}">Downloads</a>
+    <a href="{{ prefix }}/api/status">Status</a>
+  </nav>
+  <main class="mg-main">{{ body|safe }}</main>
+</div>
 </body>
 </html>""",
-        title=title, accent=accent, store=config.friendly_name,
-        provider_label=(_state.get("provider").display_name
-                        if _state.get("provider") else "no provider"),
-        prefix=URL_PREFIX, body=body,
-        on_home="on" if nav_active == "home" else "",
-        on_dl="on" if nav_active == "downloads" else "")
+                              title=title, store=config.friendly_name,
+                              provider_label=provider_label, prefix=URL_PREFIX,
+                              body=body,
+                              on_home="on" if nav_active == "home" else "",
+                              on_search="on" if nav_active == "search" else "",
+                              on_dl="on" if nav_active == "downloads" else "")
+    if "__CSS__" not in page:
+        raise RuntimeError("storefront template lost its CSS placeholder")
+    return page.replace("__CSS__", css)
 
 
 def _get_state():
@@ -147,7 +128,11 @@ def _get_state():
 
 
 def _art_src(album_id):
-    return "%s%s/art/%s" % (_state["config"].base_url, URL_PREFIX, album_id)
+    # base_url ALREADY ends in the mount prefix (it is
+    # "http://127.0.0.1/online-store"), so appending URL_PREFIX again produced
+    # ".../online-store/online-store/art/..." and every cover 404'd. Only the
+    # /art/<id> suffix belongs here.
+    return "%s/art/%s" % (_state["config"].base_url.rstrip("/"), album_id)
 
 
 def _money(value, currency):
@@ -156,20 +141,124 @@ def _money(value, currency):
     return "%s %s" % (value, currency or "")
 
 
+#: The Windows Media Player 11 / 12 "Media Guide" chrome.
+#:
+#: WMP hosts this page in a task pane whose width it chooses, so the layout is
+#: built to survive being squeezed to ~300px as well as filling a window:
+#: sections wrap, the grid reflows to a single column, and nothing relies on a
+#: fixed pixel width. That is the same constraint the original Media Guide
+#: worked under, which is why the proportions here mirror it rather than a
+#: modern responsive site.
+#:
+#: Colours are WMP's own, not a designer's: #1F5C99 blue chrome, #0F1216 page
+#: background, #E8E8EC body text. Sourced from the WMP 11 "Media Guide" era
+#: screenshots and matched to the Color element the store advertises.
+_MEDIA_GUIDE_CSS = """
+:root { --accent: %(accent)s; --accent-text: %(accent_text)s;
+        --page: #0F1216; --panel: #1A1F26; --panel2: #232A33;
+        --line: #2E3742; --text: #E8E8EC; --muted: #98A2AE; }
+* { box-sizing: border-box; }
+html, body { height: 100%%; }
+body { margin: 0; background: var(--page); color: var(--text);
+       font: 12px/1.45 "Segoe UI", Tahoma, "Microsoft Sans Serif", sans-serif; }
+a { color: #6FB2F2; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* Title bar: the solid accent strip the Media Guide used across the top. */
+.mg-top { background: var(--accent); color: var(--accent-text); }
+.mg-titlebar { padding: 9px 14px 8px; display: flex; align-items: baseline;
+               gap: 10px; flex-wrap: wrap; }
+.mg-titlebar h1 { margin: 0; font-size: 15px; font-weight: 600; letter-spacing: .2px; }
+.mg-titlebar .mg-sub { font-size: 11px; opacity: .85; }
+.mg-crumb { font-size: 11px; opacity: .9; margin-left: auto; }
+
+/* Left rail, like the Media Guide's category column. Collapses to a row on
+   narrow panes rather than disappearing, so navigation is never lost. */
+.mg-body { display: flex; align-items: stretch; min-height: 0; }
+.mg-rail { width: 168px; flex: 0 0 168px; background: var(--panel);
+           border-right: 1px solid var(--line); padding: 10px 0; }
+.mg-rail a { display: block; padding: 7px 14px; color: var(--text); font-size: 12px; }
+.mg-rail a:hover { background: var(--panel2); text-decoration: none; }
+.mg-rail a.on { background: var(--accent); color: var(--accent-text);
+                font-weight: 600; }
+.mg-rail .mg-railhead { padding: 4px 14px 7px; color: var(--muted);
+                        font-size: 10px; text-transform: uppercase;
+                        letter-spacing: .6px; }
+.mg-main { flex: 1 1 auto; min-width: 0; padding: 12px 14px 24px; }
+
+@media (max-width: 520px) {
+  .mg-body { display: block; }
+  .mg-rail { width: auto; border-right: none; border-bottom: 1px solid var(--line);
+             padding: 6px 0; }
+  .mg-rail a, .mg-rail .mg-railhead { display: inline-block; padding: 6px 10px; }
+}
+
+/* Search box, styled as the Media Guide's inset field. */
+.mg-search { display: flex; gap: 6px; margin-bottom: 14px; flex-wrap: wrap; }
+.mg-search input { flex: 1 1 150px; min-width: 120px; background: #0A0D11;
+                   color: var(--text); border: 1px solid var(--line);
+                   padding: 6px 8px; border-radius: 2px; font-size: 12px; }
+.mg-search button, .mg-buy { background: var(--accent); color: var(--accent-text);
+                             border: 0; padding: 6px 12px; border-radius: 2px;
+                             cursor: pointer; font-size: 12px; }
+.mg-buy:hover, .mg-search button:hover { filter: brightness(1.12); }
+.mg-buy:disabled { background: #39424D; color: #8B949E; cursor: default; }
+
+.mg-h2 { font-size: 13px; font-weight: 600; margin: 0 0 3px; }
+.mg-note { color: var(--muted); font-size: 11px; margin: 3px 0 14px; }
+
+/* Album grid. minmax rather than fixed widths so 200px works and 700px does
+   not leave a ragged gap; the Media Guide reflowed the same way. */
+.mg-grid { display: grid; gap: 14px;
+           grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); }
+.mg-card { background: var(--panel); border: 1px solid var(--line);
+           border-radius: 3px; overflow: hidden; }
+.mg-card img { width: 100%%; aspect-ratio: 1/1; object-fit: cover; display: block;
+               background: #0A0D11; }
+.mg-card .mg-t { font-weight: 600; font-size: 12px; padding: 7px 8px 0;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mg-card .mg-a { color: var(--muted); font-size: 11px; padding: 0 8px;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mg-card .mg-p { color: #9FD39A; font-size: 11px; padding: 4px 8px 8px; }
+
+table.mg-tbl { width: 100%%; border-collapse: collapse; }
+table.mg-tbl th, table.mg-tbl td { text-align: left; padding: 6px 8px;
+                                   border-bottom: 1px solid var(--line); font-size: 12px; }
+table.mg-tbl th { color: var(--muted); font-weight: 600; }
+table.mg-tbl td.mg-dur { color: var(--muted); white-space: nowrap; }
+
+.mg-hero { float: right; width: 148px; height: 148px; object-fit: cover;
+           border: 1px solid var(--line); border-radius: 3px;
+           margin: 0 0 10px 14px; }
+.mg-flash { background: #16301A; border: 1px solid #2F5A30; color: #B6E8B6;
+            padding: 9px 11px; border-radius: 3px; margin-bottom: 12px; }
+.mg-err { background: #33191B; border: 1px solid #6A3030; color: #FFB4B4;
+          padding: 9px 11px; border-radius: 3px; }
+.mg-foot { color: var(--muted); font-size: 10px; margin-top: 18px;
+           border-top: 1px solid var(--line); padding-top: 9px; }
+code { color: #9FD39A; }
+"""
+
+
 def _album_card(album):
-    return """<div class="card">
+    return """<div class="mg-card">
   <a href="%(prefix)s/album/%(id)s"><img src="%(art)s" alt="%(title)s"></a>
-  <div class="t"><a href="%(prefix)s/album/%(id)s">%(title)s</a></div>
-  <div class="a">%(artist)s</div>
-  <div class="p">%(price)s</div>
+  <div class="mg-t"><a href="%(prefix)s/album/%(id)s">%(title)s</a></div>
+  <div class="mg-a">%(artist)s</div>
+  <div class="mg-p">%(price)s</div>
 </div>""" % {
         "prefix": URL_PREFIX,
         "id": album.album_id,
         "art": _art_src(album.album_id),
-        "title": album.title,
-        "artist": album.artist,
+        "title": escape(album.title),
+        "artist": escape(album.artist),
         "price": _money(album.price, album.currency),
     }
+
+
+def _album_grid(albums):
+    return '<div class="mg-grid">%s</div>' % "".join(
+        _album_card(album) for album in albums)
 
 
 def _purchases_dir():
@@ -190,17 +279,17 @@ def storefront_home():
     """The store's main page - the URL advertised as ServiceTask1."""
     config, provider = _get_state()
     albums = provider.list_albums(limit=60)
-    body = ["""<form method="get" action="%s/search" style="margin-bottom:12px">
-  <input type="search" name="q" placeholder="Search the catalog" value="%s">
-  <button type="submit">Search</button>
-</form>""" % (URL_PREFIX, request.args.get("q", ""))]
+    body = ['<h2 class="mg-h2">Browse Music</h2>',
+            '<form class="mg-search" method="get" action="%s/search">'
+            '<input type="search" name="q" placeholder="Search the catalog" '
+            'value="%s"><button type="submit">Search</button></form>'
+            % (URL_PREFIX, escape(request.args.get("q", "")))]
     if albums:
-        body.append('<div class="grid">%s</div>'
-                    % "".join(_album_card(album) for album in albums))
+        body.append(_album_grid(albums))
     else:
-        body.append('<p class="note">The catalog is empty.</p>')
-    body.append('<p class="note">%d album(s). Content is synthesised locally '
-                'for testing; no commercial store is connected.</p>'
+        body.append('<p class="mg-note">The catalog is empty.</p>')
+    body.append('<div class="mg-foot">%d album(s). Content is synthesised '
+                'locally for testing; no commercial store is connected.</div>'
                 % len(albums))
     return _html_page(config.friendly_name, "".join(body), config, "home")
 
@@ -211,35 +300,38 @@ def storefront_album(album_id):
     album = provider.get_album(album_id)
     if album is None:
         return _html_page("Not found",
-                          '<p class="err">No album with id %s.</p>' % album_id,
-                          config), 404
+                          '<p class="mg-err">No album with id %s.</p>'
+                          % escape(album_id), config), 404
     rows = []
     for track in album.tracks:
         price = _money(track.price, track.currency)
         rows.append(
-            "<tr><td>%d</td><td>%s</td><td class='dur'>%s</td>"
-            "<td class='dur'>%s</td>"
+            "<tr><td>%d</td><td>%s</td><td class='mg-dur'>%s</td>"
+            "<td class='mg-dur'>%s</td>"
             "<td><form method='post' action='%s/buy' style='display:inline'>"
             "<input type='hidden' name='track_id' value='%s'>"
-            "<button type='submit'>Buy %s</button></form></td></tr>"
-            % (track.track_number, track.title,
+            "<button class='mg-buy' type='submit'>Buy %s</button></form></td></tr>"
+            % (track.track_number, escape(track.title),
                format_duration(track.duration_ms), price,
-               URL_PREFIX, track.track_id, price))
-    body = """<p><a href="%s/">&larr; Back</a></p>
-<h2 style="margin:4px 0 0">%s</h2>
-<div style="color:#9A9AA6; margin-bottom:10px">%s%s%s</div>
-<img src="%s" alt="" style="width:150px;height:150px;object-fit:cover;
-     border-radius:3px;float:right;margin:0 0 10px 14px">
-<table>
+               URL_PREFIX, escape(track.track_id), price))
+    # str() before escape(): escape() is an XML helper and only accepts text.
+    # album.year is an int in the model, which is what made this page a 500 -
+    # the pre-existing code interpolated it with %s, which coerced it silently.
+    facts = " &middot; ".join(part for part in (
+        escape(str(album.artist or "")),
+        escape(str(album.genre or "")),
+        escape(str(album.year))) if part)
+    body = """<img class="mg-hero" src="%s" alt="">
+<h2 class="mg-h2">%s</h2>
+<p class="mg-note">%s</p>
+<table class="mg-tbl">
  <tr><th>#</th><th>Title</th><th>Length</th><th>Price</th><th></th></tr>
  %s
 </table>
 <div style="clear:both"></div>
-<p class="note">%s</p>""" % (
-        URL_PREFIX, album.title, album.artist,
-        " &middot; %s" % album.genre if album.genre else "",
-        " &middot; %s" % album.year if album.year else "",
-        _art_src(album.album_id), "".join(rows), album.description)
+<p class="mg-note">%s</p>""" % (
+        _art_src(album.album_id), escape(album.title), facts,
+        "".join(rows), escape(album.description or ""))
     return _html_page(album.title, body, config, "home")
 
 
@@ -247,18 +339,22 @@ def storefront_album(album_id):
 def storefront_search():
     config, provider = _get_state()
     query = (request.args.get("q") or "").strip()
+    body = ['<h2 class="mg-h2">Search</h2>',
+            '<form class="mg-search" method="get" action="%s/search">'
+            '<input type="search" name="q" value="%s">'
+            '<button type="submit">Search</button></form>'
+            % (URL_PREFIX, escape(query))]
     if query:
         albums = provider.search(query, limit=60)
-        body = ["<h2>Results for &ldquo;%s&rdquo; (%d)</h2>"
-                % (query, len(albums))]
-        body.append(('<div class="grid">%s</div>'
-                     % "".join(_album_card(album) for album in albums))
-                    if albums else '<p class="note">Nothing matched.</p>')
+        body.append('<p class="mg-note">%d result(s) for &ldquo;%s&rdquo;</p>'
+                    % (len(albums), escape(query)))
+        body.append(_album_grid(albums) if albums
+                    else '<p class="mg-note">Nothing matched.</p>')
     else:
-        body = ['<p class="note">Type something in the search box.</p>']
-    body.append('<p class="note"><a href="%s/">Back to browse</a></p>'
-                % URL_PREFIX)
-    return _html_page("Search", "".join(body), config, "home")
+        body.append('<p class="mg-note">Type something in the search box.</p>')
+    body.append('<div class="mg-foot"><a href="%s/">Back to Browse Music</a>'
+                '</div>' % URL_PREFIX)
+    return _html_page("Search", "".join(body), config, "search")
 
 
 @blueprint.route(URL_PREFIX + "/serviceinfo.xml")
@@ -293,7 +389,7 @@ def store_downloads():
     config, _ = _get_state()
     purchases_dir = _purchases_dir()
     if not os.path.isdir(purchases_dir):
-        listing = ('<p class="note">Purchases directory not created yet. Set '
+        listing = ('<p class="mg-note">Purchases directory not created yet. Set '
                    '<code>purchases_dir</code> in online_store.ini to change '
                    'where bought files land.</p>')
     else:
@@ -303,11 +399,11 @@ def store_downloads():
                 if name.lower().endswith((".wav", ".mp3", ".flac", ".m4a")):
                     found.append(os.path.join(root, name))
         found.sort()
-        listing = ("<ul>%s</ul>" % "".join("<li>%s</li>" % path
+        listing = ("<ul>%s</ul>" % "".join("<li>%s</li>" % escape(path)
                                           for path in found[:200])
-                   if found else '<p class="note">Nothing purchased yet.</p>')
-    body = ('<h2>Downloads</h2><p class="note">Everything here was produced '
-            'locally by the fake provider.</p>%s' % listing)
+                   if found else '<p class="mg-note">Nothing purchased yet.</p>')
+    body = ('<h2 class="mg-h2">Downloads</h2><p class="mg-note">Everything here '
+            'was produced locally by the fake provider.</p>%s' % listing)
     return _html_page("Downloads", body, config, "downloads")
 
 
@@ -346,28 +442,30 @@ def store_buy():
     track_id = (request.form.get("track_id")
                 or request.args.get("track_id") or "").strip()
     if not track_id:
-        return _html_page("No track", '<p class="err">No track_id given.</p>',
+        return _html_page("No track",
+                          '<p class="mg-err">No track_id given.</p>',
                           config), 400
     if not getattr(provider, "supports_purchase", False):
         return _html_page(
             "Not for sale",
-            '<p class="err">Provider %r cannot deliver purchases.</p>'
-            % provider.provider_id, config), 501
+            '<p class="mg-err">Provider %r cannot deliver purchases.</p>'
+            % escape(provider.provider_id), config), 501
     purchase = provider.purchase(track_id)
     if purchase is None:
         return _html_page(
             "Not found",
-            '<p class="err">Provider %r has no track %s.</p>'
-            % (provider.provider_id, track_id), config), 404
-    body = """<div class="flash">Purchased &ldquo;%s&rdquo; by %s.</div>
+            '<p class="mg-err">Provider %r has no track %s.</p>'
+            % (escape(provider.provider_id), escape(track_id)), config), 404
+    body = """<div class="mg-flash">Purchased &ldquo;%s&rdquo; by %s.</div>
 <p>File written to:</p>
 <p><code>%s</code></p>
-<p class="note">%s bytes, %s. Generated locally - this is not a DRM-protected
-file and not a real recording. Open it in WMP with
+<p class="mg-note">%s bytes, %s. Generated locally - this is not a
+DRM-protected file and not a real recording. Open it in WMP with
 <em>File &rarr; Open</em>, or browse the
 <a href="%s/downloads">downloads page</a>.</p>""" % (
-        purchase.title, purchase.artist, purchase.local_path,
-        "{:,}".format(purchase.size_bytes), purchase.content_type, URL_PREFIX)
+        escape(purchase.title), escape(purchase.artist),
+        escape(purchase.local_path), "{:,}".format(purchase.size_bytes),
+        escape(purchase.content_type or ""), URL_PREFIX)
     return _html_page("Purchased", body, config, "downloads")
 
 

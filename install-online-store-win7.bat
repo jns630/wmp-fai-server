@@ -123,7 +123,19 @@ set "DRY_FLAG=--dry-run"
 if "%DRYRUN%"=="0" set "DRY_FLAG="
 
 echo --- registry ------------------------------------------------------
-if /i "%ACTION%"=="uninstall" (call :run_exe uninstall-online-store) else (call :run_exe install-online-store)
+REM The old build wrote HKLM\...\MediaPlayer\Subscriptions\<id> with a
+REM SubscriptionObjectGUID naming a COM class that does not exist. WMP tries to
+REM load that class, and on Windows 7 that was reported as discs being EJECTED
+REM when Play or Rip was pressed, and the player sometimes closing. It is
+REM removed here on install as well as on uninstall, so upgrading to this build
+REM is enough - the user does not have to find it by hand.
+set "SUBKEY=HKLM\SOFTWARE\Microsoft\MediaPlayer\Subscriptions\legacy_music_store"
+if /i "%ACTION%"=="uninstall" (
+  call :run_exe uninstall-online-store
+) else (
+  call :remove_stale_subscription
+  call :run_exe install-online-store
+)
 if errorlevel 1 (
   echo.
   echo [X] The server command failed. Nothing further was attempted.
@@ -178,6 +190,28 @@ call :pause_if_interactive
 exit /b 0
 
 REM ---------------------------------------------------------------------------
+:remove_stale_subscription
+REM Delete the old dangling Subscriptions key if present. reg.exe is used rather
+REM than the EXE so this still works when the store config is broken, and it is
+REM a no-op when the key is already absent.
+reg query "%SUBKEY%" >nul 2>&1
+if errorlevel 1 exit /b 0
+if "%DRYRUN%"=="1" (
+  echo   [WOULD REMOVE] %SUBKEY%
+  exit /b 0
+)
+reg delete "%SUBKEY%" /f >nul 2>&1
+if errorlevel 1 (
+  echo   [!] could not remove %SUBKEY%
+  echo       This key names a COM class that does not exist, and is the most
+  echo       likely cause of discs being ejected when Play or Rip is pressed.
+  echo       Run this file as Administrator and try again.
+  exit /b 0
+)
+echo   [removed] %SUBKEY%
+exit /b 0
+
+
 :hosts_entry
 REM Ensure (or, when uninstalling, drop) one hosts line for %HOSTNAME%.
 REM

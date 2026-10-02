@@ -13,12 +13,12 @@ import importlib
 import json
 import sys
 
-from . import registry
+from . import registry, setupwm
 from .config import ConfigError, load_config
 from .providers import available_providers
 
 COMMANDS = ("install-online-store", "uninstall-online-store",
-            "online-store-status")
+            "online-store-status", "online-store-diagnose")
 
 
 def _build_parser():
@@ -40,6 +40,14 @@ def _build_parser():
                               "the store CLSID. Only for a future Type 2 music "
                               "store that actually ships a plug-in; this "
                               "project ships none.")
+    install.add_argument("--register-subscription", action="store_true",
+                         help="ALSO write HKLM\\...\\MediaPlayer\\Subscriptions. "
+                              "Off by default: that key's SubscriptionObjectGUID "
+                              "names a COM class that does not exist, and on "
+                              "Windows 7 it was accompanied by WMP instability.")
+    install.add_argument("--setup-wm", action="store_true",
+                         help="also register through Microsoft's documented "
+                              "setup_wm.exe /DefaultService /ServiceInfo route")
 
     uninstall = subs.add_parser(
         "uninstall-online-store",
@@ -50,6 +58,14 @@ def _build_parser():
                            help="also delete the CLSID key. Off by default so "
                                 "a CLSID shared with other software is never "
                                 "destroyed.")
+    uninstall.add_argument("--setup-wm", action="store_true",
+                           help="also ask setup_wm.exe to drop the store")
+
+    diagnose = subs.add_parser(
+        "online-store-diagnose",
+        help="explain what is registered and what is wrong with it")
+    diagnose.add_argument("--json", action="store_true",
+                          help="machine-readable output")
 
     status = subs.add_parser(
         "online-store-status",
@@ -62,6 +78,23 @@ def _build_parser():
 def _print_lines(lines, prefix="  "):
     for line in lines:
         print(prefix + line)
+
+
+#: Severity marker per diagnose() finding. "bad" is the one that matters, and
+#: it is the only one that changes the command's exit code.
+_SEVERITY_MARK = {"ok": "[ok]  ", "info": "[--]  ", "warn": "[!]   ",
+                  "bad": "[BAD] "}
+
+
+def _print_findings(findings):
+    """Render diagnose() output, wrapping long messages so they stay readable."""
+    import textwrap
+    for severity, message in findings:
+        mark = _SEVERITY_MARK.get(severity, "[?]   ")
+        body = textwrap.wrap(message, width=72) or [""]
+        print("  " + mark + body[0])
+        for extra in body[1:]:
+            print("         " + extra)
 
 
 def _discogs_status():
@@ -212,16 +245,36 @@ def main(argv=None):
         try:
             _print_lines(registry.install(
                 config, dry_run=args.dry_run,
-                register_plugin_dll=args.register_plugin_dll))
-        except registry.RegistryError as exc:
+                register_plugin_dll=args.register_plugin_dll,
+                register_subscription=args.register_subscription))
+            if args.setup_wm:
+                print("")
+                print("Via setup_wm.exe (the documented route):")
+                _print_lines(setupwm.register(config, dry_run=args.dry_run))
+        except (registry.RegistryError, setupwm.SetupError) as exc:
             print("\n%s" % exc)
             return 1
         if not args.dry_run:
             print("")
             print("Done. Start the server, then open WMP's Online Stores tab.")
-            print("Check /online-store/api/status to confirm WMP can reach the "
-                  "ServiceInfo document.")
+            print("Check /online-store/api/status to confirm the server is up.")
+            print("")
+            print("If the store does not appear, run online-store-diagnose: a")
+            print("self-chosen test key is not one Microsoft issued, and the")
+            print("store cannot be made visible without that.")
         return 0
+
+    if args.command == "online-store-diagnose":
+        findings = registry.diagnose(config)
+        if args.json:
+            print(json.dumps([{"severity": s, "message": m}
+                              for s, m in findings], indent=2))
+        else:
+            print("Online Store diagnosis")
+            print("=" * 60)
+            _print_findings(findings)
+        # Non-zero when something is actually wrong, so a script can gate on it.
+        return 1 if any(s == "bad" for s, _ in findings) else 0
 
     if args.command == "uninstall-online-store":
         print("%s %r"
@@ -230,13 +283,16 @@ def main(argv=None):
         try:
             _print_lines(registry.uninstall(
                 config, dry_run=args.dry_run, remove_clsid=args.remove_clsid))
-        except registry.RegistryError as exc:
+            if args.setup_wm:
+                _print_lines(setupwm.unregister(config, dry_run=args.dry_run))
+        except (registry.RegistryError, setupwm.SetupError) as exc:
             print("\n%s" % exc)
             return 1
         if not args.dry_run:
             print("")
             print("Done. Unrelated Windows Media Player settings were not "
                   "touched.")
+            print("Restart Windows Media Player so it re-reads its config.")
         return 0
 
     parser.print_help()

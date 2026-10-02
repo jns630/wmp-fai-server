@@ -464,15 +464,74 @@ def _discogs_get(path, params=None, timeout=8, attempts=3):
 # Returned when no metadata has been staged for the disc/collection WMP is
 # asking about. It carries no album and no tracks, so WMP leaves the album
 # exactly as it is instead of applying whatever was staged most recently.
-EMPTY_METADATA_XML = (
-    '<METADATA>'
-    '<version>5.0</version>'
-    '<status>NOTFOUND</status>'
-    '<MDR-CD>'
-    '<version>5.0</version>'
-    '</MDR-CD>'
-    '</METADATA>'
-)
+#
+# WHY THIS IS A TEMPLATE AND NOT A CONSTANT
+# ------------------------------------------
+# Reported on Windows 7 as: pressing Play or Rip EJECTED the disc - the first
+# track played or ripped, and the second one ejected the disc - and WMP
+# sometimes closed.
+#
+# The trigger is not the store registration, it is this document. WMP asks for
+# metadata when playback or a rip begins, so this is exactly when the eject
+# happened. Two things here tell WMP the disc is unusable:
+#
+#   * <status>NOTFOUND</status> is WMP's "there is no such media" answer. The
+#     comment on the successful-document builder below already records that
+#     when <status> was absent, WMP read the response as "no result, never
+#     completed the collection". NOTFOUND says the same thing, only louder.
+#   * an empty <MDR-CD> with no <mdr-id> and no <requestID> gives WMP nothing
+#     to correlate the answer with the disc it asked about, so it cannot tell
+#     "no tags for this disc" from "this disc is gone" and discards the disc
+#     from the playback/rip list.
+#
+# So the empty document now echoes the caller's own identifiers back, and is
+# built per request by empty_metadata_xml(). An empty MDR-CD that is correctly
+# addressed means "I have nothing for this disc" - leave it alone. That is a
+# different instruction from NOTFOUND, which means "stop, this disc is not
+# here". The distinction is the whole fix.
+#
+# <status>OK</status> is deliberate and is NOT a claim that tags were found.
+# It reports that the exchange completed for the disc being asked about. The
+# document still carries zero tracks, so nothing is written; it just does not
+# tell WMP to eject. Verified against the successful-document builder below,
+# which uses the same value for the same reason.
+#
+# There is deliberately no module-level EMPTY_METADATA_XML constant any more.
+# An unaddressed constant cannot be correct by construction - every response
+# needs the CALLER's ids in it - so it would only ever be a wrong document
+# waiting for a route to use it. That is exactly what happened: it stayed
+# behind, unused, holding the old NOTFOUND value, which is the more dangerous
+# outcome of the two, because a future edit that routes to it reintroduces the
+# eject. empty_metadata_xml() is now the only way to produce this document.
+def empty_metadata_xml(request_id='', collection_id=''):
+    """Return the no-metadata document, addressed to the caller's own disc.
+
+    Every identifier WMP sent us is echoed back so the response can be matched
+    to the disc. ``request_id`` and ``collection_id`` are optional so a request
+    carrying neither still gets a well-formed document rather than a literal
+    empty placeholder.
+
+    Escapes with ``html.escape`` rather than the project's ``xesc``: this
+    function sits near the top of the file, long before ``xesc`` is defined,
+    and a name that does not exist yet at module level is a NameError on the
+    first disc with no metadata - which is exactly the request that was
+    ejecting discs.
+    """
+    rid = str(request_id or '').strip()
+    cid = str(collection_id or '').strip()
+    parts = ['<METADATA>', '<version>5.0</version>', '<status>OK</status>']
+    if rid:
+        parts.append('<requestID>%s</requestID>' % html.escape(rid, quote=False))
+    parts.append('<MDR-CD>')
+    parts.append('<version>5.0</version>')
+    if rid:
+        parts.append('<mdr-id>%s</mdr-id>' % html.escape(rid, quote=False))
+    if cid:
+        parts.append('<WMCollectionID>%s</WMCollectionID>'
+                     % html.escape(cid, quote=False))
+    parts.append('</MDR-CD>')
+    parts.append('</METADATA>')
+    return ''.join(parts)
 
 LAST_XML = None   # last staged document (diagnostics only - never served blindly)
 # Reentrant: store_staged_xml() holds this while calling _stage_request_xml(),
@@ -2926,9 +2985,34 @@ def mdr_post():
                 if wmid_q:
                     auto_xml = _retarget_collection_id(auto_xml, wmid_q)
                 return Response(auto_xml, mimetype='text/xml')
-    return Response(EMPTY_METADATA_XML, mimetype='text/xml')
+    # Nothing matched. Echo the caller's own request id and collection id back
+    # inside an empty document, so WMP can match the answer to the disc and keep
+    # it. Returning the bare NOTFOUND constant here was what made WMP discard
+    # the disc when Play or Rip began - see empty_metadata_xml().
+    return Response(_empty_document_for_request(), mimetype='text/xml')
 
     return Response("<METADATA><version>5.0</version><status>OK</status></METADATA>", mimetype='text/xml')
+
+def _empty_document_for_request():
+    """The no-metadata document, addressed to whatever this request named.
+
+    Reads the identifiers straight off the current request so a caller cannot
+    forget to pass one: the whole point is that WMP gets its own request id back,
+    and a helper that needed arguments would eventually be called with none.
+    """
+    rid = (request.args.get('requestID', '')
+           or request.args.get('requestid', '')
+           or request.form.get('requestID', '')
+           or '').strip()
+    cid = (raw_query_arg('wmid') or raw_query_arg('WMID')
+           or request.form.get('wmid', '') or '').strip()
+    if not rid:
+        # A disc TOC is also an identity WMP can correlate, and it is what a
+        # Play or Rip request carries when there is no request id at all.
+        rid = (raw_query_arg('cd') or raw_query_arg('CD')
+               or raw_query_arg('toc') or raw_query_arg('TOC') or '').strip()
+    return empty_metadata_xml(request_id=rid, collection_id=cid)
+
 
 def _is_dialog_host_client(user_agent):
     """True when the caller is a BROWSER that will render the FAI dialog itself.
@@ -3069,9 +3153,11 @@ def legacy_redirects():
     # host the dialog, so redirecting them at an HTML page would leave them with
     # nothing they can use.
 
-    # No metadata for this TOC: return an EMPTY document rather than the last
-    # album staged, which would tag an unrelated disc.
-    return Response(EMPTY_METADATA_XML, mimetype='text/xml')
+    # No metadata for this TOC. Return an EMPTY document addressed to this disc,
+    # rather than the last album staged, which would tag an unrelated disc. See
+    # empty_metadata_xml(): an empty MDR-CD must still echo the caller's own id,
+    # or WMP treats "no tags" as "disc gone" and ejects it.
+    return Response(_empty_document_for_request(), mimetype='text/xml')
 # ==========================================================
 # CONCURRENT HYBRID SEARCH API (ITUNES + MUSICBRAINZ)
 # ==========================================================
@@ -6134,15 +6220,26 @@ if __name__ == "__main__":
     # install/uninstall must never open port 80 as a side effect, and must not
     # generate or trust a certificate as a side effect either - it only writes
     # registry keys.
-    if len(sys.argv) > 1 and sys.argv[1] in (
-            "install-online-store", "uninstall-online-store",
-            "online-store-status"):
+    # The list is derived from the CLI's own COMMANDS tuple rather than repeated
+    # here. Hard-coding it was how `online-store-diagnose` silently fell through
+    # to the HTTP server: the dispatcher did not know the name, so it started
+    # listening on port 80 for a command that only reads the registry.
+    if len(sys.argv) > 1:
         try:
-            import online_store
-            sys.exit(online_store.main(sys.argv[1:]))
-        except Exception as exc:
-            print(f"[!] online-store command failed: {exc}")
-            sys.exit(1)
+            from online_store import cli as _store_cli
+            _subcommands = set(_store_cli.COMMANDS)
+        except Exception:
+            _subcommands = {"install-online-store", "uninstall-online-store",
+                            "online-store-status"}
+        if sys.argv[1] in _subcommands:
+            try:
+                import online_store
+                sys.exit(online_store.main(sys.argv[1:]))
+            except SystemExit:
+                raise
+            except Exception as exc:
+                print(f"[!] online-store command failed: {exc}")
+                sys.exit(1)
 
     def run_http():
         print(f"[*] Starting HTTP server on port {HTTP_PORT}...")
