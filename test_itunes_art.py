@@ -88,6 +88,49 @@ check("the OLD replace corrupted a mid-path size token",
 check("  the new version leaves such a URL untouched",
       NEW_MID == MIDPATH, NEW_MID)
 
+# ---- No silent DOWNGRADE to the 100px original --------------------------
+# The rewrite above required the size token to be followed by ".jpg"/".png".
+# iTunes also serves two other real shapes - a bare size segment with NO
+# extension, and a .webp - and those silently stayed at 100px. That is a
+# regression against the plain replace, which upgraded both. Every check below
+# asserts the URL is genuinely upgraded, never merely "not mangled".
+BARE = "https://is1-ssl.mzstatic.com/image/thumb/Music115/v4/44/06/fd/44.rgb.jpg/100x100bb"
+check("a bare size segment with no extension is still upgraded",
+      hires(BARE).endswith("/600x600bb"), hires(BARE))
+
+WEBP = "https://is1-ssl.mzstatic.com/image/thumb/Music/x/100x100bb.webp"
+check("a .webp artwork URL is still upgraded",
+      hires(WEBP).endswith("/600x600bb.webp"), hires(WEBP))
+
+# The 60px thumbnail is artworkUrl60, the fallback field. Upgrading it is a
+# strict improvement - the old replace left it at 60px.
+SMALL = "https://is1-ssl.mzstatic.com/image/thumb/Music/x/60x60bb.jpg"
+check("a 60px thumbnail is upgraded rather than left tiny",
+      hires(SMALL).endswith("/600x600bb.jpg"), hires(SMALL))
+
+# iTunes returns uppercase occasionally; the old literal replace missed these.
+UPPER = "https://is1-ssl.mzstatic.com/image/thumb/Music/x/100x100BB.JPG"
+check("an uppercase URL is upgraded (the old replace was case-sensitive)",
+      hires(UPPER).endswith("/600x600BB.JPG"), hires(UPPER))
+
+# Regression guard, stated as the invariant rather than as per-shape examples:
+# for every shape the plain replace upgraded, so must this.
+ALL_SHAPES = [NESTED, PLAIN, BN, BARE, WEBP, SMALL, UPPER,
+              BARE + ".jpg", "https://is1-ssl.mzstatic.com/image/thumb/M/x/"
+              "859727388959_cover.jpg/100x100bb.jpg",
+              "https://is1-ssl.mzstatic.com/image/thumb/M/x/cover_100x100bb.jpg"]
+downgraded = [u for u in ALL_SHAPES
+              if "100x100bb" in u.lower()
+              and "600x600" not in hires(u).lower()]
+check("no shape is left sitting at 100px", not downgraded, downgraded)
+
+# And the safety property that motivated the rewrite must still hold.
+check("a size token that is not a real segment is never touched",
+      hires(MIDPATH) == MIDPATH, hires(MIDPATH))
+check("Discogs-style URLs are untouched",
+      hires("https://i.discogs.com/abc-123.jpeg")
+      == "https://i.discogs.com/abc-123.jpeg")
+
 print()
 if failures:
     print("FAILED: %d" % len(failures))

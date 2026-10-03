@@ -1338,11 +1338,17 @@ def _itunes_art_hires(art_url):
     """
     if not art_url:
         return ""
-    # Replace the trailing size segment only. The replacement does NOT re-use the
-    # captured width - that would yield "100x600x600bb.jpg", since group 1 is
-    # the existing width digits and not a prefix to keep.
-    upgraded, count = re.subn(r"\d+x\d+(bb|bn)\.(jpg|png)$",
-                              r"600x600\g<1>.\g<2>", art_url,
+    # Replace the trailing size segment only, and treat a missing extension as
+    # equally valid. ``\d+x\d+bb`` is followed by EITHER an extension or the end
+    # of the string - matching only "...bb.jpg" silently downgraded the two other
+    # real shapes to the 100px original: ".../100x100bb" (no extension) and
+    # ".../100x100bb.webp", because neither ends in jpg/png. The previous plain
+    # str.replace upgraded all three, so this must too.
+    #
+    # The replacement does NOT re-use the captured width - that would yield
+    # "100x600x600bb.jpg", since the digits are the existing width, not a prefix.
+    upgraded, count = re.subn(r"\d+x\d+(bb|bn)(?=\.|\Z)",
+                              r"600x600\g<1>", art_url,
                               flags=re.IGNORECASE)
     if count:
         return upgraded
