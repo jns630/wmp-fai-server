@@ -173,6 +173,28 @@ check("a later apply supersedes the queued one",
       _first is not None and _second is not None and _first is not _second,
       "two pending writes for one album would race each other")
 
+# An unrelated untagged track anywhere in the library must not make the rip
+# lookup refuse. This is a real shape: the fallback below only trusts the
+# untagged files when they share one parent folder, so a single stray untagged
+# file under Music used to silently mean "no art" on the disc.
+stray_dir = tempfile.mkdtemp(prefix="stray_")
+stray = os.path.join(stray_dir, "some_other_download.mp3")
+make_mp3(stray, None, None, "Untagged, not this album")
+# Backdated, because that is the real shape: the stray has been sitting there for
+# months, the disc's own files were written seconds ago. A stray created NOW
+# would be indistinguishable from the rip, and no time window could separate them.
+_old_stray = time.time() - (fai.ART_EMBED_RIP_WINDOW * 3)
+os.utime(stray, (_old_stray, _old_stray))
+fai.ART_EMBED_FOLDERS = [cdrip_dir, stray_dir]
+check("rip lookup is narrowed by the window, not defeated by a stray file",
+      len(fai._find_album_files(ALBUM, ARTIST, fai.ART_EMBED_FOLDERS,
+                                recent_seconds=fai.ART_EMBED_RIP_WINDOW)) == 1,
+      "a stray untagged file elsewhere must not stop the disc's own file "
+      "from being found")
+check("the same lookup WITHOUT the window still refuses (unchanged safety)",
+      fai._find_album_files(ALBUM, ARTIST, fai.ART_EMBED_FOLDERS) == [],
+      "a library-wide guess is still refused; only the rip path is narrowed")
+
 r = client.post("/client_error", json={"page": "finish", "applied": False})
 check("guard: applied=false does nothing", r.status_code == 200)
 r = client.post("/client_error", json={"page": "search", "applied": True})

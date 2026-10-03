@@ -380,6 +380,10 @@ ART_EMBED_RIP_DEFER = 30
 #: is SKIPPED rather than raced. A second pass is not needed: if WMP is still
 #: working after half a minute, this album was applied a long time ago.
 ART_EMBED_RIP_SETTLE = 20
+#: How far back to look for the files a rip just wrote. Generous, because WMP
+#: writes them over a long period, but still bounded so an old untagged library
+#: cannot be mistaken for this disc - see _find_album_files().
+ART_EMBED_RIP_WINDOW = 4 * 60 * 60
 
 #: Deferred rip writes, keyed by album, so a second apply supersedes the first
 #: instead of two threads writing the same files.
@@ -524,7 +528,7 @@ def _iter_audio_files(folders):
                 yield os.path.join(root, name)
 
 
-def _find_album_files(album_title, artist, folders):
+def _find_album_files(album_title, artist, folders, recent_seconds=None):
     """Return the files whose tags say they belong to this album.
 
     Two passes, because of a real ordering problem. When the user runs Find
@@ -567,6 +571,22 @@ def _find_album_files(album_title, artist, folders):
     # Nothing is tagged yet. This is the normal pre-FAI state.
     if not untagged:
         return []
+    # A RIP is the case where the library-wide untagged set is the wrong pool.
+    # The fallback below only trusts the untagged files when they all share one
+    # parent folder, so a single unrelated untagged track anywhere under Music is
+    # enough to make it refuse - and on a rip that refusal is invisible, it just
+    # means no art. WMP has told us which files it wrote by their mtime, so for a
+    # rip the pool is narrowed to files touched inside the window. That is both
+    # narrower and MORE correct: the files WMP wrote seconds ago are this disc.
+    if recent_seconds:
+        cutoff = time.time() - recent_seconds
+        fresh = [p for p in untagged if os.path.getmtime(p) >= cutoff]
+        if fresh:
+            log_line("ART-EMBED",
+                     f"'{album_title}': rip lookup narrowed to the "
+                     f"{len(fresh)} file(s) written in the last {recent_seconds}s "
+                     f"(of {len(untagged)} untagged)")
+            untagged = fresh
     # Only trust it when the untagged files are together in one album folder,
     # i.e. they share a parent directory. A loose pile in the Music root is not
     # an album and must not be stamped with one cover.
@@ -698,7 +718,8 @@ def _schedule_rip_art_embed(album_title, artist, cover_url):
                  f"{ART_EMBED_RIP_SETTLE}s)")
         try:
             _embed_art_into_files(album_title, artist, cover_url,
-                                  settle=ART_EMBED_RIP_SETTLE)
+                                  settle=ART_EMBED_RIP_SETTLE,
+                                  recent_seconds=ART_EMBED_RIP_WINDOW)
         except Exception as exc:          # a daemon thread must not die loudly
             log_line("ART-EMBED", f"'{album_title}': deferred write failed: {exc}")
 
@@ -711,18 +732,24 @@ def _schedule_rip_art_embed(album_title, artist, cover_url):
              f"+{ART_EMBED_RIP_DEFER}s (WMP is still writing these files now)")
 
 
-def _embed_art_into_files(album_title, artist, cover_url, settle=0):
+def _embed_art_into_files(album_title, artist, cover_url, settle=0,
+                          recent_seconds=None):
     """Locate the album's files and write ``cover_url`` into each of them.
 
     ``settle`` is seconds: a file whose mtime is newer than that is still being
     written by WMP and is skipped, never raced. 0 disables the check, which is
     right for a LIBRARY album because WMP has finished with those files by the
     time this runs.
+
+    ``recent_seconds`` narrows the untagged-folder fallback to files written
+    inside that window. Rips pass it; library albums must not, because it is only
+    sound for files WMP has just written.
     """
     if not cover_url:
         log_line("ART-EMBED", f"'{album_title}' has no cover URL; nothing to do")
         return
-    files = _find_album_files(album_title, artist, ART_EMBED_FOLDERS)
+    files = _find_album_files(album_title, artist, ART_EMBED_FOLDERS,
+                              recent_seconds=recent_seconds)
     if not files:
         log_line("ART-EMBED",
                  f"no files tagged '{album_title}' under "
@@ -3504,7 +3531,13 @@ def mdr_post():
         # artwork from one that was handed a URL it then failed to fetch.
         _art = re.search(r"<largeCoverParams>([^<]*)</largeCoverParams>", staged)
         _art = _art.group(1).strip() if _art and _art.group(1).strip() else ""
-        log_line("MDR", f"  -> art={('none' if not _art else _art[:110])} "
+        # Log the URL WHOLE. It used to be cut at 110 characters, which is
+        # actively misleading rather than merely terse: a Discogs cover URL runs
+        # to ~190 characters and the cut lands mid-path, so the logged value looks
+        # like a dead URL. Copying it back out of the log then fetches a 403 that
+        # says nothing about the document that was actually served. The value is
+        # bounded by the provider's URL, so there is no unbounded-log risk.
+        log_line("MDR", f"  -> art={('none' if not _art else _art)} "
                         f"(mode={_effective_art_mode()})")
         return Response(staged, mimetype='text/xml')
 
@@ -6467,10 +6500,12 @@ def store_staged_xml():
         # after "no art" is always "what URL did WMP get, and was it fetchable".
         _cover_m = re.search(r"<largeCoverParams>([^<]*)</largeCoverParams>", xml)
         _cover_val = (_cover_m.group(1) if _cover_m else "")
+        # Whole URL, not a prefix - see the note at the [MDR] line. A cut at 110
+        # characters lands mid-path on a Discogs URL and reads like a dead one.
         log_line("STAGED", f"album={album.get('title')!r} artist={album.get('artist')!r} "
                            f"tracks={len(selected_tracks)} req_id={req_id!r} toc={toc_val!r} "
                            f"xml_bytes={len(xml)} art={_effective_art_mode()} "
-                           f"cover={_cover_val[:110]!r}")
+                           f"cover={_cover_val!r}")
         return Response(xml, mimetype='text/xml')
     except Exception as e:
         import traceback
