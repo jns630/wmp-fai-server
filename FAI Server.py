@@ -138,6 +138,16 @@ except Exception as _store_exc:  # pragma: no cover - defensive
     print(f"[!] Online Store could not be initialised ({_store_exc}). "
           f"The Find Album Info server is unaffected.")
 
+# Cover art -> files, for LIBRARY tagging only. Imported defensively for the
+# same reason the store is: a feature that is switched off must never be able to
+# take the Find Album Info server down with it.
+try:
+    import artwork_embed
+except Exception as _art_exc:  # pragma: no cover - defensive
+    artwork_embed = None
+    print(f"[!] artwork_embed unavailable ({_art_exc}); cover art will not be "
+          f"written into files. Tagging and cover display are unaffected.")
+
 # ==========================================================
 # THREAD-SAFE TTL CACHE
 # ==========================================================
@@ -324,7 +334,269 @@ def client_error():
     if not payload:
         payload = request.form.to_dict() if request.form else dict(request.args)
     log_line("CLIENT", json.dumps(payload, ensure_ascii=False)[:3000])
+    # A finished dialog that APPLIED metadata on a LIBRARY album is the one
+    # case where the cover never reaches the files. Deliberately NOT done for a
+    # CD: WMP writes tags and artwork itself while ripping, and touching those
+    # files would race the write.
+    try:
+        _maybe_embed_art_after_library_tag(payload)
+    except Exception as exc:            # never let this break the beacon
+        log_line("ART-EMBED", f"skipped: {type(exc).__name__}: {exc}")
     return Response("OK", mimetype="text/plain")
+
+
+# ==========================================================
+# COVER ART -> FILES, FOR LIBRARY TAGGING ONLY
+# ==========================================================
+# WMP's Find Album Info applies the text tags through WriteNamesEx, but for a
+# LIBRARY album it never writes the picture into the files - the cover lives only
+# in WMP's library database and is lost if the library is rebuilt or the files
+# move to another player. For a CD rip, WMP writes both tags and artwork itself,
+# so those files are left strictly alone.
+#
+# WMP sends no file path. What it does send is ?wmid= (the collection GUID) and
+# the applied album's tags, so the files are located by reading their tags back
+# and matching on the album we just applied. That is reliable because of the
+# ordering: WMP writes the text tags BEFORE this beacon fires.
+#
+# Off by default. Set embed_art_in_library = true in online_store.ini, and set
+# library_folders to the folders holding the music.
+ART_EMBED_ENABLED = True
+ART_EMBED_FOLDERS = []
+#: Ceiling on files touched per operation. A mis-typed album name that matches
+#: nothing must not mean rewriting an entire library.
+ART_EMBED_MAX_FILES = 200
+
+
+def _art_embed_config():
+    """Read the art-embedding settings, ignoring anything malformed.
+
+    Which online_store.ini is read matters more than it looks. In a frozen
+    build ``__file__`` is inside ``_internal\\``, so the FIRST candidate - the
+    folder holding this module - is the BUNDLED copy, which always exists. That
+    meant a user editing the INI beside the EXE, which is the only place they
+    can reach in a packaged build, was silently ignored, and the feature read
+    back as OFF no matter what they set. The executable's own folder is
+    therefore checked FIRST when frozen, and only then the bundled one.
+    """
+    global ART_EMBED_ENABLED, ART_EMBED_FOLDERS
+    try:
+        import configparser
+        candidates = []
+        if getattr(sys, "frozen", False):
+            # Beside the .exe: the copy the user edits.
+            candidates.append(os.path.join(
+                os.path.dirname(os.path.abspath(sys.executable)),
+                "online_store.ini"))
+        # Next to this file: the source checkout, or _internal\ when frozen.
+        candidates.append(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "online_store.ini"))
+        path = next((p for p in candidates if os.path.exists(p)), None)
+        if path is None:
+            log_line("ART-EMBED", f"no online_store.ini found in {candidates}")
+            return
+        parser = configparser.ConfigParser()
+        parser.read(path)
+        ART_EMBED_ENABLED = parser.getboolean(
+            "art_embed", "embed_art_in_library", fallback=True)
+        raw = parser.get("art_embed", "library_folders", fallback="")
+        ART_EMBED_FOLDERS = [os.path.expandvars(os.path.expanduser(
+            p.strip().strip('"')))
+            for p in raw.replace(";", "\n").split("\n") if p.strip()]
+        if not ART_EMBED_FOLDERS:
+            # Default to this user's own Music folder. Resolved from the OS
+            # rather than written into the INI, because the INI is shared in
+            # git and a hard-coded C:\Users\<name> would be wrong on every
+            # machine but one.
+            home = os.path.expanduser("~")
+            candidate = os.path.join(home, "Music")
+            if os.path.isdir(candidate):
+                ART_EMBED_FOLDERS = [candidate]
+            else:
+                log_line("ART-EMBED",
+                         f"no library_folders set and {candidate} does not "
+                         f"exist; set library_folders in {path}")
+        log_line("ART-EMBED",
+                 f"read {path}: enabled={ART_EMBED_ENABLED} "
+                 f"folders={ART_EMBED_FOLDERS}")
+    except Exception as exc:
+        log_line("ART-EMBED", f"config unreadable: {exc}")
+
+
+def _pending_album_from_xml():
+    """(album_title, artist, cover_url) from the document staged most recently."""
+    xml = PENDING_WRITE.get("xml") or ""
+    if not xml:
+        return None
+    def field(tag):
+        m = re.search(r"<%s>(.*?)</%s>" % (tag, tag), xml, re.IGNORECASE | re.DOTALL)
+        return m.group(1).strip() if m else ""
+    title = field("albumTitle")
+    if not title:
+        return None
+    return title, field("albumArtist"), field("largeCoverParams")
+
+
+def _fetch_artwork_bytes(url):
+    """Download a cover image, reusing the server's image cache.
+
+    The staged ``largeCoverParams`` is whatever mode this server is in, so it
+    may be an absolute upstream URL, a relative scheme-less path, or a URL on
+    this same server. All three are already handled by the /cover/ route, so
+    rather than reimplement that resolution this asks the cache first and then
+    the same upstream fetch the proxy uses.
+    """
+    if not url:
+        return None
+    cached = image_cache.get(url)
+    if cached:
+        return cached[0]
+    if not url.lower().startswith(("http://", "https://")):
+        # Relative form (Win7 / legacy clients). Resolve it the way the client
+        # would: against our own base, so it comes back through /cover/.
+        base = "http://127.0.0.1"
+        m = re.match(r"^/?(cover/[^\s]+)$", url)
+        if not m:
+            log_line("ART-EMBED", f"cannot resolve relative cover {url[:60]!r}")
+            return None
+        url = base + "/" + m.group(1)
+    try:
+        r = session.get(url, headers={"User-Agent": BROWSER_AGENT},
+                        timeout=8, verify=False)
+    except Exception as exc:
+        log_line("ART-EMBED", f"cover download failed: {exc}")
+        return None
+    if r.status_code != 200 or not r.content:
+        log_line("ART-EMBED", f"cover download returned {r.status_code}")
+        return None
+    return r.content
+
+
+def _norm(text):
+    """Loose comparison key: case, accents and spacing-insensitive.
+
+    Deliberately forgiving. WMP's own album title can differ from the value in
+    the files by case or by an accent ("Bjoerk" vs "Björk"), and the tags being
+    matched are ones this project just wrote, so a near match is far better than
+    no match. The artist is only used as a tie-breaker, never as the sole key.
+    """
+    text = str(text or "").strip().lower()
+    text = "".join(ch for ch in text if ch.isalnum())
+    return text
+
+
+def _iter_audio_files(folders):
+    """Yield every supported audio file under ``folders``, bounded."""
+    seen = 0
+    for folder in folders:
+        if not folder or not os.path.isdir(folder):
+            continue
+        for root, dirs, files in os.walk(folder):
+            # Never descend into a folder the user clearly did not mean to
+            # include; both are large and both can hold media.
+            dirs[:] = [d for d in dirs if not d.startswith(".")
+                       and d.lower() not in ("system volume information",)]
+            for name in sorted(files):
+                if not artwork_embed.is_supported(name):
+                    continue
+                seen += 1
+                if seen > ART_EMBED_MAX_FILES * 20:
+                    return
+                yield os.path.join(root, name)
+
+
+def _find_album_files(album_title, artist, folders):
+    """Return the files whose tags say they belong to this album."""
+    want_album = _norm(album_title)
+    want_artist = _norm(artist)
+    matched = []
+    for path in _iter_audio_files(folders):
+        try:
+            tags = artwork_embed.read_tags(path)
+        except Exception:
+            continue
+        if not tags.get("album"):
+            continue
+        if _norm(tags["album"]) != want_album:
+            continue
+        # Album alone is enough when it is unambiguous. The artist is a
+        # tie-breaker: several different albums can share a title, and
+        # "Greatest Hits" is the obvious one.
+        matched.append((_norm(tags.get("artist")), path))
+    if not matched:
+        return []
+    if want_artist and any(a == want_artist for a, _p in matched):
+        return [p for a, p in matched if a == want_artist]
+    artists = {a for a, _p in matched}
+    if len(artists) == 1:
+        return [p for _a, p in matched]
+    # Ambiguous: several artists' files carry this album title. Doing nothing is
+    # the safe answer - guessing would stamp one artist's cover onto another's
+    # files.
+    log_line("ART-EMBED",
+             f"'{album_title}' matches {len(artists)} different artists; "
+             f"refusing to guess")
+    return []
+
+
+def _maybe_embed_art_after_library_tag(payload):
+    """Write the cover into the files of a LIBRARY album, if configured.
+
+    Called from the client beacon once WMP reports the dialog finished. Every
+    early return below is a guard, and the guards are the feature: the cost of
+    writing art into the wrong files is much higher than the cost of doing
+    nothing.
+    """
+    if not ART_EMBED_ENABLED:
+        return
+    if artwork_embed is None:
+        return
+    if str(payload.get("page", "")).lower() != "finish":
+        return
+    if not payload.get("applied"):
+        return
+    if not ART_EMBED_FOLDERS:
+        return
+    # A CD rip is EXCLUDED here, and this is the whole point of the feature.
+    # WMP sends the disc TOC in this same beacon; a non-empty toc means a
+    # physical disc, where WMP has already written the artwork itself.
+    if str(payload.get("toc", "") or "").strip():
+        log_line("ART-EMBED", "CD rip (toc present) - not touching the files")
+        return
+    staged = _pending_album_from_xml()
+    if not staged:
+        return
+    album_title, artist, cover_url = staged
+    if not cover_url:
+        log_line("ART-EMBED", f"'{album_title}' has no cover URL; nothing to do")
+        return
+    files = _find_album_files(album_title, artist, ART_EMBED_FOLDERS)
+    if not files:
+        log_line("ART-EMBED",
+                 f"no files tagged '{album_title}' under "
+                 f"{ART_EMBED_FOLDERS}; check library_folders")
+        return
+    if len(files) > ART_EMBED_MAX_FILES:
+        files = files[:ART_EMBED_MAX_FILES]
+        log_line("ART-EMBED",
+                 f"capped at {ART_EMBED_MAX_FILES} files for '{album_title}'")
+    image = _fetch_artwork_bytes(cover_url)
+    if not image:
+        log_line("ART-EMBED", f"could not download cover for '{album_title}'")
+        return
+    written, skipped = 0, 0
+    for path in files:
+        try:
+            if artwork_embed.write_art(path, image):
+                written += 1
+            else:
+                skipped += 1
+        except Exception as exc:
+            skipped += 1
+            log_line("ART-EMBED", f"  {os.path.basename(path)}: {exc}")
+    log_line("ART-EMBED",
+             f"'{album_title}': wrote cover into {written} file(s), "
+             f"{skipped} already had one or unsupported")
 
 
 # ---- Discogs (OPTIONAL third provider) ---------------------------------------
@@ -6251,6 +6523,20 @@ if __name__ == "__main__":
     threading.Thread(target=run_http, daemon=True).start()
 
     ensure_ssl_certificates()
+    # Load the cover-art-to-files settings at startup rather than on the first
+    # dialog, so a malformed value is reported in the console where it can be
+    # read instead of silently doing nothing hours later.
+    try:
+        _art_embed_config()
+        if ART_EMBED_ENABLED:
+            print("[*] Cover art -> files: ON for LIBRARY tagging (CD rips are "
+                  "never touched). Folders: %s"
+                  % (ART_EMBED_FOLDERS or "NONE SET - nothing will be written"))
+        else:
+            print("[*] Cover art -> files: off (set embed_art_in_library = true "
+                  "in online_store.ini)")
+    except Exception as _artcfg:                 # pragma: no cover
+        print("[!] art_embed config ignored (%s)" % _artcfg)
 
     try:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

@@ -655,6 +655,72 @@ It exits non-zero when it finds something wrong. If it reports
 - **`[!] TestParameter contains '9100'`** — expected, and unfixable locally.
   See the note about test keys below.
 
+#### Writing cover art into the FILES — library tagging only
+
+When you use Find Album Info on an album **already in your library**, WMP writes
+the text tags to the files but never writes the cover into them. The picture
+then exists only in WMP's library database, and is lost if the library is
+rebuilt or the files are played anywhere else. This writes it into the files.
+
+**It is deliberately never done for CDs.** WMP applies metadata to a physical
+disc through COM while it rips, and it already writes both the tags and the
+artwork to every track — you get cover art on all tracks from a full-album rip
+today. Touching those files here would race that write for no gain. The two
+paths are told apart by the disc TOC the dialog reports: a beacon carrying one is
+a CD, and is skipped.
+
+**On by default.** With nothing configured, it uses **this user's own Music
+folder**, resolved from the OS at startup — `C:\Users\<your name>\Music` on
+Windows. That is why it is resolved rather than written into `online_store.ini`:
+the INI is shared in git, and a hard-coded `C:\Users\User\Music` would be wrong on
+every machine but one. (Note that `C:\Users\User\Music` typed literally is *not*
+a placeholder the server expands — it is read as a real path, and no such folder
+exists.)
+
+To point it somewhere else:
+
+```ini
+[art_embed]
+embed_art_in_library = true
+library_folders =
+    D:\Albums
+    %USERPROFILE%\Downloads\Music
+```
+
+One folder per line, or separated by semicolons. Subfolders are included;
+anything not listed is never opened. The server prints the resolved setting at
+startup:
+
+```
+[*] Cover art -> files: ON for LIBRARY tagging (CD rips are never touched).
+    Folders: ['C:\\Users\\jawwa\\Music']
+```
+
+**Where the INI is read from matters in a packaged build.** The copy **beside
+the `.exe`** wins over the bundled one inside `_internal\`. That was not
+originally true — the loader checked its own module directory first, which in a
+frozen build is always the bundled copy, so editing the INI beside the EXE was
+silently ignored and the feature always read back as OFF. Both directions are
+now covered by tests.
+
+WMP sends **no file path** — a library dialog carries only `?wmid=` and the
+per-track content IDs. So the files are found by reading their tags and matching
+the album just applied, which works because WMP writes the text tags *before* the
+dialog reports success.
+
+Supported: **MP3** (ID3v2 `APIC`) and **FLAC** (`METADATA_BLOCK_PICTURE`).
+Both are written in pure Python. `.wma`, `.m4a` and `.asf` are recognised and
+left alone.
+
+Three guards, all tested:
+
+- A **CD rip is never touched**, even when a file matches the album exactly.
+- A file that **already has art** is not rewritten, so re-tagging an album does
+  not stack copies of the image.
+- An **ambiguous album title** — several different artists' files share it, and
+  no artist was given — writes nothing at all rather than guessing. "Greatest
+  Hits" is the obvious case.
+
 #### Discogs is off until you supply a token
 
 If the album dialog shows MusicBrainz and Cover Art Archive results but **no
