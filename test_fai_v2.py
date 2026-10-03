@@ -2618,12 +2618,25 @@ _d1 = _cover(_alb, "direct", cd="B+96+1970")
 _d2 = _cover(dict(_alb, art_url="https://example.com/x.jpg?a=1&b=2"),
              "direct", cd="B+96+1970")
 check("direct-cover-is-the-upstream-url",
-      _d1 == _ARTU,
-      f"in direct mode the cover must be the upstream URL verbatim, got {_d1!r}")
+      _d1.split("?")[0] == _ARTU,
+      f"in direct mode the cover must still BE the upstream URL - same host, "
+      f"same path, no rewrite through /cover/ - got {_d1!r}")
+# The '?' above is the whole fix, not a loosening. Emitting _d1 == _ARTU exactly
+# meant every apply of an album produced a byte-identical URL, and WMP does not
+# re-fetch a cover URL it has already seen for a collection: on Windows 11 -
+# where direct is the default - the artwork could therefore never be updated
+# once cached. The appended token is what makes each apply new to WMP.
+check("direct-cover-adds-a-per-apply-token",
+      _d1.startswith(_ARTU + "?") and "fai_v=" in _d1
+      and _cover(_alb, "direct", cd="B+96+1970") != _d1,
+      f"direct mode must append its own per-apply parameter and it must change "
+      f"between applies, got {_d1!r}")
 check("direct-cover-survives-an-ampersand-in-the-upstream-url",
-      _d2 == "https://example.com/x.jpg?a=1&amp;b=2",
+      _d2.startswith("https://example.com/x.jpg?a=1&amp;b=2")
+      and "&amp;fai_v=" in _d2,
       f"direct mode still xesc-escapes, so an upstream '&' cannot make the "
-      f"document malformed, got {_d2!r}")
+      f"document malformed, and the appended token must be escaped the same "
+      f"way, got {_d2!r}")
 check("both-art-modes-agree-when-there-is-no-art",
       _cover(dict(_alb, art_url=""), "direct", cd="B+96+1970") == ""
       and _cover(dict(_alb, art_url=""), "proxy", cd="B+96+1970") == "",
@@ -2760,11 +2773,42 @@ finally:
 _MB_RESOLVED = ("https://dn710007.ca.archive.org/0/items/"
                 "mbid-d47ffe81-892b-46bf-ab3f-085c011d3292/"
                 "mbid-d47ffe81-892b-46bf-ab3f-085c011d3292-33662597246_thumb500.jpg")
+_MB_IN_DOC = _cover(dict(_alb, source="musicbrainz", art_url=_MB_RESOLVED),
+                    "direct", cd="B+96+1970")
 check("resolved-art-url-survives-into-the-document",
-      _cover(dict(_alb, source="musicbrainz", art_url=_MB_RESOLVED),
-             "direct", cd="B+96+1970") == _MB_RESOLVED,
-      "the resolved direct URL is what WMP reads out of largeCoverParams, "
-      "unchanged and unescaped")
+      _MB_IN_DOC.split("?")[0] == _MB_RESOLVED,
+      "the resolved direct URL is what WMP reads out of largeCoverParams; it "
+      "must arrive on WMP's side unchanged and unescaped. got: %r"
+      % _MB_IN_DOC[:130])
+
+# ...and it must NOT arrive on its own. A bare upstream URL is byte-identical on
+# every apply, and WMP will not re-fetch a cover URL it has already seen for a
+# collection - so in "direct" mode - the DEFAULT, and the mode Windows 11 runs -
+# re-applying an album could never change its art. The token is what makes each
+# apply a URL WMP has not cached. See _art_url_with_token / _strip_art_token.
+check("direct-mode-cover-url-carries-a-per-apply-token",
+      "fai_v=" in _MB_IN_DOC,
+      "direct mode must add the per-apply token to the upstream URL, or a "
+      "re-apply presents WMP a URL it has already cached. got: %r"
+      % _MB_IN_DOC[:130])
+_d2 = _cover(dict(_alb, source="musicbrainz", art_url=_MB_RESOLVED),
+             "direct", cd="B+96+1970")
+check("direct-mode-cover-token-changes-on-every-apply",
+      _d2 != _MB_IN_DOC and _d2.split("?")[0] == _MB_RESOLVED,
+      "two applies of the same album in direct mode must not hand WMP the same "
+      "URL. got %r then %r" % (_MB_IN_DOC[-14:], _d2[-14:]))
+
+# The token is ours and must be stripped again before any fetch goes upstream,
+# so a provider is never asked for a URL that has never existed.
+check("art-token-is-stripped-before-fetching",
+      fai._strip_art_token(_MB_RESOLVED + "?fai_v=4") == _MB_RESOLVED
+      and fai._strip_art_token("https://h/x.jpg?w=1&fai_v=4")
+      == "https://h/x.jpg?w=1"
+      and fai._strip_art_token("https://h/x.jpg?fai_v=4&locale=409")
+      == "https://h/x.jpg?locale=409"
+      and fai._strip_art_token("https://h/x.jpg") == "https://h/x.jpg",
+      "our own per-apply parameter must not reach the provider, in any of the "
+      "shapes the client can hand it back")
 
 # 48. REGRESSION. Adding the token as a SECOND QUERY PARAMETER put a bare '&'
 #      into largeCoverParams, which made the whole document not-well-formed.

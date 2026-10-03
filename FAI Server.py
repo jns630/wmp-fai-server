@@ -916,8 +916,15 @@ LAST_WMID = ""
 # [IMAGE] line at all in that session.
 _COVER_SEQ = 0
 
+#: The name of the query parameter that carries _COVER_SEQ in the artwork URL.
+#: It is OUR parameter, not the provider's - _strip_art_token() removes it again
+#: before anything is fetched upstream. Named here because both ends of that
+#: round trip have to agree, and they are 2000 lines apart.
+ART_TOKEN_PARAM = "fai_v"
+
 # How the artwork URL is presented to WMP: "proxy" (our own /cover/ endpoint) or
-# "direct" (the upstream image URL, verbatim).
+# "direct" (the upstream image URL - the provider's own host and path, plus our
+# per-apply token; it is NOT emitted verbatim, see _art_url_with_token()).
 #
 # This is THE artwork fix, and it was available long before it was made. Counting
 # /cover/ requests by user agent over the whole log:
@@ -959,7 +966,7 @@ _COVER_SEQ = 0
 # 'direct' stays the default. It is the shape a real FAI server sends, it is what
 # WMP 12 was given, and nothing observed since has beaten it.
 #
-#   $env:WMP_ART_MODE='direct'    # upstream URL verbatim (default)
+#   $env:WMP_ART_MODE='direct'    # upstream URL + per-apply token (default)
 #   $env:WMP_ART_MODE='proxy'     # absolute URL to our own /cover/ endpoint
 #   $env:WMP_ART_MODE='relative'  # scheme-less path for clients that resolve one
 _ART_MODE = (os.environ.get("WMP_ART_MODE", "direct").strip().lower()
@@ -2768,6 +2775,35 @@ def parse_mdq_content_ids(mdq_xml):
     return content_ids
 
 
+def _art_url_with_token(url):
+    """Append the per-apply token to an upstream artwork URL.
+
+    The token exists for ONE reason, and "direct" mode needs it exactly as much
+    as the proxy form does: WMP will not re-fetch a cover URL it has already seen
+    for a collection. So handing WMP the upstream URL verbatim means every apply
+    of the same album presents a byte-identical value - and a re-apply is the
+    ONLY thing "apply the album again" can be used for. That was the 15:43/15:52
+    Prospekt sequence: same album, same URL, and no [IMAGE] line at all the
+    second time, so the art could never be corrected.
+
+    "direct" was exempt from this, and "direct" is the DEFAULT - so the one mode
+    a Windows 11 install actually runs was the one mode that could never change
+    its artwork. The non-default modes have carried a token all along.
+
+    This does NOT change the shape WMP is handed: still the provider's own
+    absolute URL, still the same host and path. Only the query string is ours,
+    and _strip_art_token() takes it back off before any fetch goes upstream, so
+    the providers never see it.
+    """
+    global _COVER_SEQ
+    _COVER_SEQ += 1
+    # A URL that already has a query string takes '&', not a second '?'. The '&'
+    # is escaped by xesc() at the call site, so the document stays well-formed -
+    # a bare '&' in this field has broken the whole response before.
+    sep = "&" if "?" in url else "?"
+    return f"{url}{sep}{ART_TOKEN_PARAM}={_COVER_SEQ}"
+
+
 def build_wmp_xml(album_data, selected_tracks=None, request_id="",
                   content_ids=None, wmid="", cd=""):
     # The document's identity must be something WMP can correlate. A library
@@ -2841,7 +2877,13 @@ def build_wmp_xml(album_data, selected_tracks=None, request_id="",
     elif art_mode == "direct":
         # Upstream URLs carry no '&' in practice, but xesc unconditionally, so
         # this cannot reintroduce the well-formedness bug above.
-        proxy_art = xesc(art_url)
+        #
+        # The per-apply token is NOT optional here. Without it this branch emits
+        # a byte-identical URL for every apply of an album, and WMP will not
+        # re-fetch a cover URL it has already seen against that collection - so
+        # re-applying could never fix or change the artwork. See
+        # _art_url_with_token(), and _strip_art_token() for the other end.
+        proxy_art = xesc(_art_url_with_token(art_url))
     else:
         global _COVER_SEQ
         _COVER_SEQ += 1
@@ -3024,6 +3066,31 @@ def noart():
 # ==========================================================
 # IMAGE PROXY WITH IN-MEMORY TTL CACHE
 # ==========================================================
+def _strip_art_token(url):
+    """Remove our own per-apply token (see _art_url_with_token) before fetching.
+
+    The token is OURS, not the provider's. It exists only to give WMP a URL it
+    has not already cached for a collection, and it must not reach the provider:
+    forwarding it means asking a CDN to serve a URL that does not exist. On
+    mzstatic and coverartarchive that is harmless - both were probed and both
+    ignore an unknown parameter - but a provider that signs its URLs is entitled
+    to reject one, and the artwork must not depend on that.
+
+    Stripping has a second, better effect: `image_cache` is keyed on this URL,
+    so the image is downloaded once and then served from memory however many
+    times the album is re-applied.
+    """
+    if not url or ART_TOKEN_PARAM not in url:
+        return url
+    # '&(amp;)?' covers the document's own escaped spelling as well as the
+    # decoded one, in case a client hands the value back without unescaping it.
+    out = re.sub(r"&(?:amp;)?%s=\d+" % ART_TOKEN_PARAM, "", url)
+    out = re.sub(r"\?(?:amp;)?%s=\d+&?" % ART_TOKEN_PARAM, "?", out)
+    if out.endswith("?"):
+        out = out[:-1]
+    return out
+
+
 @app.route("/get_image")
 @app.route("/cover/album.jpg")
 @app.route("/cover/<path:ignore>")
@@ -3095,6 +3162,10 @@ def get_image(ignore=None):
                 url = requests.utils.unquote(url)
             except Exception:
                 pass
+    # OUR OWN parameter comes off here, after every decoding step and before
+    # anything is fetched: see _strip_art_token(). This is what keeps the
+    # per-apply token in largeCoverParams from ever reaching a provider.
+    url = _strip_art_token(url)
     if not url or not url.lower().startswith(("http://", "https://")):
         log_line("IMAGE", f"rejecting unusable url={str(url)[:60]!r}")
         return Response("", 404)
@@ -6287,9 +6358,20 @@ def store_staged_xml():
         })
 
         print(f"\n[METADATA APPLIED] Successfully staged XML for '{album.get('title')}' ({len(selected_tracks)} tracks)")
+        # The mode that was ACTUALLY used for this client, not the module default.
+        # It used to log _ART_MODE, which is only the default/env value - so on
+        # the Win7 build (and for a legacy XML client) the line said `art=direct`
+        # while a /cover/ URL had really been emitted. The whole point of this
+        # field is that a log says what WMP was offered, and it could lie.
+        #
+        # The cover URL is logged with it for the same reason: the next question
+        # after "no art" is always "what URL did WMP get, and was it fetchable".
+        _cover_m = re.search(r"<largeCoverParams>([^<]*)</largeCoverParams>", xml)
+        _cover_val = (_cover_m.group(1) if _cover_m else "")
         log_line("STAGED", f"album={album.get('title')!r} artist={album.get('artist')!r} "
                            f"tracks={len(selected_tracks)} req_id={req_id!r} toc={toc_val!r} "
-                           f"xml_bytes={len(xml)} art={_ART_MODE}")
+                           f"xml_bytes={len(xml)} art={_effective_art_mode()} "
+                           f"cover={_cover_val[:110]!r}")
         return Response(xml, mimetype='text/xml')
     except Exception as e:
         import traceback

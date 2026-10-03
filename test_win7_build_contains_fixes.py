@@ -49,6 +49,13 @@ markers = {
     # tested `toc` alone let a rip be written to mid-write. This string only
     # exists once the guard accepts either identifier.
     "CD rip (cd/toc present)": "disc identified by cd OR toc, not toc alone",
+    # The per-apply artwork token. `direct` mode - the DEFAULT, and the mode a
+    # Windows 11 install runs - used to emit a byte-identical URL on every apply,
+    # so WMP never re-fetched a cover for a collection. The parameter name and
+    # both helpers are here only if that fix is in the build.
+    "fai_v": "per-apply artwork token parameter",
+    "_art_url_with_token": "per-apply token applied to the cover URL",
+    "_strip_art_token": "per-apply token removed before fetching a provider",
 }
 
 failed = False

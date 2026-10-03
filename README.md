@@ -735,6 +735,13 @@ GET /FAI/default.aspx?...&cd=B+96+1970+523A+...
 [STAGED] album='Tiny Cities' tracks=11 req_id='' toc=''
 ```
 
+The `[STAGED]` line has since grown two fields — `art=<effective mode>` and
+`cover=<the largeCoverParams value>`. The first used to report the module
+default rather than the mode actually used, so it could claim `art=direct` while
+a `/cover/` URL had really been emitted; the second means a log answers "what
+URL did WMP get, and was it fetchable" without re-deriving it. Excerpts below
+that predate the change are left exactly as they were recorded.
+
 So an empty `toc` was never evidence of a library album — it is the *normal*
 shape of a disc. The dialog's own JS had already stated the rule
 (`var isLibrary = !WMP_CD && !WMP_TOC`); the server now uses it too, and the
@@ -1070,9 +1077,15 @@ its name. So the switch keys off that:
 | Deployment | Cover URL |
 |---|---|
 | Windows 7 test EXE (`…-Win7Test.exe`) | `/cover/…` (via this server) |
-| Official EXE, Windows 11 | upstream URL, unchanged |
-| Source checkout, Windows 11 | upstream URL, unchanged |
+| Official EXE, Windows 11 | upstream URL **+ `?fai_v=<n>`** |
+| Source checkout, Windows 11 | upstream URL **+ `?fai_v=<n>`** |
 | WMC / WMP 7-9 (no browser host) | `/cover/…` — same fragile rewrite |
+
+The `fai_v` parameter is present in *every* mode, and for the same reason: it is
+what makes each apply a URL WMP has not already cached against that collection.
+It is stripped again before any provider is dialled — see fix 4 below. What
+differs between the rows above is only whether the client is sent the provider's
+own URL or a URL on this server; it is not whether the URL is per-apply.
 
 `$env:WMP_ART_MODE` overrides all of it, as before (`direct`, `proxy`,
 `relative`).
@@ -1085,6 +1098,17 @@ build, the source checkout and a Windows 11 WMP 12 User-Agent all still get the
 direct URL. It also checks the emitted URL still carries no bare `&`, which
 would make the whole document not-well-formed and cost you the *tags* as well
 as the artwork.
+
+"Still gets the direct URL" is asserted as the *shape* — same host, same path,
+no rewrite through `/cover/` — and not as byte-equality, because the URL is
+deliberately not the same on two applies. The suite pins both ends of fix 4
+above: two applies in `direct` mode must produce **different** URLs that still
+point at the same upstream image, and `fai_v` must never survive into the URL
+the provider is dialled with, in every shape it can come back in (plain path,
+percent-encoded path, `?url=` form, and alongside WMP's own `locale`). That last
+pair is what lets a re-apply present WMP a URL it has not cached while still
+hitting `image_cache` — three applies with three different tokens are asserted
+to cause exactly **one** upstream download.
 
 #### Artwork on a CD rip
 
@@ -1107,6 +1131,30 @@ which was which, because three earlier theories turned out to be wrong:
    that session. WMP will not re-fetch a URL it already holds for a collection, so
    a stable token silently disables every retry. It is now `md5(album_id | art_url
    | apply_seq)`.
+4. **`direct` mode had no token at all — and `direct` is the default.** Fix 3
+   above only ever touched the *proxy* form, because that is where the token
+   lived: the prefix in `/cover/fai-1a2b3c4d/…`. `direct` mode emitted the
+   provider's URL verbatim, so it was the one mode with nothing per-apply in it.
+   That is the mode a Windows 11 install runs, which is why the symptom was
+   Windows 11-specific and why re-applying an album there changed nothing: every
+   apply handed WMP a byte-identical `largeCoverParams`, and WMP does not
+   re-fetch a cover URL it already holds **for that collection**. The fix is the
+   same idea applied to the shape that was missing it — the upstream URL now
+   carries `?fai_v=<apply_seq>` (or `&fai_v=…` if it already had a query), where
+   `fai_v` is `ART_TOKEN_PARAM`. See `_art_url_with_token()`.
+
+   `fai_v` is **ours, not the provider's**, and `_strip_art_token()` removes it
+   again in `get_image()` after every decoding step and before any fetch — so a
+   CDN is never asked for a URL that does not exist. mzstatic and
+   coverartarchive were both probed and both ignore an unknown parameter
+   (200 `image/jpeg` either way), but a provider that signs its URLs is entitled
+   to reject one, and the artwork must not depend on that. Stripping it has a
+   second effect: `image_cache` is keyed on the stripped URL, so three applies
+   with three different tokens still cause exactly **one** upstream download.
+
+   Note this is the one place the two shapes converge, and it is deliberate:
+   `direct` still means "the provider's own URL, host and path untouched", and
+   only the query string is ours.
 
 Three beliefs held here for a while turned out to be wrong, and are recorded so
 they are not repeated:
@@ -1142,7 +1190,16 @@ proxy, and not one attached. The proxy is now optional (`_ART_MODE`) and default
 to `"direct"` — a plain `https://` URL from the upstream CDN, which is what a real
 FAI server sends. The proxy remains as the fallback in case an upstream host turns
 out to refuse WMP. `[STAGED] … art=direct|proxy` records which shape produced each
-document, so a log always says what WMP was actually offered.
+document, so a log always says what WMP was actually offered. The current line
+also carries `cover=`, so it reads:
+
+```text
+[STAGED] album='Tiny Cities' artist='…' tracks=11 req_id='' toc='' xml_bytes=4075
+         art=direct cover='https://is1-ssl.mzstatic.com/…/600x600bb.jpg?fai_v=7'
+```
+
+The `?fai_v=7` is the per-apply token described in fix 4 above; `art=` is the
+mode that was **actually used for that client**, not the module default.
 
 **How WMP actually fetches a cover — established on Windows 7, 2026-10-01.** Given
 an absolute `largeCoverParams`, WMP does **not** dial the CDN. It rewrites the URL

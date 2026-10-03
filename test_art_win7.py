@@ -25,6 +25,7 @@ import contextlib
 import importlib.util
 import os
 import sys
+import urllib.parse
 import xml.etree.ElementTree as ET
 
 
@@ -150,14 +151,45 @@ check("win7 cover URL contains exactly one '?'",
 # ======================================================================
 # A source checkout: not frozen, so the Win7 rule cannot reach it.
 url_src = build_as("src", client_ua="WindowsMediaPlayer/12.0.7601.17514")
-check("source checkout is UNAFFECTED and still emits the direct URL",
-      url_src == ART, url_src[:80])
+check("source checkout is UNAFFECTED and still emits the upstream URL",
+      url_src.startswith(ART) and "/cover/" not in url_src, url_src[:80])
 
 # The official (Windows 11) build: frozen, but not named Win7Test.
 url_official = build_as("official", frozen_exe=OFFICIAL_EXE,
                         client_ua="WindowsMediaPlayer/12.0.19041.4046")
-check("official build is UNAFFECTED and still emits the direct URL",
-      url_official == ART, url_official[:80])
+check("official build is UNAFFECTED and still emits the upstream URL",
+      url_official.startswith(ART) and "/cover/" not in url_official,
+      url_official[:80])
+
+# The part of "unaffected" that HAD to change, and the reason the two checks
+# above no longer demand byte-equality with ART. A bare upstream URL is
+# identical on every apply, and WMP will not re-fetch a cover URL it has already
+# seen for a collection - so on Windows 11, where direct mode is what runs, the
+# artwork could never be changed once WMP had cached it. The shape is unchanged
+# (same provider, same host, same path); only our own query parameter is added.
+for _label, _url in (("source checkout", url_src),
+                     ("official build", url_official)):
+    check(f"{_label}: direct-mode URL still IS the upstream image",
+          _url.split("?")[0] == ART, _url[:80])
+    check(f"{_label}: direct-mode URL carries the per-apply token",
+          "fai_v=" in _url, _url[:80])
+
+# And asserted as behaviour rather than as one build's output: two applies of
+# the same album must not present WMP the same URL. Both builds happen inside
+# ONE module, because a fresh module starts the sequence over and would make two
+# builds trivially equal for the wrong reason.
+for _tag, _exe, _ua in (
+        ("direct_src", None, "WindowsMediaPlayer/12.0.7601.17514"),
+        ("direct_official", OFFICIAL_EXE, "WindowsMediaPlayer/12.0.19041.4046")):
+    _m = load_server(_tag)
+    _m._LAST_CLIENT_UA = _ua
+    _first = cover_url(_m)
+    _second = cover_url(_m)
+    check(f"{_tag}: direct-mode URL changes on every apply (not a re-apply trap)",
+          _first != _second, "identical across two builds: %s" % _first[:70])
+    check(f"{_tag}: both applies still point at the same upstream image",
+          _first.split("?")[0] == _second.split("?")[0] == ART,
+          "%s vs %s" % (_first[:60], _second[:60]))
 
 # ======================================================================
 # 3. Legacy clients get the same shape, and for the same reason
@@ -174,7 +206,8 @@ for agent, label in (
 url_browser = build_as(
     "browser", client_ua="Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 6.1)")
 check("a browser UA is not treated as a legacy client",
-      url_browser == ART, url_browser[:80])
+      url_browser.startswith(ART) and "/cover/" not in url_browser,
+      url_browser[:80])
 
 # ======================================================================
 # 4. An explicit WMP_ART_MODE still wins over everything
@@ -183,7 +216,8 @@ url_forced = build_as("forced_direct", frozen_exe=WIN7_EXE,
                       client_ua="WindowsMediaPlayer/12.0.7601.17514",
                       env_art_mode="direct")
 check("WMP_ART_MODE=direct overrides the Win7 default",
-      url_forced == ART, url_forced[:80])
+      url_forced.startswith(ART) and "/cover/" not in url_forced,
+      url_forced[:80])
 
 url_forced2 = build_as("forced_relative", frozen_exe=OFFICIAL_EXE,
                        client_ua="WindowsMediaPlayer/12.0.19041.4046",
@@ -251,6 +285,72 @@ for label, path in (
     r = c2.get(path)
     check(f"direct-mode rewrite still served: {label}",
           r.status_code == 200, r.status_code)
+
+# ======================================================================
+# 6b. The token is OURS, and must never be forwarded to a provider
+# ======================================================================
+# It exists to defeat WMP's per-collection cover cache, not to be sent
+# upstream: forwarding it would ask a CDN for a URL that has never existed.
+# mzstatic and coverartarchive both ignore an unknown parameter (probed), but
+# a provider that signs its URLs is entitled to reject one. Every shape the
+# token can arrive in is checked, because the client builds this URL.
+for _label, _path, _want in (
+        ("direct rewrite, plain path",
+         "/cover/https://i.discogs.com/some-image.jpg?fai_v=9",
+         "https://i.discogs.com/some-image.jpg"),
+        ("percent-encoded path carrying the token",
+         "/cover/https%3A%2F%2Fi.discogs.com%2Fsome-image.jpg%3Ffai_v%3D9",
+         "https://i.discogs.com/some-image.jpg"),
+        ("token in the query, before WMP's own parameter",
+         "/cover/https://i.discogs.com/some-image.jpg?fai_v=9&locale=409",
+         "https://i.discogs.com/some-image.jpg"),
+        ("the ?url= form, token inside the url value",
+         "/cover/album.jpg?url=" + urllib.parse.quote(
+             "https://i.discogs.com/some-image.jpg?fai_v=9"),
+         "https://i.discogs.com/some-image.jpg"),
+        ("token in the query AND an upstream query in the path",
+         "/cover/https://i.discogs.com/some-image.jpg?w=1&fai_v=9",
+         "https://i.discogs.com/some-image.jpg")):
+    # In that last shape the upstream's own parameters cannot be told apart from
+    # WMP's, which is why the handler ignores them - `locale=409` and `geoid`
+    # are WMP's and always have been. No provider this project uses puts
+    # anything meaningful in the query (mzstatic, Discogs and coverartarchive
+    # all carry the image in the path), so nothing is actually lost. What MUST
+    # not happen, in any shape, is our token being forwarded.
+    _m6 = load_server("strip_%d" % len(PASS))
+    _seen = []
+
+    def _grab6(url, _s=_seen, **kw):
+        _s.append(url)
+        return _FakeImage()
+
+    _m6.session.get = _grab6
+    _c6 = _m6.app.test_client()
+    _m6.image_cache.clear()
+    _c6.get(_path)
+    check(f"provider never sees our token: {_label}",
+          _seen == [_want], f"fetched {_seen} want [{_want}]")
+    check(f"no 'fai_v' reaches the provider: {_label}",
+          not any("fai_v" in (u or "") for u in _seen), _seen)
+
+# The image is still cached under the STRIPPED url, so a re-apply re-downloads
+# nothing even though it presents a brand-new token.
+_m7 = load_server("strip_cache")
+_hits7 = []
+
+
+def _grab7(url, **kw):
+    _hits7.append(url)
+    return _FakeImage()
+
+
+_m7.session.get = _grab7
+_c7 = _m7.app.test_client()
+_m7.image_cache.clear()
+for _v in (11, 12, 13):
+    _c7.get("/cover/https://i.discogs.com/some-image.jpg?fai_v=%d" % _v)
+check("three applies with three tokens cause ONE upstream download",
+      len(_hits7) == 1, _hits7)
 
 # ======================================================================
 # 7. The SCHEME-LESS path form - the actual Windows 7 shape
