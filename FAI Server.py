@@ -506,25 +506,82 @@ def _iter_audio_files(folders):
 
 
 def _find_album_files(album_title, artist, folders):
-    """Return the files whose tags say they belong to this album."""
+    """Return the files whose tags say they belong to this album.
+
+    Two passes, because of a real ordering problem. When the user runs Find
+    Album Info on a library album, the files usually carry NO album tag - that
+    is the whole reason they are running FAI. WMP writes the text tags itself
+    as a result of WriteNamesEx, which happens inside finishSync(), and the
+    /client_error beacon that triggers this function is posted from the same JS
+    turn. So when we look, the files are still untagged and a tag-only match
+    finds nothing. That was the actual reason the cover never appeared.
+
+    Pass 2 therefore falls back to the FOLDER the untagged files live in. It
+    stays inside the configured library_folders and keeps the ambiguity refusal,
+    so it is still much narrower than "tag every untagged file in the library".
+    """
     want_album = _norm(album_title)
     want_artist = _norm(artist)
     matched = []
+    untagged = []
+    other_albums = set()
     for path in _iter_audio_files(folders):
         try:
             tags = artwork_embed.read_tags(path)
         except Exception:
             continue
         if not tags.get("album"):
+            # Remember it only if this really is a bare file, not one that
+            # carries some other album's name.
+            untagged.append(path)
             continue
         if _norm(tags["album"]) != want_album:
+            other_albums.add(_norm(tags["album"]))
             continue
         # Album alone is enough when it is unambiguous. The artist is a
         # tie-breaker: several different albums can share a title, and
         # "Greatest Hits" is the obvious one.
         matched.append((_norm(tags.get("artist")), path))
-    if not matched:
+    if matched:
+        return _disambiguate(matched, album_title, want_artist)
+
+    # Nothing is tagged yet. This is the normal pre-FAI state.
+    if not untagged:
         return []
+    # Only trust it when the untagged files are together in one album folder,
+    # i.e. they share a parent directory. A loose pile in the Music root is not
+    # an album and must not be stamped with one cover.
+    parents = {os.path.dirname(p) for p in untagged}
+    if len(parents) > 1:
+        log_line("ART-EMBED",
+                 f"'{album_title}': {len(untagged)} untagged file(s) spread "
+                 f"over {len(parents)} folders; not guessing which is the album")
+        return []
+    folder = parents.pop()
+    # A folder holding a lot of loose audio is a compilation dump, not an album.
+    if len(untagged) > ART_EMBED_MAX_FILES:
+        log_line("ART-EMBED",
+                 f"'{album_title}': {len(untagged)} untagged file(s) in "
+                 f"{folder} is too many for one album; skipped")
+        return []
+    # The decisive guard: this folder already holds OTHER albums' tagged files.
+    # That is the library root, or a folder someone dumps several albums into,
+    # so "all the untagged ones" is not this album - it is several.
+    if other_albums:
+        log_line("ART-EMBED",
+                 f"'{album_title}': {folder} also holds "
+                 f"{len(other_albums)} other tagged album(s), so the untagged "
+                 f"files there are not identifiable as this album; skipped")
+        return []
+    log_line("ART-EMBED",
+             f"'{album_title}': no album tags on disk yet (normal before "
+             f"WMP writes them); using the {len(untagged)} untagged file(s) in "
+             f"{folder}")
+    return sorted(untagged)
+
+
+def _disambiguate(matched, album_title, want_artist):
+    """Resolve a tag-matched candidate list to one artist's files, or none."""
     if want_artist and any(a == want_artist for a, _p in matched):
         return [p for a, p in matched if a == want_artist]
     artists = {a for a, _p in matched}
@@ -1260,6 +1317,40 @@ def track_fai_navigation(session_id, step, data=None):
 # ==========================================================
 # METADATA PROVIDER CLIENTS (ITUNES & MUSICBRAINZ)
 # ==========================================================
+def _itunes_art_hires(art_url):
+    """Return the large version of an iTunes artwork URL, or "".
+
+    iTunes artwork URLs carry their size in the final path segment as
+    ``<W>x<H><suffix>`` - normally ``100x100bb`` or ``600x600bb``, but NOT
+    always: the URL also ends in the ORIGINAL filename, so some albums give
+    ``.../859727388959_cover.jpg/100x100bb.jpg`` and others give
+    ``.../cover_100x100bb.jpg``.
+
+    The old code did a plain ``art_url.replace("100x100bb", "600x600bb")``.
+    That silently produced a malformed URL whenever the size was not the last
+    segment - ``.../859727388959_cover.jpg/600x600bb.jpg`` - which 404s. It was
+    logged from a real session as exactly that 404, and the cover simply never
+    appeared for those albums.
+
+    Rewritten to replace the size segment only where it actually is, at the end
+    of the path, and to leave the URL alone when no size segment is present
+    rather than invent one.
+    """
+    if not art_url:
+        return ""
+    # Replace the trailing size segment only. The replacement does NOT re-use the
+    # captured width - that would yield "100x600x600bb.jpg", since group 1 is
+    # the existing width digits and not a prefix to keep.
+    upgraded, count = re.subn(r"\d+x\d+(bb|bn)\.(jpg|png)$",
+                              r"600x600\g<1>.\g<2>", art_url,
+                              flags=re.IGNORECASE)
+    if count:
+        return upgraded
+    # No recognisable size segment: the 100px URL is still valid artwork, so
+    # use it rather than return nothing. A small cover beats no cover.
+    return art_url
+
+
 def search_itunes(query, limit=20):
     cache_key = f"itunes_search_{query.lower().strip()}_{limit}"
     cached = search_cache.get(cache_key)
@@ -1282,7 +1373,7 @@ def search_itunes(query, limit=20):
                 if not cid:
                     continue
                 art100 = item.get("artworkUrl100", item.get("artworkUrl60", ""))
-                art600 = art100.replace("100x100bb", "600x600bb") if art100 else ""
+                art600 = _itunes_art_hires(art100)
                 results.append({
                     "id": str(cid),
                     "source": "itunes",
@@ -1322,7 +1413,7 @@ def get_itunes_album_details(collection_id):
         album_year = (album_info.get("releaseDate") or "2000")[:4]
 
         art100 = album_info.get("artworkUrl100", "")
-        art_hi = art100.replace("100x100bb", "600x600bb") if art100 else ""
+        art_hi = _itunes_art_hires(art100)
 
         tracks = []
         for item in items[1:]:

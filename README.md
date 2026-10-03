@@ -705,8 +705,25 @@ now covered by tests.
 
 WMP sends **no file path** — a library dialog carries only `?wmid=` and the
 per-track content IDs. So the files are found by reading their tags and matching
-the album just applied, which works because WMP writes the text tags *before* the
-dialog reports success.
+the album just applied.
+
+**The timing matters, and it was wrong.** The earlier version assumed WMP writes
+the text tags *before* the dialog reports success. It does not. WMP applies the
+metadata through its own interface during the write, and the beacon that triggers
+this is posted from that same turn — so when the lookup runs, **the files usually
+carry no album tag yet**, which is exactly why you were running FAI in the first
+place. A tag-only match therefore found nothing and no cover was ever written.
+
+The lookup now falls back to the untagged files in a single folder. It stays
+narrow on purpose, and refuses when:
+
+* the untagged files are spread over more than one folder, or
+* that folder already holds a *different* tagged album (so it is the library
+  root or a mixed dump, not an album), or
+* there are more files than one album could plausibly hold.
+
+If the log says `not identifiable as this album`, give that album its own folder
+and list it in `library_folders`.
 
 Supported: **MP3** (ID3v2 `APIC`) and **FLAC** (`METADATA_BLOCK_PICTURE`).
 Both are written in pure Python. `.wma`, `.m4a` and `.asf` are recognised and
