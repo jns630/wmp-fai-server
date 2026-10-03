@@ -367,6 +367,25 @@ ART_EMBED_FOLDERS = []
 #: nothing must not mean rewriting an entire library.
 ART_EMBED_MAX_FILES = 200
 
+#: A CD RIP IS written, but never from inside the beacon request - see
+#: _schedule_rip_art_embed(). These two numbers are the whole safety argument.
+#:
+#: WMP writes a rip's own tags and artwork itself, and it does so ASYNCHRONOUSLY
+#: relative to the dialog closing. The finish beacon fires in the same JS turn as
+#: WriteNamesEx, so a synchronous write collides with WMP's own and can leave a
+#: half-written file. These were the reasons the rip used to be excluded outright,
+#: which is why rips silently got no art in their tags at all.
+ART_EMBED_RIP_DEFER = 30
+#: A file whose mtime is more recent than this is still being written by WMP and
+#: is SKIPPED rather than raced. A second pass is not needed: if WMP is still
+#: working after half a minute, this album was applied a long time ago.
+ART_EMBED_RIP_SETTLE = 20
+
+#: Deferred rip writes, keyed by album, so a second apply supersedes the first
+#: instead of two threads writing the same files.
+RIP_EMBED_LOCK = threading.Lock()
+RIP_EMBED_PENDING = {}
+
 
 def _art_embed_config():
     """Read the art-embedding settings, ignoring anything malformed.
@@ -614,11 +633,9 @@ def _maybe_embed_art_after_library_tag(payload):
         return
     if not ART_EMBED_FOLDERS:
         return
-    # A CD rip is EXCLUDED here, and this is the whole point of the feature.
-    #
-    # The discriminator used to be `toc` alone, and that is wrong for the very
-    # disc it exists to protect. A real rip arrives as ?cd=... and carries NO
-    # ?toc=, so WMP_TOC is empty - taken from an actual rip of a real CD:
+    # Which kind of apply is this? A disc is identified by EITHER identifier,
+    # because a real rip arrives as ?cd=... and carries NO ?toc=, so WMP_TOC is
+    # empty - taken from an actual rip of a real CD:
     #
     #     GET /FAI/default.aspx?...&cd=B+96+1970+523A+...
     #     [STAGED] album='Tiny Cities' tracks=11 req_id='' toc=''
@@ -626,17 +643,82 @@ def _maybe_embed_art_after_library_tag(payload):
     # So an empty `toc` was never evidence of a library album; it is the normal
     # shape of a disc. The dialog's own JS already states the rule -
     # `var isLibrary = !WMP_CD && !WMP_TOC` - so accept either identifier.
-    # Testing `toc` alone let a rip through, and the untagged-folder fallback
-    # below then matched the disc's own files WHILE WMP was still writing them.
-    if (str(payload.get("toc", "") or "").strip()
-            or str(payload.get("cd", "") or "").strip()):
-        log_line("ART-EMBED",
-                 "CD rip (cd/toc present) - not touching the files")
-        return
+    is_rip = bool(str(payload.get("toc", "") or "").strip()
+                  or str(payload.get("cd", "") or "").strip())
     staged = _pending_album_from_xml()
     if not staged:
         return
     album_title, artist, cover_url = staged
+    if is_rip:
+        _schedule_rip_art_embed(album_title, artist, cover_url)
+        return
+    _embed_art_into_files(album_title, artist, cover_url, settle=0)
+
+
+def _schedule_rip_art_embed(album_title, artist, cover_url):
+    """Queue a rip's cover write for AFTER WMP has finished with the disc.
+
+    This replaces a refusal, and the refusal was wrong. It rested on "WMP already
+    wrote the artwork itself", which is not what happens - from a real rip on
+    2026-10-03, with the document staged and delivered correctly:
+
+        [STAGED] album='One Nil' artist='Neil Finn' art=direct cover='https://i.discogs.com/...'
+        [MDR]   -> art=https://i.discogs.com/UMuceDrn... (mode=direct)
+        [ART-EMBED] CD rip (cd/toc present) - not touching the files
+
+    WMP showed that cover in the album pane and wrote nothing into the tracks, so
+    the album had a picture and every track had none. Refusing is not neutral
+    here; it is the reason rips have no embedded art at all.
+
+    Deferring keeps the reason the guard existed in the first place: WMP writes a
+    rip's tags asynchronously, so a concurrent write can leave a half-written
+    file. The finish beacon fires in the same JS turn as WriteNamesEx, so this
+    runs on a background thread after ART_EMBED_RIP_DEFER seconds, and
+    _embed_art_into_files then refuses to touch any file modified within
+    ART_EMBED_RIP_SETTLE seconds of the write.
+    """
+    if not cover_url:
+        log_line("ART-EMBED", f"'{album_title}' has no cover URL; nothing to do")
+        return
+    key = (album_title, artist)
+
+    def _run():
+        time.sleep(ART_EMBED_RIP_DEFER)
+        with RIP_EMBED_LOCK:
+            # A later apply to the same album supersedes this one. Without this,
+            # applying twice queues two threads that write the same files.
+            if RIP_EMBED_PENDING.get(key) is not job:
+                log_line("ART-EMBED",
+                         f"'{album_title}': superseded by a later apply, skipped")
+                return
+            RIP_EMBED_PENDING.pop(key, None)
+        log_line("ART-EMBED",
+                 f"'{album_title}': rip write starting ({ART_EMBED_RIP_DEFER}s "
+                 f"after apply, skipping files touched in the last "
+                 f"{ART_EMBED_RIP_SETTLE}s)")
+        try:
+            _embed_art_into_files(album_title, artist, cover_url,
+                                  settle=ART_EMBED_RIP_SETTLE)
+        except Exception as exc:          # a daemon thread must not die loudly
+            log_line("ART-EMBED", f"'{album_title}': deferred write failed: {exc}")
+
+    job = threading.Thread(target=_run, daemon=True)
+    with RIP_EMBED_LOCK:
+        RIP_EMBED_PENDING[key] = job
+    job.start()
+    log_line("ART-EMBED",
+             f"'{album_title}': CD rip - cover write queued for "
+             f"+{ART_EMBED_RIP_DEFER}s (WMP is still writing these files now)")
+
+
+def _embed_art_into_files(album_title, artist, cover_url, settle=0):
+    """Locate the album's files and write ``cover_url`` into each of them.
+
+    ``settle`` is seconds: a file whose mtime is newer than that is still being
+    written by WMP and is skipped, never raced. 0 disables the check, which is
+    right for a LIBRARY album because WMP has finished with those files by the
+    time this runs.
+    """
     if not cover_url:
         log_line("ART-EMBED", f"'{album_title}' has no cover URL; nothing to do")
         return
@@ -650,6 +732,23 @@ def _maybe_embed_art_after_library_tag(payload):
         files = files[:ART_EMBED_MAX_FILES]
         log_line("ART-EMBED",
                  f"capped at {ART_EMBED_MAX_FILES} files for '{album_title}'")
+    if settle:
+        # The point of deferring. WMP owns these files until it stops touching
+        # them, and a write that lands mid-write leaves a corrupt file - which is
+        # a far worse outcome than a missing picture.
+        cutoff = time.time() - settle
+        before = len(files)
+        files = [p for p in files if os.path.getmtime(p) <= cutoff]
+        busy = before - len(files)
+        if busy:
+            log_line("ART-EMBED",
+                     f"'{album_title}': left {busy} file(s) alone - WMP is still "
+                     f"writing them")
+        if not files:
+            log_line("ART-EMBED",
+                     f"'{album_title}': every candidate is still being written; "
+                     f"not racing it")
+            return
     image = _fetch_artwork_bytes(cover_url)
     if not image:
         log_line("ART-EMBED", f"could not download cover for '{album_title}'")
@@ -6726,9 +6825,11 @@ if __name__ == "__main__":
     try:
         _art_embed_config()
         if ART_EMBED_ENABLED:
-            print("[*] Cover art -> files: ON for LIBRARY tagging (CD rips are "
-                  "never touched). Folders: %s"
-                  % (ART_EMBED_FOLDERS or "NONE SET - nothing will be written"))
+            print("[*] Cover art -> files: ON. Folders: %s" %
+                  (ART_EMBED_FOLDERS or "NONE SET - nothing will be written"))
+            print("    Library albums: written inline. CD rips: written %ds after "
+                  "apply, skipping any file WMP touched in the last %ds."
+                  % (ART_EMBED_RIP_DEFER, ART_EMBED_RIP_SETTLE))
         else:
             print("[*] Cover art -> files: off (set embed_art_in_library = true "
                   "in online_store.ini)")

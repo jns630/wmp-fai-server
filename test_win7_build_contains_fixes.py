@@ -56,6 +56,13 @@ markers = {
     "fai_v": "per-apply artwork token parameter",
     "_art_url_with_token": "per-apply token applied to the cover URL",
     "_strip_art_token": "per-apply token removed before fetching a provider",
+    # The rip-artwork fix. A CD rip used to be REFUSED by the embed guard on the
+    # claim that WMP writes the art itself; from a real rip it demonstrably does
+    # not, so rips had an album picture and no track art. These three only exist
+    # once the refusal became a deferred write.
+    "_schedule_rip_art_embed": "rip cover write is deferred, not refused",
+    "ART_EMBED_RIP_SETTLE": "a file WMP is still writing is skipped, not raced",
+    "_embed_art_into_files": "shared worker for library albums and rips",
 }
 
 failed = False

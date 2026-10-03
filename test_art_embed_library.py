@@ -8,6 +8,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import artwork_embed as ae
@@ -58,6 +59,10 @@ fai.ART_EMBED_ENABLED = True
 fai.ART_EMBED_FOLDERS = [music]
 fai.ART_EMBED_MAX_FILES = 200
 fai._fetch_artwork_bytes = lambda url: PNG
+# The real deferral is 30s. Pushed out of reach here so a queued thread cannot
+# wake up and write files partway through the assertions below - the queueing
+# itself is what this file checks, and it is checked synchronously.
+fai.ART_EMBED_RIP_DEFER = 3600
 
 fai.PENDING_WRITE["xml"] = (
     "<METADATA><version>5.0</version><status>OK</status>"
@@ -92,9 +97,17 @@ r = client.post("/client_error", json={"page": "finish", "applied": True,
                                       "toc": "+hAhAAQBAAMAAwADAAQAAAAA",
                                       "write": "WriteNamesEx-toc-ok"})
 check("CD: beacon accepted", r.status_code == 200, r.status_code)
-check("CD: art NOT written even though the album matches",
+# A rip IS written now, but never from inside this request - the beacon fires in
+# the same JS turn as WriteNamesEx and WMP is still writing these files. So the
+# file must be untouched the instant the beacon returns, which is exactly what
+# this asserts.
+check("CD: nothing written synchronously (deferred, not refused)",
       apic_count(cdrip) == 0,
-      "a CD rip must never be touched - WMP already wrote the artwork")
+      "the rip write must be deferred; a synchronous write races WMP and can "
+      "leave a half-written file")
+check("CD: the deferred write is actually queued",
+      (ALBUM, ARTIST) in fai.RIP_EMBED_PENDING,
+      "deferring without queueing would silently mean never writing")
 
 # ---------------------------------------------------------------------------
 # The REAL disc shape, which the check above does NOT cover.
@@ -122,9 +135,43 @@ r = client.post("/client_error", json={"page": "finish", "applied": True,
                                        "library_mode": False,
                                        "write": "WriteNamesEx-cdid-ok"})
 check("real CD shape: beacon accepted", r.status_code == 200, r.status_code)
-check("real CD shape: art NOT written into the disc's own files",
+check("real CD shape: nothing written synchronously",
       apic_count(cdrip2) == 0,
-      "identified by ?cd=, not by toc - a rip is never touched")
+      "identified by ?cd=, not by toc - and deferred, so the file is untouched "
+      "the moment the beacon returns")
+check("real CD shape: the deferred write is queued too",
+      (ALBUM, ARTIST) in fai.RIP_EMBED_PENDING,
+      "a rip identified only by ?cd= must reach the same deferred write as one "
+      "identified by toc - this is the shape that used to slip through entirely")
+
+# The settle check, which is the actual safety mechanism. A file WMP is still
+# writing must be skipped rather than raced, and a file WMP has finished with
+# must be written. Driven directly so it does not need a 30-second sleep.
+fai.ART_EMBED_FOLDERS = [cdrip_dir]
+os.utime(cdrip2, (time.time(), time.time()))       # "WMP is writing it right now"
+fai._embed_art_into_files(ALBUM, ARTIST, "http://example.invalid/c.jpg",
+                          settle=fai.ART_EMBED_RIP_SETTLE)
+check("settle: a file still being written is SKIPPED, not raced",
+      apic_count(cdrip2) == 0,
+      "writing into a file WMP has not finished with is the corruption case the "
+      "original guard existed to prevent")
+_old = time.time() - (fai.ART_EMBED_RIP_SETTLE + 60)
+os.utime(cdrip2, (_old, _old))                     # WMP finished long ago
+fai._embed_art_into_files(ALBUM, ARTIST, "http://example.invalid/c.jpg",
+                          settle=fai.ART_EMBED_RIP_SETTLE)
+check("settle: a file WMP has finished with IS written",
+      apic_count(cdrip2) == 1,
+      "deferring must not turn into never writing - that was the bug")
+
+# Two applies must not leave two threads racing over the same files.
+fai.RIP_EMBED_PENDING.clear()
+fai._schedule_rip_art_embed(ALBUM, ARTIST, "http://example.invalid/c.jpg")
+_first = fai.RIP_EMBED_PENDING.get((ALBUM, ARTIST))
+fai._schedule_rip_art_embed(ALBUM, ARTIST, "http://example.invalid/c.jpg")
+_second = fai.RIP_EMBED_PENDING.get((ALBUM, ARTIST))
+check("a later apply supersedes the queued one",
+      _first is not None and _second is not None and _first is not _second,
+      "two pending writes for one album would race each other")
 
 r = client.post("/client_error", json={"page": "finish", "applied": False})
 check("guard: applied=false does nothing", r.status_code == 200)

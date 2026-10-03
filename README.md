@@ -692,7 +692,8 @@ anything not listed is never opened. The server prints the resolved setting at
 startup:
 
 ```
-[*] Cover art -> files: ON for LIBRARY tagging (CD rips are never touched).
+[*] Cover art -> files: ON for LIBRARY tagging (CD rips are written too, on a
+    deferred pass - see "A CD rip used to be refused outright").
     Folders: ['C:\\Users\\jawwa\\Music']
 ```
 
@@ -759,12 +760,50 @@ left alone.
 
 Three guards, all tested:
 
-- A **CD rip is never touched**, even when a file matches the album exactly.
+- A **CD rip's files are never written from inside the beacon request.** The rip
+  write is deferred (see below) rather than refused, so a file WMP is still
+  writing is skipped instead of raced.
 - A file that **already has art** is not rewritten, so re-tagging an album does
   not stack copies of the image.
 - An **ambiguous album title** — several different artists' files share it, and
   no artist was given — writes nothing at all rather than guessing. "Greatest
   Hits" is the obvious case.
+
+#### A CD rip used to be refused outright, and the refusal was the bug
+
+The rip guard originally did not defer — it **refused**, on the reasoning that
+"WMP already writes the artwork itself while ripping". That is not what happens.
+From a real rip on Windows 11, 2026-10-03 23:16, where every server-side step
+succeeded:
+
+```text
+[STAGED] album='One Nil' artist='Neil Finn' tracks=12 art=direct cover='https://i.discogs.com/…'
+[MDR]   -> serving album='One Nil' to WMP (wmid=D6DF66AB)
+[MDR]   -> art=https://i.discogs.com/UMuceDrn… (mode=direct)
+[ART-EMBED] CD rip (cd/toc present) - not touching the files
+```
+
+WMP took the document, fetched the cover and **displayed it in the album pane**,
+and wrote nothing into the tracks. The album had a picture; every track had none.
+Note also that no `[IMAGE]` line appears at all — WMP pulled the image itself and
+never went through our proxy, so the server-side artwork path was never even
+involved. Refusing is not a safe default here; it is the reason rips have no
+embedded art.
+
+Deferring keeps the reason the guard existed. WMP writes a rip's tags
+asynchronously, and the finish beacon fires in the same JS turn as
+`WriteNamesEx`, so an inline write lands mid-write and can leave a half-written
+file. The write therefore runs on a background thread:
+
+| Setting | Default | Why |
+|---|---|---|
+| `ART_EMBED_RIP_DEFER` | 30 s | Wait this long after apply, for WMP to stop writing |
+| `ART_EMBED_RIP_SETTLE` | 20 s | Skip any file modified more recently than this |
+
+A file newer than the settle window is **skipped, never written**, and that is
+logged rather than silent. A second apply to the same album supersedes the first
+queued write, so two threads never race over one album's files.
+
 
 #### Discogs is off until you supply a token
 
