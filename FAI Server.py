@@ -615,10 +615,23 @@ def _maybe_embed_art_after_library_tag(payload):
     if not ART_EMBED_FOLDERS:
         return
     # A CD rip is EXCLUDED here, and this is the whole point of the feature.
-    # WMP sends the disc TOC in this same beacon; a non-empty toc means a
-    # physical disc, where WMP has already written the artwork itself.
-    if str(payload.get("toc", "") or "").strip():
-        log_line("ART-EMBED", "CD rip (toc present) - not touching the files")
+    #
+    # The discriminator used to be `toc` alone, and that is wrong for the very
+    # disc it exists to protect. A real rip arrives as ?cd=... and carries NO
+    # ?toc=, so WMP_TOC is empty - taken from an actual rip of a real CD:
+    #
+    #     GET /FAI/default.aspx?...&cd=B+96+1970+523A+...
+    #     [STAGED] album='Tiny Cities' tracks=11 req_id='' toc=''
+    #
+    # So an empty `toc` was never evidence of a library album; it is the normal
+    # shape of a disc. The dialog's own JS already states the rule -
+    # `var isLibrary = !WMP_CD && !WMP_TOC` - so accept either identifier.
+    # Testing `toc` alone let a rip through, and the untagged-folder fallback
+    # below then matched the disc's own files WHILE WMP was still writing them.
+    if (str(payload.get("toc", "") or "").strip()
+            or str(payload.get("cd", "") or "").strip()):
+        log_line("ART-EMBED",
+                 "CD rip (cd/toc present) - not touching the files")
         return
     staged = _pending_album_from_xml()
     if not staged:
@@ -5793,6 +5806,10 @@ def confirm():
         page: 'finish',
         href: String(window.location.href),
         toc: WMP_TOC,
+        // The disc content id, so the server can tell a rip from a library
+        // album. A rip carries ?cd= and an EMPTY toc, so `toc` alone is not
+        // enough to recognise a disc - see isLibrary below.
+        cd: WMP_CD,
         requestid: REQUEST_ID,
         selected: sel.length,
         external_methods: listExternalMethods()
@@ -6152,6 +6169,7 @@ def confirm():
         page: 'confirm_load',
         href: String(window.location.href),
         toc: WMP_TOC,
+        cd: WMP_CD,
         requestid: REQUEST_ID,
         doc_mode: String(document.documentMode || ''),
         external_methods: listExternalMethods()

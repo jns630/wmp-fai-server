@@ -725,6 +725,27 @@ narrow on purpose, and refuses when:
 If the log says `not identifiable as this album`, give that album its own folder
 and list it in `library_folders`.
 
+**How a disc is told apart from a library album, and the bug in that.** The
+first version keyed on the disc TOC (`toc`) alone. That is wrong for the very
+case it exists to protect: a real rip arrives as `?cd=...` and carries **no**
+`?toc=`, so `WMP_TOC` is empty. From an actual rip of a real CD:
+
+```text
+GET /FAI/default.aspx?...&cd=B+96+1970+523A+...
+[STAGED] album='Tiny Cities' tracks=11 req_id='' toc=''
+```
+
+So an empty `toc` was never evidence of a library album — it is the *normal*
+shape of a disc. The dialog's own JS had already stated the rule
+(`var isLibrary = !WMP_CD && !WMP_TOC`); the server now uses it too, and the
+beacon carries `cd` as well as `toc`. The regression this caused is worth
+recording: while the guard only looked at `toc`, a rip passed straight through,
+and the untagged-folder fallback then matched **the disc's own tracks while WMP
+was still writing them** — precisely the race the feature forbids. The test that
+covered the CD case passed a `toc`, so it never exercised the real shape. It now
+does, with the file left untagged so the fallback would eagerly match it, and it
+fails if the guard ever goes back to `toc` alone.
+
 Supported: **MP3** (ID3v2 `APIC`) and **FLAC** (`METADATA_BLOCK_PICTURE`).
 Both are written in pure Python. `.wma`, `.m4a` and `.asf` are recognised and
 left alone.

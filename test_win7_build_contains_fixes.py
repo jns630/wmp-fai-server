@@ -45,6 +45,10 @@ markers = {
     "_disambiguate": "ambiguity helper",
     "no album tags on disk yet": "untagged-fallback log line",
     "100x100bb": "iTunes size segment handling",
+    # The disc discriminator. A rip has ?cd= and an EMPTY toc, so a guard that
+    # tested `toc` alone let a rip be written to mid-write. This string only
+    # exists once the guard accepts either identifier.
+    "CD rip (cd/toc present)": "disc identified by cd OR toc, not toc alone",
 }
 
 failed = False

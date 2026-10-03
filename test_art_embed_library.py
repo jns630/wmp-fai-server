@@ -30,8 +30,12 @@ def check(name, ok, detail=""):
 
 
 def make_mp3(path, album, artist, title):
+    """Write an MP3. A falsy value omits that frame entirely, which is exactly
+    how a file WMP has not tagged yet looks - see the CD-shape check below."""
     body = b""
     for fid, val in ((b"TALB", album), (b"TPE1", artist), (b"TIT2", title)):
+        if not val:
+            continue
         payload = b"\x03" + val.encode("utf-8") + b"\x00"
         body += fid + struct.pack(">I", len(payload)) + b"\x00\x00" + payload
     with open(path, "wb") as handle:
@@ -91,6 +95,36 @@ check("CD: beacon accepted", r.status_code == 200, r.status_code)
 check("CD: art NOT written even though the album matches",
       apic_count(cdrip) == 0,
       "a CD rip must never be touched - WMP already wrote the artwork")
+
+# ---------------------------------------------------------------------------
+# The REAL disc shape, which the check above does NOT cover.
+#
+# A rip arrives with ?cd=... and an EMPTY toc, so WMP_TOC is "". Guarding on
+# `toc` alone therefore did not recognise a disc at all. Taken from an actual
+# rip of a real CD:
+#     GET /FAI/default.aspx?...&cd=B+96+1970+523A+...
+#     [STAGED] album='Tiny Cities' tracks=11 req_id='' toc=''
+# The file below is left UNTAGGED on purpose, so the untagged-folder fallback
+# would eagerly match it - this check fails loudly if the guard regresses to
+# `toc` alone, which is what let a rip be written to mid-write.
+print()
+print("the real disc shape (cd set, toc empty):")
+cdrip_dir = tempfile.mkdtemp(prefix="cdrip_")
+cdrip2 = os.path.join(cdrip_dir, "track01.mp3")
+make_mp3(cdrip2, None, None, "Untagged, mid-rip")
+fai.ART_EMBED_FOLDERS = [cdrip_dir]
+check("precondition: the fallback WOULD have matched this file",
+      len(fai._find_album_files(ALBUM, ARTIST, [cdrip_dir])) == 1,
+      "so it is the cd/toc guard, not the matching, that protects the rip")
+r = client.post("/client_error", json={"page": "finish", "applied": True,
+                                       "toc": "",
+                                       "cd": "B+96+1970+523A+1+150+200",
+                                       "library_mode": False,
+                                       "write": "WriteNamesEx-cdid-ok"})
+check("real CD shape: beacon accepted", r.status_code == 200, r.status_code)
+check("real CD shape: art NOT written into the disc's own files",
+      apic_count(cdrip2) == 0,
+      "identified by ?cd=, not by toc - a rip is never touched")
 
 r = client.post("/client_error", json={"page": "finish", "applied": False})
 check("guard: applied=false does nothing", r.status_code == 200)
