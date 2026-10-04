@@ -121,6 +121,134 @@ check("CD: the deferred write is actually queued",
 # would eagerly match it - this check fails loudly if the guard regresses to
 # `toc` alone, which is what let a rip be written to mid-write.
 print()
+print("the dialog's tags, written into a library album:")
+tags_dir = tempfile.mkdtemp(prefix="tags_")
+TALB, TARTIST = "Signals From The Quiet Room", "The Modulation Set"
+tagged = []
+for i, t in enumerate(("First Light On The Dial", "Carrier Wave"), 1):
+    p = os.path.join(tags_dir, "t%d.mp3" % i)
+    make_mp3(p, TALB, TARTIST, t)          # titles already correct, as in a
+    tagged.append(p)                       # real library album being updated
+fai.ART_EMBED_FOLDERS = [tags_dir]
+fai.ART_EMBED_TAGS_ENABLED = True
+fai._fetch_artwork_bytes = lambda url: PNG
+
+
+def id3_frames(path):
+    """{frame_id: text} for an MP3 - the reader a tagger would use."""
+    with open(path, "rb") as handle:
+        blob = handle.read()
+    raw = blob[6:10]
+    size = ((raw[0] & 0x7F) << 21 | (raw[1] & 0x7F) << 14
+            | (raw[2] & 0x7F) << 7 | (raw[3] & 0x7F))
+    out = {}
+    for f in ae._id3_frames(blob[:10 + size]) or []:
+        out.setdefault(f[:4], ae._decode_id3_text(f[10:]))
+    return out
+
+
+fai.PENDING_WRITE["xml"] = (
+    "<METADATA><MDR-CD>"
+    "<albumTitle>%s</albumTitle><albumArtist>%s</albumArtist>"
+    "<genre>Ambient</genre><releaseDate>2019/01/01</releaseDate>"
+    "<largeCoverParams>http://example.invalid/c.jpg</largeCoverParams>"
+    "<track><trackTitle>First Light On The Dial</trackTitle>"
+    "<trackNumber>1</trackNumber><discNumber>1</discNumber>"
+    "<trackArtist>%s</trackArtist></track>"
+    "<track><trackTitle>Carrier Wave</trackTitle>"
+    "<trackNumber>2</trackNumber><discNumber>1</discNumber>"
+    "<trackArtist>%s</trackArtist></track>"
+    "</MDR-CD></METADATA>" % (TALB, TARTIST, TARTIST, TARTIST))
+r = client.post("/client_error", json={"page": "finish", "applied": True,
+                                      "write": "WriteNamesEx-wmid-ok"})
+check("tags: beacon accepted", r.status_code == 200, r.status_code)
+
+got0, got1 = id3_frames(tagged[0]), id3_frames(tagged[1])
+check("tags: album written into the files",
+      got0.get(b"TALB") == TALB, got0.get(b"TALB"))
+check("tags: artist written into the files",
+      got0.get(b"TPE1") == TARTIST, got0.get(b"TPE1"))
+check("tags: genre written into the files",
+      got0.get(b"TCON") == "Ambient", got0.get(b"TCON"))
+check("tags: year written into the files",
+      got0.get(b"TYER") == "2019", got0.get(b"TYER"))
+check("tags: track 1 numbered 1", got0.get(b"TRCK") == "1", got0.get(b"TRCK"))
+check("tags: track 2 numbered 2 - per-file, not per-album",
+      got1.get(b"TRCK") == "2", got1.get(b"TRCK"))
+check("tags: titles preserved",
+      got0.get(b"TIT2") == "First Light On The Dial"
+      and got1.get(b"TIT2") == "Carrier Wave",
+      (got0.get(b"TIT2"), got1.get(b"TIT2")))
+check("tags: the cover is written in the SAME pass",
+      all(apic_count(p) == 1 for p in tagged),
+      [apic_count(p) for p in tagged])
+check("tags: no XML escaping leaked into the files",
+      "&amp;" not in (got0.get(b"TPE1") or "") + (got0.get(b"TALB") or ""),
+      "the staged document is escaped; writing it raw would double-escape")
+
+# A file whose title is NOT in the document must keep its own title and number.
+# Numbering it would be a guess, and a player shows a guess as fact.
+stray = os.path.join(tags_dir, "unknown.mp3")
+make_mp3(stray, TALB, TARTIST, "A Song The Document Does Not List")
+client.post("/client_error", json={"page": "finish", "applied": True})
+gs = id3_frames(stray)
+check("tags: an unlisted track keeps its OWN title and number",
+      gs.get(b"TIT2") == "A Song The Document Does Not List"
+      and not gs.get(b"TRCK"),
+      (gs.get(b"TIT2"), gs.get(b"TRCK")))
+check("tags: it still gets the album-level tags",
+      gs.get(b"TALB") == TALB and gs.get(b"TCON") == "Ambient",
+      (gs.get(b"TALB"), gs.get(b"TCON")))
+
+# Re-applying must not rewrite anything: the values already agree, so this is
+# the property that stops a repeated apply churning the user's library.
+touched = tagged + [stray]
+before = [(os.path.getmtime(p), os.path.getsize(p)) for p in touched]
+client.post("/client_error", json={"page": "finish", "applied": True})
+check("tags: re-applying the same album rewrites NOTHING",
+      before == [(os.path.getmtime(p), os.path.getsize(p)) for p in touched],
+      "an idempotent write is what makes this safe to run on every apply")
+
+fai.ART_EMBED_TAGS_ENABLED = False
+make_mp3(tagged[1], TALB, TARTIST, "Carrier Wave")
+client.post("/client_error", json={"page": "finish", "applied": True})
+check("tags: embed_tags_in_library = false writes no tags at all",
+      not id3_frames(tagged[1]).get(b"TCON"),
+      id3_frames(tagged[1]).get(b"TCON"))
+fai.ART_EMBED_TAGS_ENABLED = True
+
+# ---------------------------------------------------------------------------
+# A CD RIP IS NEVER TAGGED. WMP applies a disc's tags itself over COM, so
+# writing them from here would race WMP's own write.
+print()
+print("a CD rip is never tagged from here:")
+rip_dir = tempfile.mkdtemp(prefix="riptags_")
+rip_file = os.path.join(rip_dir, "disc.mp3")
+make_mp3(rip_file, None, None, "Whatever The Rip Had")
+fai.ART_EMBED_FOLDERS = [rip_dir]
+fai.ART_EMBED_RIP_DEFER = 3600
+fai.RIP_EMBED_PENDING.clear()
+fai.PENDING_WRITE["xml"] = (
+    "<METADATA><MDR-CD><albumTitle>%s</albumTitle>"
+    "<albumArtist>%s</albumArtist><genre>Ambient</genre>"
+    "<releaseDate>2019/01/01</releaseDate>"
+    "<largeCoverParams>http://example.invalid/c.jpg</largeCoverParams>"
+    "</MDR-CD></METADATA>" % (TALB, TARTIST))
+r = client.post("/client_error", json={"page": "finish", "applied": True,
+                                      "toc": "+hAhAAQBAAMAAwADAAQAAAAA",
+                                      "write": "WriteNamesEx-toc-ok"})
+check("rip: beacon accepted", r.status_code == 200, r.status_code)
+# The rip path passes no document; drive it directly to prove that is what
+# keeps the tags out, rather than relying on the beacon's routing alone.
+fai._embed_into_files(TALB, TARTIST, "http://example.invalid/c.jpg",
+                      settle=0, recent_seconds=fai.ART_EMBED_RIP_WINDOW)
+check("rip: the deferred rip write carries NO document, so no tags are written",
+      not id3_frames(rip_file).get(b"TALB")
+      and not id3_frames(rip_file).get(b"TCON"),
+      id3_frames(rip_file))
+fai.ART_EMBED_FOLDERS = [tags_dir]
+
+print()
 print("the real disc shape (cd set, toc empty):")
 cdrip_dir = tempfile.mkdtemp(prefix="cdrip_")
 cdrip2 = os.path.join(cdrip_dir, "track01.mp3")
@@ -149,7 +277,7 @@ check("real CD shape: the deferred write is queued too",
 # must be written. Driven directly so it does not need a 30-second sleep.
 fai.ART_EMBED_FOLDERS = [cdrip_dir]
 os.utime(cdrip2, (time.time(), time.time()))       # "WMP is writing it right now"
-fai._embed_art_into_files(ALBUM, ARTIST, "http://example.invalid/c.jpg",
+fai._embed_into_files(ALBUM, ARTIST, "http://example.invalid/c.jpg",
                           settle=fai.ART_EMBED_RIP_SETTLE)
 check("settle: a file still being written is SKIPPED, not raced",
       apic_count(cdrip2) == 0,
@@ -157,7 +285,7 @@ check("settle: a file still being written is SKIPPED, not raced",
       "original guard existed to prevent")
 _old = time.time() - (fai.ART_EMBED_RIP_SETTLE + 60)
 os.utime(cdrip2, (_old, _old))                     # WMP finished long ago
-fai._embed_art_into_files(ALBUM, ARTIST, "http://example.invalid/c.jpg",
+fai._embed_into_files(ALBUM, ARTIST, "http://example.invalid/c.jpg",
                           settle=fai.ART_EMBED_RIP_SETTLE)
 check("settle: a file WMP has finished with IS written",
       apic_count(cdrip2) == 1,

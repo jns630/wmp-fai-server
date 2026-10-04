@@ -682,10 +682,31 @@ To point it somewhere else:
 ```ini
 [art_embed]
 embed_art_in_library = true
+embed_tags_in_library = true
 library_folders =
     D:\Albums
     %USERPROFILE%\Downloads\Music
 ```
+
+`embed_tags_in_library` writes the dialog's **text tags** into the files as
+well — album, artist, genre, year, and the per-track title, number and disc.
+It is on by default because WMP applies a library album's tags to its own
+database only: the tags never reach the files, so they are lost if the library
+is rebuilt or the music moves to another player. Set it to `false` to keep the
+cover write and leave every text tag exactly where WMP put it.
+
+Writes are idempotent — a file that already carries the right value is not
+rewritten — so re-applying an album touches nothing it does not have to.
+
+**A CD is never tagged this way.** WMP applies a ripped disc's tags itself
+over COM, as it rips, so this server writing them would race WMP's own write
+rather than help. Rips get only the cover, on the deferred pass described
+above.
+
+Per-track values are written only for a file whose existing title matches a
+track in the applied album. A file that cannot be matched keeps its own title
+and number: numbering it would mean guessing which track it is, and a player
+shows that guess as fact.
 
 One folder per line, or separated by semicolons. Subfolders are included;
 anything not listed is never opened. The server prints the resolved setting at

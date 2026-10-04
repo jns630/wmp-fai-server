@@ -363,6 +363,11 @@ def client_error():
 # library_folders to the folders holding the music.
 ART_EMBED_ENABLED = True
 ART_EMBED_FOLDERS = []
+#: Write the TEXT TAGS into files as well as the picture. Separate switch
+#: because the two have different risk profiles: a wrong picture is cosmetic,
+#: a wrong title or track number is something a player now shows as fact.
+ART_EMBED_TAGS_ENABLED = True
+
 #: Ceiling on files touched per operation. A mis-typed album name that matches
 #: nothing must not mean rewriting an entire library.
 ART_EMBED_MAX_FILES = 200
@@ -402,7 +407,7 @@ def _art_embed_config():
     back as OFF no matter what they set. The executable's own folder is
     therefore checked FIRST when frozen, and only then the bundled one.
     """
-    global ART_EMBED_ENABLED, ART_EMBED_FOLDERS
+    global ART_EMBED_ENABLED, ART_EMBED_FOLDERS, ART_EMBED_TAGS_ENABLED
     try:
         import configparser
         candidates = []
@@ -422,6 +427,8 @@ def _art_embed_config():
         parser.read(path)
         ART_EMBED_ENABLED = parser.getboolean(
             "art_embed", "embed_art_in_library", fallback=True)
+        ART_EMBED_TAGS_ENABLED = parser.getboolean(
+            "art_embed", "embed_tags_in_library", fallback=True)
         raw = parser.get("art_embed", "library_folders", fallback="")
         ART_EMBED_FOLDERS = [os.path.expandvars(os.path.expanduser(
             p.strip().strip('"')))
@@ -441,6 +448,7 @@ def _art_embed_config():
                          f"exist; set library_folders in {path}")
         log_line("ART-EMBED",
                  f"read {path}: enabled={ART_EMBED_ENABLED} "
+                 f"tags={ART_EMBED_TAGS_ENABLED} "
                  f"folders={ART_EMBED_FOLDERS}")
     except Exception as exc:
         log_line("ART-EMBED", f"config unreadable: {exc}")
@@ -448,16 +456,59 @@ def _art_embed_config():
 
 def _pending_album_from_xml():
     """(album_title, artist, cover_url) from the document staged most recently."""
+    doc = _pending_document_from_xml()
+    if not doc:
+        return None
+    return doc["album"], doc["artist"], doc["cover_url"]
+
+
+def _pending_document_from_xml():
+    """Everything the staged document says, for writing into FILES.
+
+    A dict rather than the 3-tuple above because writing tags needs more than
+    writing a picture did: the album's genre and year, and the per-track title,
+    number and disc the user picked in the dialog.
+
+    Unescaping matters here and nowhere else. build_wmp_xml() XML-escapes every
+    value on the way out, so 'Simon & Garfunkel' is stored as 'Simon &amp;
+    Garfunkel'. Writing that string back verbatim would put a literal
+    '&amp;' into the file's tags - a second layer of escaping that no reader
+    expects and no amount of re-applying would fix.
+    """
     xml = PENDING_WRITE.get("xml") or ""
     if not xml:
         return None
+
     def field(tag):
         m = re.search(r"<%s>(.*?)</%s>" % (tag, tag), xml, re.IGNORECASE | re.DOTALL)
-        return m.group(1).strip() if m else ""
-    title = field("albumTitle")
-    if not title:
+        return html.unescape(m.group(1).strip()) if m else ""
+
+    album = field("albumTitle")
+    if not album:
         return None
-    return title, field("albumArtist"), field("largeCoverParams")
+    # releaseDate is written by build_wmp_xml() as YYYY/01/01; keep the year.
+    year = re.match(r"(\d{4})", field("releaseDate"))
+    tracks = []
+    for block in re.findall(r"<track>(.*?)</track>", xml,
+                            re.IGNORECASE | re.DOTALL):
+        def tfield(tag):
+            m = re.search(r"<%s>(.*?)</%s>" % (tag, tag), block,
+                          re.IGNORECASE | re.DOTALL)
+            return html.unescape(m.group(1).strip()) if m else ""
+        tracks.append({
+            "title": tfield("trackTitle"),
+            "number": tfield("trackNumber"),
+            "disc": tfield("discNumber"),
+            "artist": tfield("trackArtist"),
+        })
+    return {
+        "album": album,
+        "artist": field("albumArtist"),
+        "genre": field("genre"),
+        "year": year.group(1) if year else "",
+        "cover_url": field("largeCoverParams"),
+        "tracks": tracks,
+    }
 
 
 def _fetch_artwork_bytes(url):
@@ -636,11 +687,11 @@ def _disambiguate(matched, album_title, want_artist):
 
 
 def _maybe_embed_art_after_library_tag(payload):
-    """Write the cover into the files of a LIBRARY album, if configured.
+    """Write the dialog's cover and tags into a LIBRARY album's files.
 
     Called from the client beacon once WMP reports the dialog finished. Every
     early return below is a guard, and the guards are the feature: the cost of
-    writing art into the wrong files is much higher than the cost of doing
+    writing into the wrong files is much higher than the cost of doing
     nothing.
     """
     if not ART_EMBED_ENABLED:
@@ -665,14 +716,24 @@ def _maybe_embed_art_after_library_tag(payload):
     # `var isLibrary = !WMP_CD && !WMP_TOC` - so accept either identifier.
     is_rip = bool(str(payload.get("toc", "") or "").strip()
                   or str(payload.get("cd", "") or "").strip())
-    staged = _pending_album_from_xml()
-    if not staged:
+    document = _pending_document_from_xml()
+    if not document:
         return
-    album_title, artist, cover_url = staged
+    album_title, artist, cover_url = document["album"], document["artist"], \
+        document["cover_url"]
     if is_rip:
+        # A CD IS NEVER TAGGED FROM HERE. WMP applies a disc's tags itself over
+        # COM as it rips, so this server writing them would collide with WMP's
+        # own write rather than help it. The cover is still written, on the
+        # deferred pass - WMP does not put artwork into the track files, which
+        # is a separate gap from the tags.
         _schedule_rip_art_embed(album_title, artist, cover_url)
         return
-    _embed_art_into_files(album_title, artist, cover_url, settle=0)
+    # A LIBRARY album is both. WMP keeps these tags in its own database and
+    # does not write them into the files, so the album only survives a library
+    # rebuild or a move to another player if they are written here as well.
+    _embed_into_files(album_title, artist, cover_url, settle=0,
+                      document=document)
 
 
 def _schedule_rip_art_embed(album_title, artist, cover_url):
@@ -694,8 +755,11 @@ def _schedule_rip_art_embed(album_title, artist, cover_url):
     rip's tags asynchronously, so a concurrent write can leave a half-written
     file. The finish beacon fires in the same JS turn as WriteNamesEx, so this
     runs on a background thread after ART_EMBED_RIP_DEFER seconds, and
-    _embed_art_into_files then refuses to touch any file modified within
+    _embed_into_files then refuses to touch any file modified within
     ART_EMBED_RIP_SETTLE seconds of the write.
+
+    No ``document`` is passed on purpose: this is the CD path, and a disc's
+    tags are WMP's to write. See _maybe_embed_art_after_library_tag().
     """
     if not cover_url:
         log_line("ART-EMBED", f"'{album_title}' has no cover URL; nothing to do")
@@ -717,9 +781,9 @@ def _schedule_rip_art_embed(album_title, artist, cover_url):
                  f"after apply, skipping files touched in the last "
                  f"{ART_EMBED_RIP_SETTLE}s)")
         try:
-            _embed_art_into_files(album_title, artist, cover_url,
-                                  settle=ART_EMBED_RIP_SETTLE,
-                                  recent_seconds=ART_EMBED_RIP_WINDOW)
+            _embed_into_files(album_title, artist, cover_url,
+                              settle=ART_EMBED_RIP_SETTLE,
+                              recent_seconds=ART_EMBED_RIP_WINDOW)
         except Exception as exc:          # a daemon thread must not die loudly
             log_line("ART-EMBED", f"'{album_title}': deferred write failed: {exc}")
 
@@ -732,9 +796,48 @@ def _schedule_rip_art_embed(album_title, artist, cover_url):
              f"+{ART_EMBED_RIP_DEFER}s (WMP is still writing these files now)")
 
 
-def _embed_art_into_files(album_title, artist, cover_url, settle=0,
-                          recent_seconds=None):
-    """Locate the album's files and write ``cover_url`` into each of them.
+def _tracks_by_title(document):
+    """The document's tracks, keyed by their normalised title.
+
+    _norm() is the same loose comparison _find_album_files() uses for albums:
+    case, accents and spacing are ignored, because the file's own title tag and
+    the document's come from different places and rarely agree character for
+    character.
+    """
+    out = {}
+    for track in (document or {}).get("tracks", []):
+        key = _norm(track.get("title"))
+        if key and key not in out:     # first wins: a duplicate title must not
+            out[key] = track           # make the LAST one authoritative
+    return out
+
+
+def _match_track(path, tracks_by_title):
+    """The document track this file is, or None when that cannot be told.
+
+    Matching on the title the file ALREADY carries is what makes this safe.
+    A library album being updated normally has correct titles on disk, so the
+    mapping is real; a file with no title, or one whose title is not in the
+    document, returns None and keeps whatever it had.
+    """
+    if not tracks_by_title:
+        return None
+    try:
+        title = artwork_embed.read_tags(path).get("title", "")
+    except Exception:
+        return None
+    return tracks_by_title.get(_norm(title))
+
+
+def _embed_into_files(album_title, artist, cover_url, settle=0,
+                      recent_seconds=None, document=None):
+    """Locate the album's files and write the dialog's metadata into each.
+
+    ``document`` is the staged dialog document (see
+    _pending_document_from_xml). It is what the TEXT TAGS are taken from. It
+    is deliberately None for a CD rip: WMP applies a disc's tags itself over
+    COM as it rips, so writing them from here would collide with that write
+    rather than help - see _maybe_embed_after_apply().
 
     ``settle`` is seconds: a file whose mtime is newer than that is still being
     written by WMP and is skipped, never raced. 0 disables the check, which is
@@ -745,8 +848,9 @@ def _embed_art_into_files(album_title, artist, cover_url, settle=0,
     inside that window. Rips pass it; library albums must not, because it is only
     sound for files WMP has just written.
     """
-    if not cover_url:
-        log_line("ART-EMBED", f"'{album_title}' has no cover URL; nothing to do")
+    write_tags = bool(document) and ART_EMBED_TAGS_ENABLED
+    if not cover_url and not write_tags:
+        log_line("ART-EMBED", f"'{album_title}': nothing to write")
         return
     files = _find_album_files(album_title, artist, ART_EMBED_FOLDERS,
                               recent_seconds=recent_seconds)
@@ -776,23 +880,43 @@ def _embed_art_into_files(album_title, artist, cover_url, settle=0,
                      f"'{album_title}': every candidate is still being written; "
                      f"not racing it")
             return
-    image = _fetch_artwork_bytes(cover_url)
-    if not image:
+    # The cover is downloaded only if there is one to download, and a failed
+    # download must not stop the tags: they are independent, and the tags are
+    # usually the reason the user ran the dialog at all.
+    image = _fetch_artwork_bytes(cover_url) if cover_url else None
+    if cover_url and not image:
         log_line("ART-EMBED", f"could not download cover for '{album_title}'")
+    if not image and not write_tags:
         return
-    written, skipped = 0, 0
+    tracks_by_title = _tracks_by_title(document) if write_tags else {}
+    tagged, artwork, unchanged, failed = 0, 0, 0, 0
     for path in files:
         try:
-            if artwork_embed.write_art(path, image):
-                written += 1
-            else:
-                skipped += 1
+            tags = dict(document) if write_tags else {}
+            tags.pop("tracks", None)
+            tags.pop("cover_url", None)
+            track = _match_track(path, tracks_by_title)
+            if track:
+                # Per-track values only for a file whose CURRENT title maps to
+                # a track in the document. Without that match the file could
+                # be any track of the album, and numbering it would be a
+                # guess that a player then shows as fact.
+                tags["title"] = track["title"]
+                tags["track"] = track["number"]
+                tags["disc"] = track["disc"]
+                if not tags.get("artist"):
+                    tags["artist"] = track["artist"]
+            tags_written, art_written = artwork_embed.write_tags_and_art(
+                path, tags if write_tags else None, image)
+            tagged += 1 if tags_written else 0
+            artwork += 1 if art_written else 0
+            unchanged += 0 if (tags_written or art_written) else 1
         except Exception as exc:
-            skipped += 1
+            failed += 1
             log_line("ART-EMBED", f"  {os.path.basename(path)}: {exc}")
     log_line("ART-EMBED",
-             f"'{album_title}': wrote cover into {written} file(s), "
-             f"{skipped} already had one or unsupported")
+             f"'{album_title}': tags into {tagged} file(s), cover into "
+             f"{artwork}, {unchanged} already correct, {failed} failed")
 
 
 # ---- Discogs (OPTIONAL third provider) ---------------------------------------

@@ -62,7 +62,12 @@ markers = {
     # once the refusal became a deferred write.
     "_schedule_rip_art_embed": "rip cover write is deferred, not refused",
     "ART_EMBED_RIP_SETTLE": "a file WMP is still writing is skipped, not raced",
-    "_embed_art_into_files": "shared worker for library albums and rips",
+    "_embed_into_files": "shared worker for library albums and rips",
+    # Tag embedding for LIBRARY albums only. WMP writes a ripped disc's tags
+    # itself over COM, so this must exist for library albums and must never be
+    # reached from the CD path - hence the two markers, not one.
+    "_pending_document_from_xml": "the staged document is read back for tags",
+    "embed_tags_in_library": "text tags written into files (opt-out switch)",
 }
 
 failed = False
