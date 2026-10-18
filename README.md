@@ -30,6 +30,7 @@ actually tag discs, run the server on your own Windows machine.
 - [WMP Online Store](#wmp-online-store)
 - [How it works](#how-it-works)
 - [Route reference](#route-reference)
+- [Windows Media Player 11](#windows-media-player-11)
 - [What works](#what-works)
 - [What does not work](#what-does-not-work)
 - [Testing](#testing)
@@ -747,6 +748,41 @@ narrow on purpose, and refuses when:
 If the log says `not identifiable as this album`, give that album its own folder
 and list it in `library_folders`.
 
+##### Rips are exempt from the shared-folder rule (a real bug, from a real log)
+
+The rule above refused **every rip in a populated library**. From
+`fai_server.log`:
+
+```text
+[ART-EMBED] 'Tiny Cities': ...Sample Music also holds 16 other tagged album(s),
+            so the untagged files there are not identifiable as this album; skipped
+[ART-EMBED] 'Duos II':       ...also holds 13 other tagged album(s); skipped
+[ART-EMBED] 'Prospekt's March EP': ...also holds 13 other tagged album(s); skipped
+[ART-EMBED] 'An Invitation to an Accident': ...also holds 14 other tagged album(s); skipped
+```
+
+Two defects were stacked:
+
+1. The guard asked "does the **whole library** hold other albums?", which is
+   true for anyone owning more than one album. It is now asked per **folder**,
+   which is the question that was actually meant.
+2. The rip window — added specifically so "the files WMP wrote seconds ago are
+   this disc" could win — was computed, **logged**, and then discarded by that
+   guard. When the window actually narrows the pool it is now **authoritative**:
+   those files are the disc, whatever else the folder holds.
+
+What is *not* relaxed, because each of these can stamp one album's cover across
+files that are not it:
+
+* files written across **two or more folders** are still refused — the window
+  answers *which files*, not *are they one album*;
+* the `ART_EMBED_MAX_FILES` ceiling still caps the write;
+* the `settle` check still refuses to touch a file WMP is still writing;
+* a **library** album gets no such exemption — it still refuses.
+
+`test_art_embed_library.py` pins all four, and each new check fails if the fix is
+removed.
+
 **How a disc is told apart from a library album, and the bug in that.** The
 first version keyed on the disc TOC (`toc`) alone. That is wrong for the very
 case it exists to protect: a real rip arrives as `?cd=...` and carries **no**
@@ -775,9 +811,38 @@ covered the CD case passed a `toc`, so it never exercised the real shape. It now
 does, with the file left untagged so the fallback would eagerly match it, and it
 fails if the guard ever goes back to `toc` alone.
 
-Supported: **MP3** (ID3v2 `APIC`) and **FLAC** (`METADATA_BLOCK_PICTURE`).
-Both are written in pure Python. `.wma`, `.m4a` and `.asf` are recognised and
-left alone.
+Supported: **MP3** (ID3v2 `APIC`), **FLAC** (`METADATA_BLOCK_PICTURE`) and
+**ASF/WMA** (`WM/Picture`). All three are written in pure Python. `.m4a` is
+recognised and left alone.
+
+##### WMA artwork, and the COM route that was tested
+
+`WM/Picture` support is in `artwork_wma.py`. It rewrites the ASF header object
+in place and shifts the audio — the audio is **moved, never re-encoded**, which
+is asserted by comparing the data tail byte-for-byte before and after.
+
+It deliberately does **not** use the WMF COM API, and the reason is worth
+recording because the original justification here was wrong:
+
+* `IWMHeaderInfo3` **is** available. On the 64-bit `wmvcore.dll` it
+  QueryInterfaces cleanly from both `WMCreateWriter` and `WMCreateEditor`, and a
+  hand-built `WM_PICTURE` reaches `AddAttribute` successfully. An earlier probe
+  here appeared to show `E_NOINTERFACE` because the probe's GUID marshalling was
+  wrong — *every* interface failed, `IUnknown` included — and a control test on
+  `IUnknown` is what exposed it.
+* It is not used because the WMF writer cannot patch a header in place. It needs
+  a fully configured object (`SetProfile` / `SetInputProps` /
+  `SetOutputFilename`) and then **re-streams every audio sample**, because adding
+  an attribute moves the Data Object and every packet offset after it. Trading a
+  5 MB re-encode for 200 KB of cover art is a bad deal.
+* The SDK 11 `wmvcore.dll` cannot be used at all: it is **32-bit only** (machine
+  type `0x10B`) and this project runs on 64-bit Python.
+
+One safety property is enforced rather than assumed: an **index object** stores
+absolute packet offsets, which a header growth would invalidate. Every sample
+WMA on this machine was checked and none has one, but that is a property of those
+files and not of ASF, so a file that *does* have one is refused and left
+untouched.
 
 Three guards, all tested:
 
@@ -1100,6 +1165,51 @@ So the metadata document is the only artwork channel WMP offers, which is why
 the fixes above are worth the trouble. The COM plug-in
 (`IWMPSubscriptionService`) licenses *playback*, is explicitly not required for
 a commerce store, and would not carry artwork either.
+
+##### `IWMPMetadataPicture` exists — and is still not a write channel
+
+The most promising-sounding name is `IWMPMetadataPicture`, and it is worth
+recording that it *does* exist, because a later search of this file found it and
+it is easy to assume the list above was wrong. It was not; the interface is
+real and it is **read-only and unreachable**.
+
+Read out of the type library of `{6BF52A50-394A-11D3-B153-00C04F79FAA6}`
+(147 typeinfos) rather than from the string table:
+
+| | |
+|---|---|
+| `IWMPMetadataPicture` | IID `{5C29BBE0-F87D-4C45-AA28-A70F0230FFA9}` |
+| inherits | `IDispatch` only |
+| doc string | *"Not Public. Internal interface used by Windows Media Player."* |
+| members | `URL`, `mimeType`, `pictureType`, `Description` (and the 7 `IUnknown`/`IDispatch` members) |
+
+Three separate findings, each checked:
+
+1. **It is read-only.** All four members are `INVOKIND_PROPERTYGET` with
+   `cParams=0` — they take **no argument**, so there is nothing to set. The
+   `INVOKEKIND` decoding was confirmed against a control rather than assumed:
+   `appColorLight`, which this file documents as a read-only inherited property,
+   carries the same `0x2`, while every genuine method (`WriteNamesEx`, `BuyCD`,
+   `ReturnToMainTask`) carries `0x1`. `IWMPMetadataText` is the same shape
+   (`text`, `Description`, both zero-parameter getters).
+2. **Nothing returns one.** Across all 147 typeinfos, **zero** members have
+   `IWMPMetadataPicture` as their return type — 0 references of any kind. It is
+   not reachable through any other WMP interface.
+3. **It belongs to UPnP, not to the library.** Its neighbours are the
+   `IUPnPService_IWMPUPnPAVTransportDual` DIDL-Lite metadata members
+   (`CurrentTrackMetaData`, `AVTransportURIMetaData`,
+   `NextAVTransportURIMetaData`). It models a picture inside a UPnP
+   AVTransport advertisement — a `upnp:albumArtURI` and its MIME type — which is
+   exactly the DLNA advertisement role the `AlbumArt`/`upnp:album` string
+   cluster above already ruled out.
+
+The string-scan miss is explained: `IWMPMetadataPicture` appears **twice** in
+`wmp.dll` in ASCII, inside the embedded type-library blob, not as a
+null-separated UTF-16 literal. A scan for ASCII or UTF-16 strings finds
+nothing; reading the type library finds it. **So the conclusion holds — there is
+no COM write route for artwork — but it now rests on read-only-ness and
+unreachability rather than on absence.** That is a stronger argument, and it
+survives the interface turning up.
 
 
 
@@ -1594,6 +1704,7 @@ The legacy `submittoc` / `GetMDRCD.asp` / `QueryTOC.asp` routes are
 | `/store_single_track_xml` | POST | Backwards-compatible alias |
 | `/track_navigation` | POST | Wizard step telemetry |
 | `/client_error` | POST/GET | Client beacon for JS/COM outcomes |
+| `/wmp_capabilities` | GET | Verified FAI COM surface per player generation + live client classification |
 | `/fai_status`, `/status` | GET | Diagnostics (`?format=json` for JSON) |
 | `/get_image`, `/cover/album.jpg` | GET | Cached artwork proxy |
 | `/static/noart.png` | GET | Generated "no artwork" placeholder |
@@ -1692,6 +1803,178 @@ resolve to a release with a full track list.
 > The result is **logged but not applied** in the general case — see below for
 > the one exception.
 
+## Windows Media Player 11
+
+WMP 11 (the Vista-era player) is supported. This was established by reading the
+**type library of the installed `wmp.dll`**, not by assuming it behaves like WMP 12.
+
+### What was checked, on a machine that has WMP 11
+
+`wmp.dll` here is version **11.0.6003.22165** (`vistasp2_ldr_escrow`), and the
+`.wpl` association is `WMP11.AssocFile.WPL` — so it really is WMP 11, on
+`Windows 10 IoT Enterprise LTSC 2021` (build 19044).
+
+Its type library, `{6BF52A50-394A-11D3-B153-00C04F79FAA6}`, was enumerated
+directly. The decisive result:
+
+* **`IWMPCDDVDWizardExternal` is present, under the same IID the dialog already
+  uses** — `{2D7EF888-1D3C-484A-A906-9F49D99BB344}` — deriving from the same
+  `IWMPExternalColors → IWMPExternal` chain. `window.external` is the same object
+  on both players, so the existing dialog JavaScript works unchanged.
+* `WriteNames`, `WriteNamesEx`, `ReturnToMainTask`, `GetMDQByRequestID`,
+  `EditMetadata`, `BuyCD` and `IsMetadataAvailableForEdit` are **all** present.
+* **One member is missing: `RenameRegroupFiles`** (also absent are
+  `OnChangeViewError` / `OnChangeViewOnlineListError`). It is WMP 12 only. The
+  dialog never called it — `fRenameRegroupFiles` is a *parameter* of
+  `WriteNamesEx`, not a call — and `test_wmp11_support.py` now asserts that no
+  `window.external.RenameRegroupFiles(` call exists, so a future edit cannot add one.
+* `IWMPLibrary` has only **7** members (`isIdentical`, `mediaCollection`, `name`,
+  `type` + IUnknown) against WMP 12's full surface. The "no COM route for a
+  library write" limit is therefore *stricter* on WMP 11, not looser: the
+  `WMP_WRITENAMES_TYPE` enum still names only physical discs and DVDs.
+
+### The fix: recognise it by version, not by string
+
+WMP 11 was previously grouped with WMC and WMP 7-9 as a browser-less "legacy XML
+client", **purely because it reports a "media player" agent those players also
+report.** That denied it the dialog, and the dialog is the only way to correct a
+wrong match.
+
+Two signals identify it, and **both are needed** — read out of `fai_server.log`,
+not assumed:
+
+| Request | User-Agent | `version=` |
+|---|---|---|
+| the player's service call | `Windows-Media-Player/11.0.6003.22165` | `11.0.6003.22165` |
+| the dialog it opens next | `Mozilla/4.0 ... Media Center PC 6.0` | `11.0.6003.22165` |
+
+The agent identifies the player but not the dialog; the dialog request's agent
+is an ordinary IE7 string that says nothing about the player. The `version=`
+parameter is the version of the player's **own `wmp.dll`** — the same number the
+type library was read from — so it is the reliable one, and it is consulted
+first.
+
+> **A caution worth keeping.** An earlier version of this work keyed on
+> `NSPlayer/11.0.0.5720`, which was an invented guess. Every test built on it
+> passed and the feature did nothing at all, because no real WMP 11 request
+> carries that string. The detection below is written against the observed
+> agents, and `test_wmp11_support.py` asserts those exact strings.
+
+`_is_wmp11_client()` matches **major version 10–11** on the agent, or on
+`version=` when present:
+
+| User-Agent | Classified as | Dialog? |
+|---|---|---|
+| `Windows-Media-Player/11.0.6003.22165` | WMP 11 | **yes** |
+| `WindowsMediaPlayer/12.0.19041.4046` | WMP 12 background fetch | no (XML) |
+| `Windows-Media-Player/12.0.26100.9549` | WMP 12 | no (XML) |
+| `NSPlayer/9.0.0.4509` | WMP 9 | no (`.asp` era, XML) |
+| `Windows-Media-Center/6.0.8002.0` | WMC | no (XML) |
+| `Mozilla/4.0 ... MSIE 7.0` (+ `version=`) | WMP 11/12's dialog | **yes** |
+
+The range is **10–11, not "below 12"**. "Below 12" would also catch WMP 9, which
+has no browser to host the dialog; admitting it would hand WMP 9 a page it
+cannot render. Only the Vista-era pair ships `IWMPCDDVDWizardExternal`.
+
+### Cover art on WMP 11 — the `version=` bug
+
+**This is why cover art did not update after the dialog completed.**
+
+The document is built while the **dialog** request is in flight, and that
+request carries the IE7 agent. Without the `version=` parameter the player is
+invisible to `_effective_art_mode()`, the mode falls through to `direct`, and
+`largeCoverParams` gets a bare upstream CDN URL — which WMP 11 never comes back
+to this server for. The album keeps its old or missing cover.
+
+The fix threads `version=` into the art-mode decision, so WMP 11's document
+carries a `/cover/` URL that routes back through here. `fai_server.log`
+confirms this is the right shape — the one cover WMP 11 actually fetched was:
+
+```
+GET /cover/album.jpg?url=https://i.discogs.com/lY9IAcJZQyBjPAKfdi2DVUY37AyTbb...
+[IMAGE] served 112116B image/jpeg from https://i.discogs.com/lY9IAcJZQyBjPAKfdi2DVUY37AyTbb...
+```
+
+Two request shapes are handled and tested, because WMP 11 has been observed to
+send both: the `?url=` form above, and the scheme-less rewrite
+(`/cover/i.discogs.com/...`). `WMP_ART_MODE` still overrides everything.
+
+#### WMP 11 gets an ABSOLUTE cover URL, not a relative one
+
+WMP 11 is served in **`proxy`** mode, not `relative`. A host-relative
+`largeCoverParams` is re-prefixed by the client — it resolves the value against
+the host it fetched the document from and prepends its own `/cover/`, so the
+document value in brackets arrives as:
+
+```
+[03:05:21] GET /cover[/cover/fai-585c2699/album.jpg]?url=... -> 200
+```
+
+It still served, because the `?url=` parameter survived and the handler fetched
+from that — which is why it *looked* right. The path was malformed, and anything
+relying on the path form (the scheme-less rewrite) would miss it. An absolute
+`http://127.0.0.1/cover/...` leaves the client nothing to resolve, so the value
+in the document is the URL that gets fetched. The per-apply token still changes,
+so a re-apply re-fetches.
+
+#### Two further defects this log exposed
+
+The first attempt above fixed the *mode* but still 404'd, because WMP does not
+hand the cover URL back verbatim. From `fai_server.log`, 2026-10-05 00:12:32:
+
+```
+GET /cover/https:/is1-ssl.mzstatic.com/image/thumb/Music211/v4/cc/b0/d2/
+    ccb0d2f6-60a7-1ee6-3386-6cd85764ab22/5051961002102.jpg/600x600bb.jpg
+    ?fai_v=1?locale=409&geoid=f4&version=11.0.6003.22165&userlocale=409  -> 404
+```
+
+**1. WMP rewrites `https://` to `https:/` — one slash.** When it moves the
+absolute CDN URL back onto this host under `/cover/`, the scheme separator is
+lost. The URL passes the "does this look like a URL" test (its first four
+characters are `http`) and is then rejected by the `http://` / `https://`
+validity check. **That is the 404.** `_normalize_mangled_url()` restores the
+slash before the check runs.
+
+**2. The token came back as `?fai_v=1?` — a second `?`.** WMP appends its own
+parameters with `?` to a value that already contained one.
+`_strip_art_token()` handled `?fai_v=N&` and a trailing `?fai_v=N`, but not a
+`?` on both sides, so the token survived and would have been forwarded to the
+CDN. It is not harmless in general: a provider that signs its URLs may reject
+it.
+
+**3. `?version=` had to be remembered, not re-read.** The same log shows the
+tell-tale disagreement `[STAGED] art=direct` against `-> ... (mode=relative)`.
+The document is built during the dialog page's `POST /store_staged_xml`, which
+is same-origin and normally has **no query string at all** — so reading the
+version from the current request lost it exactly when the artwork decision
+needed it. `_LAST_CLIENT_VERSION` now records it in the request hook, the way
+`_LAST_CLIENT_UA` already did, and `_client_version_arg()` falls back to it.
+
+Each fix is individually covered by a test that fails when the fix is removed,
+and the test asserts against the URL above **verbatim**.
+
+**`/redir/getmdrcd/` is not a negotiation point.** That route is WMP's own
+background metadata fetch and always returns the document. Only
+`legacy_redirects()` (`/redir/QueryTOC.asp`, `/redir/submittoc*`,
+`/FAI/default.aspx`) decides between a dialog redirect and XML, and redirecting
+the background fetch would send it into a dialog loop. `test_wmp11_support.py`
+asserts both halves.
+
+`GET /wmp_capabilities` reports the verified interface sets and the live
+classification of the most recent client, as JSON.
+
+### Still unverified
+
+* **No real disc has been driven through WMP 11 on this machine.** The COM
+  surface and the routing are verified; the end-to-end rip is not.
+* **Where WMP 11 dials is unknown.** Unlike WMP 12, `wmp.dll`, `wmpshell.dll` and
+  `wmplayer.exe` contain **no** `metaservices` / `musicmatch` / `xboxlive`
+  strings at all, so its service URL cannot be read off a string table the way
+  WMP 12's was. It resolves at runtime. The hosts file already carries the
+  `redir.` / `toc.` / `info.` / `images.` entries this project needs.
+* **WMP 10 is inferred, not verified.** It is the same generation and reports the
+  same prefix, but no WMP 10 install was available to read.
+
 ## Windows Media Center / Windows Media Player 7-9
 
 WMC and the older players predate `musicmatch-ssl.xboxlive.com` entirely. They
@@ -1776,10 +2059,14 @@ $env:AUTO_TOC_LOOKUP = '0'
   real disc, so treat this as *protocol-matched*, not *proven*.
 - **There is no dialog for Zune.** Zune ships no browser host for the FAI UI, so
   it cannot offer album selection; it consumes the MDR-CD XML directly.
-- **Windows Media Player 11 and earlier.** Only WMP 12 is supported; the COM
-  surface and the dialog host differ on older players. The legacy `.asp` endpoints
-  and XML delivery for WMP 7-9 are implemented, but untested against a real
-  install — see [Windows Media Center](#windows-media-center--windows-media-player-7-9).
+- **Windows Media Player 10 and earlier.** Only WMP 11 and WMP 12 are supported.
+  WMP 11 was verified by reading its type library on a real install — see
+  [Windows Media Player 11](#windows-media-player-11). WMP 10 is *assumed* to
+  behave like WMP 11 (same generation, same `NSPlayer/` prefix) but **no WMP 10
+  install was available to check**, so treat it as inferred. The legacy `.asp`
+  endpoints and XML delivery for WMP 7-9 are implemented, but untested against a
+  real install — see
+  [Windows Media Center](#windows-media-center--windows-media-player-7-9).
 - **No multi-user or remote access.** The server binds `0.0.0.0` but has **no
   authentication whatsoever**. See [Security notes](#security-notes).
 

@@ -353,6 +353,34 @@ check("three applies with three tokens cause ONE upstream download",
       len(_hits7) == 1, _hits7)
 
 # ======================================================================
+# 7b. _fetch_artwork_bytes strips our token too - CD rip cover embed
+# ======================================================================
+# A CD rip in direct mode (Windows 11's default) carries largeCoverParams =
+# upstream URL + ?fai_v=N. _fetch_artwork_bytes downloads that cover to embed
+# it in the ripped files. If it forwards the token upstream, the CDN is asked
+# for a URL that does not exist and the rip's cover write fails - exactly the
+# regression commit 8110196 introduced for direct mode, which it never fixed
+# on this side of the fence: get_image() strips the token but
+# _fetch_artwork_bytes() did not.
+_m8 = load_server("fetch_strip")
+_f8 = []
+
+
+def _grab8(url, _s=_f8, **kw):
+    _s.append(url)
+    return _FakeImage()
+
+
+_m8.session.get = _grab8
+_m8.image_cache.clear()
+for _v in (21, 22, 23):
+    _m8._fetch_artwork_bytes("https://i.discogs.com/some-image.jpg?fai_v=%d" % _v)
+check("_fetch_artwork_bytes never forwards fai_v to the provider",
+      all(u == "https://i.discogs.com/some-image.jpg" for u in _f8), _f8)
+check("_fetch_artwork_bytes dedups on the stripped URL (one fetch, three tokens)",
+      len(_f8) == 1, f"{len(_f8)} fetches for one image")
+
+# ======================================================================
 # 7. The SCHEME-LESS path form - the actual Windows 7 shape
 # ======================================================================
 # With images.metaservices.microsoft.com pointed at this server, WMP on

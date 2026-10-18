@@ -319,6 +319,18 @@ def _log_request(response):
         global _LAST_CLIENT_UA
         if ua:
             _LAST_CLIENT_UA = ua
+        # Remember the player version for the same reason. The artwork-mode
+        # decision reads it while the DIALOG is being served, and that request's
+        # own query string may not carry it - the POST that stages the document
+        # is a same-origin fetch from the dialog page and often has no query
+        # string at all. Without remembering it here the version is absent
+        # exactly when it is needed, which is how a WMP 11 document came to be
+        # built in "direct" mode: [STAGED] art=direct, while the very next
+        # request correctly logged (mode=relative).
+        global _LAST_CLIENT_VERSION
+        _ver = raw_query_arg('version').strip()
+        if _ver:
+            _LAST_CLIENT_VERSION = _ver
         log_line("REQ", f"{request.method} {request.path}"
                         f"{'?' + qs if qs else ''} -> {response.status_code}"
                         f" | UA={ua[:100]}")
@@ -343,6 +355,55 @@ def client_error():
     except Exception as exc:            # never let this break the beacon
         log_line("ART-EMBED", f"skipped: {type(exc).__name__}: {exc}")
     return Response("OK", mimetype="text/plain")
+
+
+# ==========================================================
+# WHICH WMP IS THIS, AND WHAT CAN IT ACTUALLY DO?
+# ==========================================================
+# "WMP 11 is not supported" and "WMP 11 is supported" are both statements that
+# are easy to make from the version number alone, so this reports what was
+# actually measured on the machine running the server instead.
+#
+# The facts are static properties of the installed wmp.dll and were read from
+# its type library ({6BF52A50-394A-11D3-B153-00C04F79FAA6}) rather than
+# inferred. What this route adds on top of those is the live classification of
+# the most recent client, because that is the part which decides routing.
+#
+# Deliberately does NOT probe wmp.dll at runtime. Loading another process's
+# type library to answer a web request would add a failure mode to the server
+# for no benefit - the interface set has not changed since Vista, and if it
+# ever does, the difference that matters (RenameRegroupFiles) is reported here
+# as data for a human to compare against a real dialog.
+@app.route("/wmp_capabilities")
+def wmp_capabilities():
+    """Report the FAI COM surface per player generation, and the live client."""
+    ua = _LAST_CLIENT_UA
+    payload = {
+        "wizard_external_iid": WMP_WIZARD_EXTERNAL_IID,
+        "shared_members": list(WMP11_EXTERNAL_MEMBERS),
+        "wmp12_only_members": list(WMP12_ONLY_EXTERNAL_MEMBERS),
+        "generations": {
+            "wmp11": {
+                "typelib": _WMP11_TYPELIB_IID,
+                "shared_members_present": True,
+                "wmp12_only_members_present": False,
+            },
+            "wmp12": {
+                "shared_members_present": True,
+                "wmp12_only_members_present": True,
+            },
+        },
+        "last_client": {
+            "user_agent": ua,
+            "client_version": _client_version_arg(),
+            "is_wmp11": _is_wmp11_client(ua, _client_version_arg()),
+            "is_legacy_xml_client": _is_legacy_xml_client(ua),
+            "is_dialog_host_client": _is_dialog_host_client(ua),
+            "art_mode": _effective_art_mode(),
+        },
+    }
+    return Response(json.dumps(payload, indent=2),
+                    mimetype="application/json")
 
 
 # ==========================================================
@@ -382,13 +443,20 @@ ART_EMBED_MAX_FILES = 200
 #: which is why rips silently got no art in their tags at all.
 ART_EMBED_RIP_DEFER = 30
 #: A file whose mtime is more recent than this is still being written by WMP and
-#: is SKIPPED rather than raced. A second pass is not needed: if WMP is still
-#: working after half a minute, this album was applied a long time ago.
+#: is SKIPPED rather than raced.
 ART_EMBED_RIP_SETTLE = 20
 #: How far back to look for the files a rip just wrote. Generous, because WMP
 #: writes them over a long period, but still bounded so an old untagged library
 #: cannot be mistaken for this disc - see _find_album_files().
 ART_EMBED_RIP_WINDOW = 4 * 60 * 60
+#: WMP rips a disc track-by-track over several minutes. A single deferred write
+#: at T+30s fires while most tracks are still being created, so those tracks are
+#: skipped by the settle guard and never retried - the album ends up with cover
+#: art on only some tracks. Keep retrying through a long CD rip.
+ART_EMBED_RIP_MAX_ATTEMPTS = 120
+#: Seconds between retry attempts for rip cover writes. With MAX_ATTEMPTS above
+#: this covers rip writes for roughly two hours after the dialog closes.
+ART_EMBED_RIP_RETRY_INTERVAL = 60
 
 #: Deferred rip writes, keyed by album, so a second apply supersedes the first
 #: instead of two threads writing the same files.
@@ -519,9 +587,20 @@ def _fetch_artwork_bytes(url):
     this same server. All three are already handled by the /cover/ route, so
     rather than reimplement that resolution this asks the cache first and then
     the same upstream fetch the proxy uses.
+
+    ``direct`` mode appends our own per-apply token (``fai_v=N``) to the
+    upstream URL so WMP re-fetches on re-apply. That token is OURS, not the
+    provider's - it must be stripped before anything is fetched upstream, just
+    as get_image() does via _strip_art_token(). Otherwise a CDN is asked for a
+    URL that does not exist and the rip's cover write fails, and the cache is
+    keyed on a URL that changes every apply so nothing is ever reused.
     """
     if not url:
         return None
+    # Strip our own per-apply token before the cache lookup and the fetch, so
+    # the key (and the upstream request) is the clean URL. The /cover/ path
+    # does the same in get_image().
+    url = _strip_art_token(url)
     cached = image_cache.get(url)
     if cached:
         return cached[0]
@@ -543,6 +622,10 @@ def _fetch_artwork_bytes(url):
     if r.status_code != 200 or not r.content:
         log_line("ART-EMBED", f"cover download returned {r.status_code}")
         return None
+    mimetype = r.headers.get("Content-Type", "image/jpeg")
+    if "image" not in mimetype:
+        mimetype = "image/jpeg"
+    image_cache.set(url, (r.content, mimetype), ttl=86400)
     return r.content
 
 
@@ -579,7 +662,8 @@ def _iter_audio_files(folders):
                 yield os.path.join(root, name)
 
 
-def _find_album_files(album_title, artist, folders, recent_seconds=None):
+def _find_album_files(album_title, artist, folders, recent_seconds=None,
+                      expected_track_titles=None):
     """Return the files whose tags say they belong to this album.
 
     Two passes, because of a real ordering problem. When the user runs Find
@@ -599,6 +683,14 @@ def _find_album_files(album_title, artist, folders, recent_seconds=None):
     matched = []
     untagged = []
     other_albums = set()
+    # Which folders hold other albums' TAGGED files. The ambiguity guard below is
+    # a statement about ONE folder ("these loose untagged files sit next to other
+    # albums, so they are probably several albums"), and it cannot be answered
+    # from a library-wide set. A library-wide set is non-empty as soon as the
+    # user owns more than one album, which made the guard refuse every single
+    # rip in a populated library - the log shows it refusing Tiny Cities, Duos
+    # II, Prospekt's March EP and others for exactly this reason.
+    other_album_folders = set()
     for path in _iter_audio_files(folders):
         try:
             tags = artwork_embed.read_tags(path)
@@ -611,6 +703,7 @@ def _find_album_files(album_title, artist, folders, recent_seconds=None):
             continue
         if _norm(tags["album"]) != want_album:
             other_albums.add(_norm(tags["album"]))
+            other_album_folders.add(os.path.dirname(path))
             continue
         # Album alone is enough when it is unambiguous. The artist is a
         # tie-breaker: several different albums can share a title, and
@@ -629,15 +722,74 @@ def _find_album_files(album_title, artist, folders, recent_seconds=None):
     # means no art. WMP has told us which files it wrote by their mtime, so for a
     # rip the pool is narrowed to files touched inside the window. That is both
     # narrower and MORE correct: the files WMP wrote seconds ago are this disc.
+    #
+    # ``narrowed`` records that the window actually DID something. When it did,
+    # the rip window is AUTHORITATIVE and the ambiguity guards below are skipped:
+    # the alternative is that the guards run against a pool they cannot describe,
+    # which is how every rip in a populated library was refused. The log shows
+    # it happening - 'Tiny Cities', 'Duos II', 'Prospekt's March EP' and
+    # 'An Invitation to an Accident' were all refused for "folder also holds N
+    # other tagged albums", in a library where the freshly-ripped disc sat
+    # alongside the rest.
+    narrowed = False
     if recent_seconds:
         cutoff = time.time() - recent_seconds
         fresh = [p for p in untagged if os.path.getmtime(p) >= cutoff]
+        if expected_track_titles is not None:
+            wanted_titles = {_norm(title) for title in expected_track_titles
+                             if _norm(title)}
+            if not wanted_titles:
+                log_line("ART-EMBED",
+                         f"'{album_title}': no staged track titles; refusing "
+                         "to guess rip files")
+                return []
+            fresh = [p for p in fresh
+                     if _rip_file_matches_titles(p, wanted_titles)]
+            if not fresh:
+                log_line("ART-EMBED",
+                         f"'{album_title}': no recent files matched the "
+                         "staged track titles; refusing to guess")
+                return []
         if fresh:
             log_line("ART-EMBED",
                      f"'{album_title}': rip lookup narrowed to the "
                      f"{len(fresh)} file(s) written in the last {recent_seconds}s "
                      f"(of {len(untagged)} untagged)")
             untagged = fresh
+            narrowed = True
+        else:
+            log_line("ART-EMBED",
+                     f"'{album_title}': no untagged files were written in the "
+                     f"last {recent_seconds}s; refusing the library fallback")
+            return []
+    if narrowed:
+        # The rip window beat the shared-folder guard, but the folder rule still
+        # applies: files WMP wrote seconds ago spread over TWO folders are two
+        # things, and stamping one cover across both is the mistake this whole
+        # function exists to avoid. The window answers "which files", not "are
+        # they one album".
+        parents = {os.path.dirname(p) for p in untagged}
+        if len(parents) > 1:
+            log_line("ART-EMBED",
+                     f"'{album_title}': the {len(untagged)} file(s) WMP just "
+                     f"wrote are spread over {len(parents)} folders "
+                     f"({', '.join(sorted(parents))}); not guessing which is "
+                     f"the album")
+            return []
+        # Only the hard ceiling remains: a rip cannot be 500 tracks, and an
+        # unbounded write is the one thing that must never happen.
+        if len(untagged) > ART_EMBED_MAX_FILES:
+            log_line("ART-EMBED",
+                     f"'{album_title}': {len(untagged)} file(s) written in the "
+                     f"last {recent_seconds}s is too many for one album; "
+                     f"capping at {ART_EMBED_MAX_FILES}")
+            return sorted(untagged[:ART_EMBED_MAX_FILES])
+        log_line("ART-EMBED",
+                 f"'{album_title}': using the {len(untagged)} file(s) WMP "
+                 f"wrote in the last {recent_seconds}s in "
+                 f"{untagged and os.path.dirname(untagged[0])} - the rip window "
+                 f"is authoritative, so the untagged-folder guards are skipped")
+        return sorted(untagged)
     # Only trust it when the untagged files are together in one album folder,
     # i.e. they share a parent directory. A loose pile in the Music root is not
     # an album and must not be stamped with one cover.
@@ -654,20 +806,45 @@ def _find_album_files(album_title, artist, folders, recent_seconds=None):
                  f"'{album_title}': {len(untagged)} untagged file(s) in "
                  f"{folder} is too many for one album; skipped")
         return []
-    # The decisive guard: this folder already holds OTHER albums' tagged files.
+    # The ambiguity guard: THIS FOLDER already holds other albums' tagged files.
     # That is the library root, or a folder someone dumps several albums into,
     # so "all the untagged ones" is not this album - it is several.
-    if other_albums:
+    #
+    # Scoped to the folder, not the whole library. The library-wide form was
+    # non-empty for any user owning more than one album, so it refused even when
+    # the untagged files sat in a folder holding nothing else. See
+    # other_album_folders above.
+    if folder in other_album_folders:
+        here = sum(1 for _p in untagged)
         log_line("ART-EMBED",
-                 f"'{album_title}': {folder} also holds "
-                 f"{len(other_albums)} other tagged album(s), so the untagged "
-                 f"files there are not identifiable as this album; skipped")
+                 f"'{album_title}': {folder} also holds other albums' tagged "
+                 f"files, so its {here} untagged file(s) are not identifiable "
+                 f"as this album; skipped")
         return []
     log_line("ART-EMBED",
              f"'{album_title}': no album tags on disk yet (normal before "
              f"WMP writes them); using the {len(untagged)} untagged file(s) in "
              f"{folder}")
     return sorted(untagged)
+
+
+def _rip_file_matches_titles(path, wanted_titles):
+    """Match a rip candidate by its staged title, using WMA's filename if needed.
+
+    WMP commonly rips to WMA. Its text tags are not parsed by artwork_embed,
+    but the default rip filename includes the track title.
+    """
+    try:
+        title = artwork_embed.read_tags(path).get("title", "")
+    except Exception:
+        title = ""
+    if _norm(title) in wanted_titles:
+        return True
+    stem = os.path.splitext(os.path.basename(path))[0]
+    candidates = {_norm(stem)}
+    without_track_number = re.sub(r"^\s*\d+(?:[ ._-]+\d+)*[ ._-]*", "", stem)
+    candidates.add(_norm(without_track_number))
+    return bool(candidates & wanted_titles)
 
 
 def _disambiguate(matched, album_title, want_artist):
@@ -727,7 +904,9 @@ def _maybe_embed_art_after_library_tag(payload):
         # own write rather than help it. The cover is still written, on the
         # deferred pass - WMP does not put artwork into the track files, which
         # is a separate gap from the tags.
-        _schedule_rip_art_embed(album_title, artist, cover_url)
+        track_titles = [track.get("title", "")
+                for track in document.get("tracks", [])]
+        _schedule_rip_art_embed(album_title, artist, cover_url, track_titles)
         return
     # A LIBRARY album is both. WMP keeps these tags in its own database and
     # does not write them into the files, so the album only survives a library
@@ -736,30 +915,16 @@ def _maybe_embed_art_after_library_tag(payload):
                       document=document)
 
 
-def _schedule_rip_art_embed(album_title, artist, cover_url):
-    """Queue a rip's cover write for AFTER WMP has finished with the disc.
+def _schedule_rip_art_embed(album_title, artist, cover_url, track_titles=None):
+    """Queue a rip's cover write, retrying until WMP finishes writing the tracks.
 
-    This replaces a refusal, and the refusal was wrong. It rested on "WMP already
-    wrote the artwork itself", which is not what happens - from a real rip on
-    2026-10-03, with the document staged and delivered correctly:
+    WMP rips a disc track-by-track over several minutes. A single deferred
+    write at T+30s fires while most tracks are still being created, so those
+    tracks are skipped by the settle guard and never retried - the album ends
+    up with cover art on only some tracks. This retries the write at intervals
+    so every track eventually gets the cover.
 
-        [STAGED] album='One Nil' artist='Neil Finn' art=direct cover='https://i.discogs.com/...'
-        [MDR]   -> art=https://i.discogs.com/UMuceDrn... (mode=direct)
-        [ART-EMBED] CD rip (cd/toc present) - not touching the files
-
-    WMP showed that cover in the album pane and wrote nothing into the tracks, so
-    the album had a picture and every track had none. Refusing is not neutral
-    here; it is the reason rips have no embedded art at all.
-
-    Deferring keeps the reason the guard existed in the first place: WMP writes a
-    rip's tags asynchronously, so a concurrent write can leave a half-written
-    file. The finish beacon fires in the same JS turn as WriteNamesEx, so this
-    runs on a background thread after ART_EMBED_RIP_DEFER seconds, and
-    _embed_into_files then refuses to touch any file modified within
-    ART_EMBED_RIP_SETTLE seconds of the write.
-
-    No ``document`` is passed on purpose: this is the CD path, and a disc's
-    tags are WMP's to write. See _maybe_embed_art_after_library_tag().
+    A later apply to the same album supersedes earlier attempts (same key).
     """
     if not cover_url:
         log_line("ART-EMBED", f"'{album_title}' has no cover URL; nothing to do")
@@ -767,33 +932,42 @@ def _schedule_rip_art_embed(album_title, artist, cover_url):
     key = (album_title, artist)
 
     def _run():
-        time.sleep(ART_EMBED_RIP_DEFER)
+        attempt = 0
+        while attempt < ART_EMBED_RIP_MAX_ATTEMPTS:
+            attempt += 1
+            # First attempt after the defer, retries at the interval.
+            wait = ART_EMBED_RIP_DEFER if attempt == 1 else ART_EMBED_RIP_RETRY_INTERVAL
+            time.sleep(wait)
+            with RIP_EMBED_LOCK:
+                # A later apply to the same album supersedes this one. Without
+                # this, applying twice queues two threads that write the same
+                # files.
+                if RIP_EMBED_PENDING.get(key) is not job:
+                    log_line("ART-EMBED",
+                             f"'{album_title}': superseded by a later apply, skipped")
+                    return
+            log_line("ART-EMBED",
+                     f"'{album_title}': rip cover write attempt {attempt} "
+                     f"(settle={ART_EMBED_RIP_SETTLE}s)")
+            try:
+                _embed_into_files(album_title, artist, cover_url,
+                                  settle=ART_EMBED_RIP_SETTLE,
+                                  recent_seconds=ART_EMBED_RIP_WINDOW,
+                                  expected_track_titles=track_titles)
+            except Exception as exc:  # a daemon thread must not die loudly
+                log_line("ART-EMBED", f"'{album_title}': deferred write failed: {exc}")
         with RIP_EMBED_LOCK:
-            # A later apply to the same album supersedes this one. Without this,
-            # applying twice queues two threads that write the same files.
-            if RIP_EMBED_PENDING.get(key) is not job:
-                log_line("ART-EMBED",
-                         f"'{album_title}': superseded by a later apply, skipped")
-                return
-            RIP_EMBED_PENDING.pop(key, None)
-        log_line("ART-EMBED",
-                 f"'{album_title}': rip write starting ({ART_EMBED_RIP_DEFER}s "
-                 f"after apply, skipping files touched in the last "
-                 f"{ART_EMBED_RIP_SETTLE}s)")
-        try:
-            _embed_into_files(album_title, artist, cover_url,
-                              settle=ART_EMBED_RIP_SETTLE,
-                              recent_seconds=ART_EMBED_RIP_WINDOW)
-        except Exception as exc:          # a daemon thread must not die loudly
-            log_line("ART-EMBED", f"'{album_title}': deferred write failed: {exc}")
+            if RIP_EMBED_PENDING.get(key) is job:
+                RIP_EMBED_PENDING.pop(key, None)
 
     job = threading.Thread(target=_run, daemon=True)
     with RIP_EMBED_LOCK:
         RIP_EMBED_PENDING[key] = job
     job.start()
     log_line("ART-EMBED",
-             f"'{album_title}': CD rip - cover write queued for "
-             f"+{ART_EMBED_RIP_DEFER}s (WMP is still writing these files now)")
+             f"'{album_title}': CD rip - cover write queued "
+             f"(first in {ART_EMBED_RIP_DEFER}s, retries every "
+             f"{ART_EMBED_RIP_RETRY_INTERVAL}s, up to {ART_EMBED_RIP_MAX_ATTEMPTS} attempts)")
 
 
 def _tracks_by_title(document):
@@ -830,7 +1004,8 @@ def _match_track(path, tracks_by_title):
 
 
 def _embed_into_files(album_title, artist, cover_url, settle=0,
-                      recent_seconds=None, document=None):
+                      recent_seconds=None, document=None,
+                      expected_track_titles=None):
     """Locate the album's files and write the dialog's metadata into each.
 
     ``document`` is the staged dialog document (see
@@ -853,7 +1028,8 @@ def _embed_into_files(album_title, artist, cover_url, settle=0,
         log_line("ART-EMBED", f"'{album_title}': nothing to write")
         return
     files = _find_album_files(album_title, artist, ART_EMBED_FOLDERS,
-                              recent_seconds=recent_seconds)
+                              recent_seconds=recent_seconds,
+                              expected_track_titles=expected_track_titles)
     if not files:
         log_line("ART-EMBED",
                  f"no files tagged '{album_title}' under "
@@ -1267,6 +1443,14 @@ _ART_MODE_EXPLICIT = (os.environ.get("WMP_ART_MODE", "").strip().lower())
 #: LAST_WMID and the staged-XML index are already built on.
 _LAST_CLIENT_UA = ""
 
+#: The ?version= the most recent request carried - WMP's own wmp.dll version,
+#: e.g. "11.0.6003.22165". Remembered for the same reason as _LAST_CLIENT_UA,
+#: and for a sharper one: the request that BUILDS the document is the dialog
+#: page's POST to /store_staged_xml, which is same-origin and usually has no
+#: query string, so reading only the current request loses the version exactly
+#: when the artwork decision needs it. See after_request().
+_LAST_CLIENT_VERSION = ""
+
 
 def _is_win7_build():
     """True only for the frozen Windows 7 test build.
@@ -1283,14 +1467,117 @@ def _is_win7_build():
         return False
 
 
+def _is_wmp11_client(user_agent=None, version_arg=None):
+    """True for Windows Media Player 11, and False for WMP 12 and WMP 7-9.
+
+    WHY THIS IS VERSION-BASED AT ALL
+    WMP 11 and WMP 7-9 both report a "media player" agent, so the product name
+    alone cannot separate them - and getting it wrong is not cosmetic. Filed
+    with WMP 7-9, WMP 11 loses the FAI dialog, which is the only way to correct
+    a wrong match.
+
+    THE AGENT WMP 11 ACTUALLY SENDS
+    This was read out of fai_server.log rather than assumed. An earlier version
+    of this function keyed on "NSPlayer/11", which was a guess, and the guess
+    never matched anything - the real WMP 11 install here sends:
+
+        Windows-Media-Player/11.0.6003.22165
+
+    THE THREE REAL AGENTS, all read out of fai_server.log:
+
+        Windows-Media-Player/11.0.6003.22165   WMP 11  - hosts the dialog
+        WindowsMediaPlayer/12.0.19041.4046     WMP 12  - background fetch
+        WindowsMediaPlayer/12                  WMP 12  - short form
+
+    THE RANGE IS 10-11, NOT "BELOW 12"
+    A first attempt used "< 12", which is wrong: it also matches WMP 9
+    ("NSPlayer/9.0.0.4509"), and WMP 9 has no browser to host the dialog.
+    Admitting it would hand WMP 9 an HTML page it cannot render - the exact
+    regression this function exists to avoid.
+
+    Only WMP 10 and 11, the Vista-era pair, host the FAI dialog in a browser
+    control. They are the generations that ship IWMPCDDVDWizardExternal, which
+    is what is actually being detected here - the COM surface, not a version
+    number for its own sake. WMP 7-9 predate that dialog and must keep being
+    answered with the MDR-CD document.
+    """
+    # The version of the wmp.dll making the request, when the caller has it.
+    # This is the same number the type library was read from, so it is the
+    # strongest signal available.
+    if version_arg:
+        digits = ""
+        for ch in str(version_arg):
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        if digits:
+            try:
+                return 10 <= int(digits) < 12
+            except ValueError:
+                pass
+
+    ua = (user_agent if user_agent is not None else _LAST_CLIENT_UA) or ""
+    low = ua.lower()
+    for prefix in ("windows-media-player/", "windowsmediaplayer/", "nsplayer/"):
+        if prefix in low:
+            rest = low.split(prefix, 1)[1]
+            digits = ""
+            for ch in rest:
+                if ch.isdigit():
+                    digits += ch
+                else:
+                    break
+            if digits:
+                try:
+                    return 10 <= int(digits) < 12
+                except ValueError:
+                    return False
+            # A product name with no parseable version is not a claim we can
+            # act on; fall through to the remaining prefixes.
+    return False
+
+
+def _client_version_arg():
+    """The ?version= WMP puts on every FAI request, or ''.
+
+    WMP states the version of its own wmp.dll here - 11.0.6003.22165 on this
+    install, the same number the type library was read from. That is a stronger
+    signal than the User-Agent because it comes from the player itself rather
+    than from whatever HTTP stack is in front of it, and it is present on the
+    service requests where the agent varies.
+
+    Read with raw_query_arg so a '+' is not turned into a space, and so it does
+    not depend on Flask's own parsing of the rest of the query.
+
+    THE FALLBACK TO _LAST_CLIENT_VERSION IS LOAD-BEARING
+    The request that builds the document is the dialog page's POST to
+    /store_staged_xml. It is same-origin and normally has no query string at
+    all, so the version is not on it - yet the artwork decision runs there. That
+    is what produced "[STAGED] art=direct" on WMP 11 while the very next request
+    logged "(mode=relative)": the mode was decided from a request that could not
+    see the version. Falling back to the last version WMP stated keeps the whole
+    flow on one answer instead of half of it.
+    """
+    return (raw_query_arg('version') or '').strip() or _LAST_CLIENT_VERSION
+
+
 def _is_legacy_xml_client(user_agent=None):
     """True for Windows Media Center and WMP 7-9 - the clients with no browser.
 
     Same marker list _is_dialog_host_client() already refuses, kept as its own
     name so the artwork decision does not have to borrow a predicate whose
     meaning is "will this caller render HTML", which is a different question.
+
+    WMP 11 is deliberately NOT answered here even though it shares the NSPlayer
+    prefix. It reports NSPlayer/11... and it DOES host the dialog in a browser
+    control, exactly as WMP 12 does, so excluding it would strip the only
+    interface a user has for correcting a wrong match. The version test in
+    _is_wmp11_client() is what tells the two apart.
     """
     ua = (user_agent if user_agent is not None else _LAST_CLIENT_UA) or ""
+    if _is_wmp11_client(ua, _client_version_arg()):
+        return False
     for marker in ("Windows-Media-Center", "WMC", "NSPlayer",
                    "Windows-Media-Player", "MCE"):
         if marker.lower() in ua.lower():
@@ -1298,14 +1585,112 @@ def _is_legacy_xml_client(user_agent=None):
     return False
 
 
+# ---- Windows Media Player 11 ------------------------------------------------------
+# WMP 11 (the Vista-era player) is the OLDER of the two supported WMP generations,
+# and it was previously lumped in with WMC / WMP 7-9 as a "legacy XML client". That
+# was wrong, and this block is why.
+#
+# WHAT WAS CHECKED, ON A MACHINE THAT ACTUALLY HAS WMP 11
+# The type library of {6BF52A50-394A-11D3-B153-00C04F79FAA6} in
+# C:\Windows\system32\wmp.dll was enumerated directly. Findings:
+#
+#   * IWMPCDDVDWizardExternal EXISTS, under the SAME IID the dialog already uses -
+#     {2D7EF888-1D3C-484A-A906-9F49D99BB344} - and derives from the same
+#     IWMPExternalColors -> IWMPExternal chain. So window.external is the same
+#     object on WMP 11 and the existing dialog JS works unchanged.
+#   * WriteNames, WriteNamesEx, ReturnToMainTask, GetMDQByRequestID,
+#     EditMetadata, BuyCD and IsMetadataAvailableForEdit are ALL present.
+#
+#   * ONE MEMBER IS MISSING: RenameRegroupFiles. It is present on WMP 12 and
+#     absent here, so the dialog must not call it. It never did - fRenameRegroup-
+#     Files is a *parameter* of WriteNamesEx, not a call - but it is now recorded
+#     rather than assumed, and dialog_probe() reports the difference.
+#
+#   * IWMPLibrary on WMP 11 has only 7 members (isIdentical, mediaCollection,
+#     name, type + IUnknown), against WMP 12's full library surface. That makes
+#     the "no COM route for a library write" limit STRICTER here, not looser: the
+#     WMP_WRITENAMES_TYPE enum still names only physical discs and DVDs, so on
+#     WMP 11 a library album can only be written by the same disc-shaped calls.
+#
+# WMP 11 reports itself as 'Windows-Media-Player/11.0.6003.22165', the same
+# spelling WMP 7-9 use ('Windows-Media-Player/9...'). That is a genuine ambiguity
+# and is resolved on the VERSION - from the agent or, better, from the version=
+# parameter WMP sends - rather than by guessing from the string alone.
+#
+# WMP_ART_MODE and the win7-build rule are untouched: this player is neither, and
+# artwork for it uses the same "relative" shape the other browser-less clients
+# need, which _is_wmp11_client() feeds into.
+#
+# Deliberately NOT re-pointed: WMP 11 has no metaservices strings in wmp.dll,
+# wmpshell.dll or wmplayer.exe at all, so its service URL cannot be read off a
+# string table the way WMP 12's was. Where it dials is still UNVERIFIED and is
+# left to the hosts file, which already carries the metaservices entries.
+_WMP11_TYPELIB_IID = "{6BF52A50-394A-11D3-B153-00C04F79FAA6}"
+
+#: The wizard external interface, present on BOTH generations - verified on WMP 11.
+WMP_WIZARD_EXTERNAL_IID = "{2D7EF888-1D3C-484A-A906-9F49D99BB344}"
+
+#: Members confirmed present on WMP 11's IWMPCDDVDWizardExternal.
+WMP11_EXTERNAL_MEMBERS = (
+    "WriteNames",
+    "WriteNamesEx",
+    "ReturnToMainTask",
+    "GetMDQByRequestID",
+    "EditMetadata",
+    "BuyCD",
+    "IsMetadataAvailableForEdit",
+)
+
+#: Present on WMP 12, ABSENT on WMP 11. Never call these on WMP 11.
+WMP12_ONLY_EXTERNAL_MEMBERS = (
+    "RenameRegroupFiles",
+    "OnChangeViewError",
+    "OnChangeViewOnlineListError",
+)
+
+
 def _effective_art_mode():
-    """The artwork mode to actually use for the client being served."""
+    """The artwork mode to actually use for the client being served.
+
+    The WMP 11 branch passes _client_version_arg() deliberately. THIS FUNCTION
+    IS THE ARTWORK BUG: the document is built while the DIALOG request is in
+    flight, and that request carries an ordinary IE7 User-Agent - the player's
+    own agent appears on the service requests before it, not on this one. So
+    without the version= parameter the player is invisible here, the mode falls
+    through to "direct", and largeCoverParams gets a bare upstream CDN URL that
+    WMP 11 never comes back to this server for. The album then keeps its old
+    or missing cover after the dialog completes.
+
+    Confirmed against fai_server.log: the cover WMP 11 actually fetched was
+        GET /cover/album.jpg?url=...
+    i.e. it came through here, which is only reachable in a non-direct mode.
+    """
     if _ART_MODE_EXPLICIT:
         return _ART_MODE_EXPLICIT
     if _is_win7_build():
         return "relative"
     if _is_legacy_xml_client():
         return "relative"
+    if _is_wmp11_client(_LAST_CLIENT_UA, _client_version_arg()):
+        # "proxy" = an ABSOLUTE http://127.0.0.1/cover/... URL, deliberately not
+        # "relative". A relative path is re-prefixed by the client: WMP resolves
+        # a host-relative largeCoverParams against the host it fetched the
+        # document from and prepends its own /cover/, so the document value
+        #
+        #     /cover/fai-585c2699/album.jpg?url=...
+        #
+        # arrives as
+        #
+        #     GET /cover/cover/fai-585c2699/album.jpg?url=...
+        #
+        # Observed on WMP 11, 2026-10-05 03:05:21. It still served, because the
+        # ?url= parameter survived and the handler fetched from that - which is
+        # exactly why it looked correct and was not: the path was malformed, and
+        # anything relying on the PATH form (the scheme-less rewrite) would miss.
+        # An absolute URL leaves nothing for the client to resolve, so the value
+        # in the document is the URL that is fetched. The token still changes per
+        # apply, so a re-apply re-fetches.
+        return "proxy"
     return _ART_MODE
 
 
@@ -3335,10 +3720,56 @@ def _strip_art_token(url):
     # '&(amp;)?' covers the document's own escaped spelling as well as the
     # decoded one, in case a client hands the value back without unescaping it.
     out = re.sub(r"&(?:amp;)?%s=\d+" % ART_TOKEN_PARAM, "", url)
-    out = re.sub(r"\?(?:amp;)?%s=\d+&?" % ART_TOKEN_PARAM, "?", out)
+    # The separator after the token can be '?', '&', or - observed on WMP 11 -
+    # '?' on BOTH sides, because WMP appends its own parameters with '?' to a
+    # value that already had one:  "...jpg?fai_v=1?locale=409&geoid=f4".
+    # Only the '?' cases are rewritten here; the '&' case is handled above and
+    # must not be touched, or a real parameter separator would be swallowed.
+    out = re.sub(r"\?(?:amp;)?%s=\d+(?:\?|&?)" % ART_TOKEN_PARAM, "?", out)
+    # A doubled '?' left behind by that rewrite is not a valid query string.
+    out = out.replace("??", "?")
     if out.endswith("?"):
         out = out[:-1]
     return out
+
+
+def _normalize_mangled_url(url):
+    """Repair the URL damage WMP does when it rewrites a cover URL onto us.
+
+    WMP does not hand back the largeCoverParams verbatim. It takes the
+    absolute CDN URL out of the document, rewrites it onto THIS host under
+    /cover/, and in doing so mangles the scheme separator. Observed on WMP 11,
+    logged verbatim:
+
+        GET /cover/https:/is1-ssl.mzstatic.com/image/thumb/Music211/v4/cc/b0/
+            d2/ccb0d2f6-60a7-1ee6-3386-6cd85764ab22/5051961002102.jpg/
+            600x600bb.jpg?fai_v=1?locale=409&geoid=f4  -> 404
+
+    TWO separate injuries, and both have to be repaired for this to serve:
+
+    1. "https://host" became "https:/host" - ONE slash. Every validity check
+       in get_image() requires "http://" or "https://", so the URL passed the
+       'does this look like a URL' test (its first four characters are
+       "http") and was then rejected as unusable. That is the 404.
+
+    2. The per-apply token came back as "?fai_v=1?" - a SECOND question mark
+       where the separator belonged, because WMP appended its own parameters
+       with '?' to a value that already contained one. _strip_art_token()
+       handles '?fai_v=N&' and '?fai_v=N' at the end, but not a '?' on both
+       sides, so the token survived and would have been forwarded to the CDN.
+
+    Only the scheme is repaired here; the token is left intact for
+    _strip_art_token() to deal with, because that function already owns the
+    token's rules and duplicating them here would be how they drift apart.
+    """
+    if not url:
+        return url
+    # A single slash after the scheme is never valid in an absolute URL, so
+    # adding the missing one cannot damage a well-formed value.
+    m = re.match(r"^(https?:)/(?=[^/])", url, re.IGNORECASE)
+    if m:
+        return m.group(1) + "//" + url[m.end():]
+    return url
 
 
 @app.route("/get_image")
@@ -3412,6 +3843,10 @@ def get_image(ignore=None):
                 url = requests.utils.unquote(url)
             except Exception:
                 pass
+        # Repair WMP's own rewrite damage (https:/host, a single slash). This has
+        # to happen BEFORE the usability check below, because that check is the
+        # one rejecting the mangled URL - see _normalize_mangled_url().
+        url = _normalize_mangled_url(url)
     # OUR OWN parameter comes off here, after every decoding step and before
     # anything is fetched: see _strip_art_token(). This is what keeps the
     # per-apply token in largeCoverParams from ever reaching a provider.
@@ -3739,8 +4174,26 @@ def _is_dialog_host_client(user_agent):
     'NSPlayer' or 'Windows-Media-Player', none of which contain 'MSIE' or
     'Mozilla'. The explicit list is here anyway so the decision does not rest
     on an accidental substring match if those agents ever change.
+
+    WMP 11 is the exception that proves the rule. It reports as
+    'Windows-Media-Player/11.0.6003.22165' and shares that spelling with WMP 7-9
+    ('Windows-Media-Player/9...'), so the marker list alone would have filed it
+    alongside them and denied it the dialog. It is a browser client: its own
+    IWMPCDDVDWizardExternal - the very interface the dialog writes through - was
+    verified present in its type library under the same IID WMP 12 uses. So it is
+    checked by VERSION and allowed in.
+
+    Both signals are consulted: the agent, and the ?version= WMP sends, which is
+    the version of its own wmp.dll. The log shows the service request carrying
+    the player agent ('Windows-Media-Player/11.0.6003.22165') while the dialog
+    request that follows it carries an ordinary IE7 agent
+    ('Mozilla/4.0 ... Media Center PC 6.0'), so either one alone is incomplete:
+    the agent identifies the player but not the dialog, and the IE7 agent is
+    what actually identifies the dialog.
     """
     ua = user_agent or ""
+    if _is_wmp11_client(ua, _client_version_arg()):
+        return True
     for marker in ("Windows-Media-Center", "WMC", "NSPlayer",
                    "Windows-Media-Player", "MCE"):
         if marker.lower() in ua.lower():

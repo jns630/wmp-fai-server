@@ -257,12 +257,31 @@ fai.ART_EMBED_FOLDERS = [cdrip_dir]
 check("precondition: the fallback WOULD have matched this file",
       len(fai._find_album_files(ALBUM, ARTIST, [cdrip_dir])) == 1,
       "so it is the cd/toc guard, not the matching, that protects the rip")
+fai.PENDING_WRITE["xml"] = (
+      "<METADATA><MDR-CD><albumTitle>%s</albumTitle>"
+      "<albumArtist>%s</albumArtist>"
+      "<largeCoverParams>http://example.invalid/c.jpg</largeCoverParams>"
+      "<track><trackTitle>Untagged, mid-rip</trackTitle></track>"
+      "</MDR-CD></METADATA>" % (ALBUM, ARTIST))
+scheduled_titles = []
+schedule_rip = fai._schedule_rip_art_embed
+
+
+def capture_rip_schedule(album_title, artist, cover_url, track_titles=None):
+      scheduled_titles.append(track_titles)
+      schedule_rip(album_title, artist, cover_url, track_titles)
+
+
+fai._schedule_rip_art_embed = capture_rip_schedule
 r = client.post("/client_error", json={"page": "finish", "applied": True,
                                        "toc": "",
                                        "cd": "B+96+1970+523A+1+150+200",
                                        "library_mode": False,
                                        "write": "WriteNamesEx-cdid-ok"})
+fai._schedule_rip_art_embed = schedule_rip
 check("real CD shape: beacon accepted", r.status_code == 200, r.status_code)
+check("real CD beacon passes staged track titles to the retry worker",
+        scheduled_titles == [["Untagged, mid-rip"]], scheduled_titles)
 check("real CD shape: nothing written synchronously",
       apic_count(cdrip2) == 0,
       "identified by ?cd=, not by toc - and deferred, so the file is untouched "
@@ -322,6 +341,119 @@ check("rip lookup is narrowed by the window, not defeated by a stray file",
 check("the same lookup WITHOUT the window still refuses (unchanged safety)",
       fai._find_album_files(ALBUM, ARTIST, fai.ART_EMBED_FOLDERS) == [],
       "a library-wide guess is still refused; only the rip path is narrowed")
+
+# The rip window is authoritative even when it finds nothing. Falling through
+# would let an old untagged file masquerade as the just-ripped disc.
+stale_rip = tempfile.mkdtemp(prefix="stale_rip_")
+stale_file = os.path.join(stale_rip, "old_untagged.mp3")
+make_mp3(stale_file, None, None, None)
+_old = time.time() - (fai.ART_EMBED_RIP_WINDOW * 3)
+os.utime(stale_file, (_old, _old))
+check("a rip with no fresh files does not fall back to stale untagged files",
+      fai._find_album_files(ALBUM, ARTIST, [stale_rip],
+                            recent_seconds=fai.ART_EMBED_RIP_WINDOW) == [],
+      "the rip window must not be bypassed when it finds no candidates")
+
+# WMP's default WMA files have no title tags available to our matcher, so the
+# staged track list must be checked against the numbered filename instead.
+wma_rip = tempfile.mkdtemp(prefix="wma_rip_")
+wma_match = os.path.join(wma_rip, "01 A Few Less Sour.wma")
+wma_wrong = os.path.join(wma_rip, "02 Central Reservation.wma")
+make_mp3(wma_match, None, None, "ignored by WMA tag dispatch")
+make_mp3(wma_wrong, None, None, "also ignored by WMA tag dispatch")
+check("a WMA rip matches the staged title in its numbered filename",
+        fai._find_album_files(
+              "For All Intents And Purposes", "The Evergreen Trio", [wma_rip],
+              recent_seconds=fai.ART_EMBED_RIP_WINDOW,
+              expected_track_titles=["A Few Less Sour"])
+        == [wma_match], wma_rip)
+check("unrelated recent WMA files are not selected for a rip",
+        fai._find_album_files(
+              "For All Intents And Purposes", "The Evergreen Trio", [wma_rip],
+              recent_seconds=fai.ART_EMBED_RIP_WINDOW,
+              expected_track_titles=["A Few Less Sour", "Another Song"])
+        == [wma_match], wma_rip)
+
+wrong_album_rip = tempfile.mkdtemp(prefix="wrong_album_rip_")
+for index, title in enumerate(("Stolen Car", "Sweetest Decline",
+                                             "So Much More"), 1):
+      make_mp3(os.path.join(wrong_album_rip, "%02d %s.wma" % (index, title)),
+                   None, None, title)
+check("a recent unrelated album is refused even in one folder",
+        fai._find_album_files(
+              "For All Intents And Purposes", "The Evergreen Trio",
+              [wrong_album_rip], recent_seconds=fai.ART_EMBED_RIP_WINDOW,
+              expected_track_titles=["A Few Less Sour", "The Evergreen Trio"])
+        == [], wrong_album_rip)
+
+# ======================================================================
+# REGRESSION, from a real log. A RIP into a folder that already holds other
+# albums' TAGGED files was refused outright:
+#
+#   [ART-EMBED] 'Tiny Cities': C:\...\Sample Music also holds 16 other tagged
+#               album(s), so the untagged files there are not identifiable as
+#               this album; skipped
+#
+# The guard collected "other albums" across the WHOLE library, so it was
+# non-empty for anyone owning more than one album - and the rip narrowing that
+# was added for exactly this case was computed, logged, and then thrown away by
+# it. Every rip in a populated library lost its cover.
+#
+# The fix: when the rip window actually narrowed the pool, that window is
+# authoritative. The tests below pin that, and pin that the LIBRARY path is
+# still refused.
+# ======================================================================
+shared = tempfile.mkdtemp(prefix="shared_")
+for i in range(3):
+    make_mp3(os.path.join(shared, "old_%d.mp3" % i),
+             "Some Other Album", "Some Other Artist", "Track %d" % i)
+_old = time.time() - (fai.ART_EMBED_RIP_WINDOW * 3)
+for _f in os.listdir(shared):
+    os.utime(os.path.join(shared, _f), (_old, _old))
+
+RIP_ALBUM, RIP_ARTIST = "Tiny Cities", "Sun Kil Moon"
+ripped = []
+for i in range(1, 12):                     # a real album's worth of tracks
+    p = os.path.join(shared, "11_%02d.mp3" % i)
+    make_mp3(p, None, None, None)          # WMP has not written tags yet
+    ripped.append(p)
+
+_found = fai._find_album_files(RIP_ALBUM, RIP_ARTIST, [shared],
+                               recent_seconds=fai.ART_EMBED_RIP_WINDOW)
+check("a rip into a folder holding other albums is FOUND",
+      sorted(_found) == sorted(ripped),
+      "found %d of %d; the rip window must beat the shared-folder guard"
+      % (len(_found), len(ripped)))
+check("...and it is not refused for the folder holding other albums",
+      len(_found) > 0, "this is the exact refusal in the log")
+
+check("the same rip lookup WITHOUT the window is still refused",
+      fai._find_album_files(RIP_ALBUM, RIP_ARTIST, [shared]) == [],
+      "a library-wide guess must stay refused; only a narrowed rip may pass")
+
+# The rip window must still respect the hard ceiling. An unbounded write is
+# the one outcome that must never happen.
+_many = tempfile.mkdtemp(prefix="many_")
+for i in range(fai.ART_EMBED_MAX_FILES + 5):
+    make_mp3(os.path.join(_many, "%03d.mp3" % i), None, None, None)
+check("the rip path still caps at ART_EMBED_MAX_FILES",
+      len(fai._find_album_files("Capped", "Nobody", [_many],
+                                recent_seconds=fai.ART_EMBED_RIP_WINDOW))
+      == fai.ART_EMBED_MAX_FILES,
+      "an unbounded rip write is the one thing that must never happen")
+
+# A rip whose files are spread over several folders: the mtime evidence is
+# strong, but "all of them" is not one album and the folder guard still applies
+# rather than trusting a spread.
+spread_root = tempfile.mkdtemp(prefix="spread_")
+for sub in ("disc1", "disc2"):
+    d = os.path.join(spread_root, sub)
+    os.makedirs(d)
+    make_mp3(os.path.join(d, "a.mp3"), None, None, None)
+check("a rip spread over 2 folders is NOT trusted as one album",
+      fai._find_album_files("Spread", "Nobody", [spread_root],
+                            recent_seconds=fai.ART_EMBED_RIP_WINDOW) == [],
+      "two folders of fresh files is not one disc")
 
 r = client.post("/client_error", json={"page": "finish", "applied": False})
 check("guard: applied=false does nothing", r.status_code == 200)

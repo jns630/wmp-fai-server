@@ -14,15 +14,31 @@ is already in their library and choosing "Update album info". There, WMP writes
 the text tags through WriteNamesEx but the cover never lands in the file, so it
 lives only in WMP's library database and disappears with it.
 
-There is no COM route
----------------------
-Checked, not assumed. IWMMetadataWriter (the interface that would do this)
-returns E_NOINTERFACE from the editor object WMCreateEditor hands out, and is
-not even declared in the Windows Media Format SDK 11 headers - SDK 11 replaced
-it with IWMMetadataEditor, whose entire surface is Open/Close/Flush with no
-method that writes a value at all. WM/Picture also only covers ASF/WMA; WMP rips
-to MP3 by default, which is ID3v2 APIC, for which Windows ships no COM API.
-The tags are therefore written directly here, in pure Python.
+There is no COM route for the *tags*
+--------------------------------------
+Checked, not assumed. SDK 11 replaced IWMMetadataWriter with
+IWMMetadataEditor, whose entire surface is Open/Close/Flush with no method that
+writes a value at all.
+
+ARTWORK IS DIFFERENT, AND IS NOW SUPPORTED FOR WMA
+--------------------------------------------------
+The claim that there is "no COM route for artwork" was checked again and was
+wrong in one place. ``IWMHeaderInfo3`` is available: on the 64-bit system
+``wmvcore.dll`` it QueryInterfaces cleanly from both WMCreateWriter and
+WMCreateEditor, and a hand-built WM_PICTURE passed to its AddAttribute is
+accepted (it returns NS_E_NOT_CONFIGURED, i.e. the call shape is right and the
+writer simply needs its profile set first).
+
+It is still not used. The WMF writer cannot patch an ASF header in place - it
+requires a fully configured object and then re-streams every audio sample,
+because adding an attribute moves the Data Object and every packet offset with
+it. For 100-800 KB of cover art that is an absurd trade. So ``artwork_wma``
+writes the same header bytes in pure Python, growing the header and shifting the
+audio, which is what a CD rip needs and costs no re-encoding.
+
+The tags remain unwritten here. They are not needed: WMP writes them through
+WriteNamesEx before this runs, which is exactly what the matching in this module
+relies on.
 
 Why matching files is reliable
 ------------------------------
@@ -586,6 +602,55 @@ def read_flac_tags(path):
 
 
 # ==========================================================
+# ASF / WMA - WM/Picture
+# ==========================================================
+# The artwork half is handled by artwork_wma, which rewrites the ASF header in
+# place. The TAG half is still not written here: an ASF Extended Content
+# Description parser is a large surface for no gain, because the tags WMP needs
+# in order to identify a library album are already in the file by the time this
+# runs - WMP applies them through WriteNamesEx first. Reporting False for tags
+# is therefore honest rather than a gap.
+_ASF_EXTS = (".wma", ".asf", ".wmv")
+
+
+def _asf_apply(path, tags, image, mime="image/jpeg"):
+    """Write ``image`` into an ASF container. See artwork_wma for the format."""
+    tags_written = False
+    art_written = False
+    if image:
+        # Already correct: skip the write entirely. Re-applying an album is
+        # common, and rewriting a 5 MB file to change nothing is not free.
+        existing = _asf_existing_art(path)
+        if existing == (mime, image):
+            art_written = False
+        elif _asf_write_art(path, image, mime):
+            art_written = True
+    return (tags_written, art_written)
+
+
+def _asf_existing_art(path):
+    """``(mime, image)`` currently stored, or None."""
+    try:
+        import artwork_wma
+        found = artwork_wma.read_art(path)
+    except Exception:                       # never let this break a caller
+        return None
+    if not found:
+        return None
+    return (found[0], found[2])
+
+
+def _asf_write_art(path, image, mime):
+    try:
+        import artwork_wma
+        return bool(artwork_wma.write_art(path, image, mime))
+    except Exception as exc:
+        print(f"[ART-EMBED] WMA write failed for {path}: "
+              f"{type(exc).__name__}: {exc}")
+        return False
+
+
+# ==========================================================
 # Dispatch
 # ==========================================================
 def read_tags(path):
@@ -771,8 +836,8 @@ def write_tags_and_art(path, tags=None, image=None, mime="image/jpeg"):
     Returns ``(tags_written, art_written)``. Either half is skipped when the
     file already says what it is being asked to say, so calling this twice -
     which is what happens whenever an album is re-applied - touches nothing
-    the second time. A container this module cannot write (WMA, M4A) is left
-    alone and both halves report False.
+    the second time. A container this module cannot write (M4A) is left alone
+    and both halves report False.
     """
     tags = _clean_tags(tags)
     if image is not None:
@@ -784,6 +849,8 @@ def write_tags_and_art(path, tags=None, image=None, mime="image/jpeg"):
         return _mp3_apply(path, tags, image, mime)
     if ext == ".flac":
         return _flac_apply(path, tags, image, mime)
+    if ext in _ASF_EXTS:
+        return _asf_apply(path, tags, image, mime)
     return (False, False)
 
 
