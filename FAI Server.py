@@ -5328,6 +5328,73 @@ body { overflow: auto; }
 .album-item.sel { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#E8F4FC', endColorstr='#E8F4FC', type='0'); }
 <![endif]-->
 """
+FAI_AERO_CSS = """
+/* Classic Aero glass treatment, shared by the search and confirmation steps.
+     Keep the flat colors first: IE7 ignores CSS gradients but understands the
+     DXImageTransform filters below. No layout or interaction rules are changed. */
+body { color: #243746; background-color: #EDF5FB; }
+.header-area {
+    border-bottom: 1px solid #8DB6D3; background-color: #D5EAF8;
+    background-image: linear-gradient(to bottom, #F8FCFF 0%, #DDEFFB 45%, #C7E2F5 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F8FCFF', endColorstr='#C7E2F5', type='0');
+}
+.header-text, .header-tag { color: #24577A; }
+.main-container { background-color: #F4F9FD; }
+.left-pane { border-right-color: #B5CDDF; background-color: #F7FBFE; }
+.right-pane { background-color: #F1F7FC; }
+.section-label {
+    color: #244F6C; border-bottom: 1px solid #B0C9DC;
+    background-color: #E6F1F9;
+    background-image: linear-gradient(to bottom, #F9FCFF 0%, #E3EFF8 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F9FCFF', endColorstr='#E3EFF8', type='0');
+}
+.existing-info, .wmp-context-card {
+    border: 1px solid #B8CEDF; background-color: #F8FCFF;
+}
+.existing-thumb, .album-thumb, .found-cover {
+    border-color: #8FAFC7; background-color: #EAF3FA;
+}
+.search-input, .edit-input { border-color: #829FB7; }
+.search-input:focus, .edit-input:focus { border-color: #3B82B5; }
+.filter-row { border-bottom-color: #B5CDDF; }
+.filter-active { color: #1F6395; }
+.results-scroll { border-color: #9DB9CE; background-color: #FFFFFF; }
+.album-item { border-bottom-color: #E2ECF4; }
+.album-item:hover, .track-row:hover {
+    border-color: #A8CBE4; background-color: #EAF5FC;
+    background-image: linear-gradient(to bottom, #FFFFFF 0%, #E5F2FB 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#E5F2FB', type='0');
+}
+.album-item.sel, .track-row.selected {
+    border-color: #73A6CC; background-color: #D9ECF9;
+    background-image: linear-gradient(to bottom, #F3FAFE 0%, #D2E8F7 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F3FAFE', endColorstr='#D2E8F7', type='0');
+}
+.selection-badge { border-color: #A9C5D9; background-color: #E6F2FA; }
+.nav-steps { border-color: #B7CEDF; background-color: #EAF4FB; }
+.footer {
+    border-top-color: #9DBBD2; background-color: #DCECF8;
+    background-image: linear-gradient(to bottom, #F6FBFF 0%, #DCECF8 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F6FBFF', endColorstr='#DCECF8', type='0');
+}
+.btn {
+    color: #20394D; border-color: #8EA9BE; background-color: #E7F1F8;
+    background-image: linear-gradient(to bottom, #FFFFFF 0%, #F5FAFE 45%, #D8EAF6 55%, #EAF4FA 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#D8EAF6', type='0');
+}
+.btn:hover, .btn-default {
+    color: #173D5A; border-color: #5B9BC9; background-color: #D9ECF9;
+    background-image: linear-gradient(to bottom, #FFFFFF 0%, #EEF8FE 45%, #C9E3F4 55%, #E3F2FB 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#C9E3F4', type='0');
+}
+.btn:active {
+    background-color: #CFE3F1;
+    background-image: linear-gradient(to bottom, #C9DFEF 0%, #EAF5FC 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#C9DFEF', endColorstr='#EAF5FC', type='0');
+}
+.link, .link-gap { color: #17669E; }
+"""
+
 @app.route("/FAI/ui")
 def unified_ui():
     # Zune does NOT reach this dialog. It has no browser host: of every binary in
@@ -5421,7 +5488,7 @@ def unified_ui():
 <head>
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <title>Find Album Information</title>
-  <style>{{ css|safe }}{{ ui_css|safe }}</style>
+    <style>{{ css|safe }}{{ ui_css|safe }}{{ aero_css|safe }}</style>
 </head>
 <body>
   <div class="header-area">
@@ -5985,7 +6052,7 @@ def unified_ui():
     };
   </script>
 </body>
-</html>""", css=COMMON_CSS, ui_css=FAI_UI_CSS, toc_ref=toc_ref, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, flow=flow, request_id=request_id, session_id=session_id, disc_summary=disc_summary, disc_track_count=disc_track_count)
+</html>""", css=COMMON_CSS, ui_css=FAI_UI_CSS, aero_css=FAI_AERO_CSS, toc_ref=toc_ref, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, flow=flow, request_id=request_id, session_id=session_id, disc_summary=disc_summary, disc_track_count=disc_track_count)
 # ==========================================================
 # UNIFIED CONFIRMATION & TRACK SELECTION PAGE
 # ==========================================================
@@ -6165,7 +6232,7 @@ def confirm():
 <head>
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <title>Find Album Information</title>
-  <style>{{ css|safe }}</style>
+    <style>{{ css|safe }}{{ aero_css|safe }}</style>
 </head>
 <body>
   <div class="header-area">
@@ -7005,7 +7072,8 @@ def confirm():
   </script>
 </body>
 </html>""",
-      css=COMMON_CSS,
+    css=COMMON_CSS,
+    aero_css=FAI_AERO_CSS,
       details=details,
       # The cover of the album being APPLIED. proxy_art was computed here since
       # long ago and never passed to the template, so the confirm page showed no
