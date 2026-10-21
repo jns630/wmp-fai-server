@@ -38,7 +38,9 @@ audio, which is what a CD rip needs and costs no re-encoding.
 
 The tags remain unwritten here. They are not needed: WMP writes them through
 WriteNamesEx before this runs, which is exactly what the matching in this module
-relies on.
+relies on. They ARE read back, WMA included (``artwork_wma.read_tags``) - that
+read is how an album's files are found, and skipping it for WMA was why WMA
+albums never got a cover.
 
 Why matching files is reliable
 ------------------------------
@@ -605,11 +607,15 @@ def read_flac_tags(path):
 # ASF / WMA - WM/Picture
 # ==========================================================
 # The artwork half is handled by artwork_wma, which rewrites the ASF header in
-# place. The TAG half is still not written here: an ASF Extended Content
-# Description parser is a large surface for no gain, because the tags WMP needs
-# in order to identify a library album are already in the file by the time this
-# runs - WMP applies them through WriteNamesEx first. Reporting False for tags
-# is therefore honest rather than a gap.
+# place. The TAG half is still not WRITTEN here: an ASF tag writer is a large
+# surface for no gain, because the tags WMP needs in order to identify a library
+# album are already in the file by the time this runs - WMP applies them through
+# WriteNamesEx first. Reporting False for tags is therefore honest rather than a
+# gap.
+#
+# They are READ, though (artwork_wma.read_tags). Reading is what matches an
+# album's files, and without it every WMA looked untagged - which is why WMA
+# albums never got their cover while MP3 and FLAC albums did.
 _ASF_EXTS = (".wma", ".asf", ".wmv")
 
 
@@ -656,16 +662,24 @@ def _asf_write_art(path, image, mime):
 def read_tags(path):
     """Read album/artist/title from any supported file, whatever its format.
 
-    Only the containers whose tags this module can both read and write are
-    handled. WMA is deliberately read as nothing rather than guessed at: an ASF
-    Extended Content Description parser is a lot of surface for no gain here,
-    and returning empty tags makes the file simply not match.
+    WMA is read through ``artwork_wma.read_tags()``. That is not optional
+    bookkeeping: WMP rips to WMA by default, and this function is how the
+    album's files are found before the cover is written. With WMA read as
+    nothing, a WMA album was indistinguishable from a folder of untagged files,
+    so a populated library could never match it and its cover was never written
+    into any of its tracks.
     """
     ext = os.path.splitext(path)[1].lower()
     if ext == ".mp3":
         return read_mp3_tags(path)
     if ext == ".flac":
         return read_flac_tags(path)
+    if ext in _ASF_EXTS:
+        try:
+            import artwork_wma
+            return artwork_wma.read_tags(path)
+        except Exception:                  # a scan must never break on one file
+            return {"album": "", "artist": "", "title": ""}
     return {"album": "", "artist": "", "title": ""}
 
 

@@ -261,6 +261,98 @@ with open(idx_path, "rb") as fh:
           len(fh.read()) == idx_before)
 
 # ======================================================================
+# 5b. Reading the tags back. This is what lets artwork_embed find a WMA
+#     album's tracks; with it returning nothing, every WMA looked untagged
+#     and a populated library could never match one.
+# ======================================================================
+tagged_ok = []
+for src in SAMPLES:
+    try:
+        tags = wma.read_tags(src)
+    except Exception as exc:                   # must never raise on a scan
+        tags = {"album": "", "artist": "", "title": "", "error": repr(exc)}
+    tagged_ok.append(bool(tags.get("album") and tags.get("artist")
+                          and tags.get("title")))
+check("every real WMA reports album, artist and title",
+      all(tagged_ok), "%d of %d did not" % (tagged_ok.count(False),
+                                            len(tagged_ok)))
+
+if SAMPLES:
+    one = SAMPLES[0]
+    tags = wma.read_tags(one)
+    check("the album it reports is the folder WMP filed it under",
+          tags["album"].strip().lower() ==
+          os.path.basename(os.path.dirname(one)).strip().lower(),
+          (tags["album"], os.path.dirname(one)))
+
+    # The Extended Content Description is the only thing carrying the album,
+    # so a file read as album-only proves that object is parsed on its own.
+    def u16(text):
+        return text.encode("utf-16-le") + b"\x00\x00"
+
+    def obj(guid, body):
+        return guid + struct.pack("<Q", 24 + len(body)) + body
+
+    def synth(path, fields, content=None):
+        records = b""
+        for name, value in fields:
+            nb, vb = u16(name), u16(value)
+            records += (struct.pack("<H", len(nb)) + nb
+                        + struct.pack("<HH", 0, len(vb)) + vb)
+        ext = obj(wma._ASF_EXTENDED_CONTENT,
+                  struct.pack("<H", len(fields)) + records)
+        objects = ext
+        count = 1
+        if content:
+            title_b, author_b = u16(content[0]), u16(content[1])
+            body = (struct.pack("<5H", len(title_b), len(author_b), 2, 2, 2)
+                    + title_b + author_b + b"\x00\x00" * 3)
+            objects = obj(wma._ASF_CONTENT_DESCRIPTION, body) + ext
+            count = 2
+        header = (wma._ASF_HEADER + struct.pack("<Q", 30 + len(objects))
+                  + struct.pack("<I", count) + b"\x01\x02" + objects)
+        with open(path, "wb") as fh:
+            fh.write(header + b"\x00" * 64)
+        return path
+
+    ext_only = synth(os.path.join(_TMP, "extonly.wma"), [
+        ("WM/AlbumTitle", "An Album From The Extended Object"),
+        ("WM/AlbumArtist", "An Artist"),
+    ])
+    ext_tags = wma.read_tags(ext_only)
+    check("the Extended Content Description supplies album and artist",
+          ext_tags["album"] == "An Album From The Extended Object"
+          and ext_tags["artist"] == "An Artist", ext_tags)
+    check("...and an absent title is empty, not invented",
+          ext_tags["title"] == "", ext_tags)
+
+    # WM/AlbumArtist must win over the Content Description's Author: the
+    # dialog's artist is the album artist, and Author is often a per-track
+    # credit.
+    both = synth(os.path.join(_TMP, "both.wma"), [
+        ("WM/AlbumTitle", "Album"), ("WM/AlbumArtist", "Album Artist"),
+    ], content=("A Track Title", "Track Credit"))
+    both_tags = wma.read_tags(both)
+    check("the Content Description supplies the track title",
+          both_tags["title"] == "A Track Title", both_tags)
+    check("WM/AlbumArtist is preferred over Author",
+          both_tags["artist"] == "Album Artist", both_tags)
+
+not_asf = os.path.join(_TMP, "notasf.wma")
+with open(not_asf, "wb") as fh:
+    fh.write(b"this is not an asf file at all" * 4)
+check("a non-ASF file returns empty tags rather than raising",
+      wma.read_tags(not_asf) == {"album": "", "artist": "", "title": ""},
+      wma.read_tags(not_asf))
+
+bad_header = os.path.join(_TMP, "badheader.wma")
+with open(bad_header, "wb") as fh:
+    fh.write(original[:20])
+check("a header-truncated file returns empty tags rather than raising",
+      wma.read_tags(bad_header) == {"album": "", "artist": "", "title": ""},
+      wma.read_tags(bad_header))
+
+# ======================================================================
 # 6. The original library was never written to.
 # ======================================================================
 untouched = []

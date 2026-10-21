@@ -737,8 +737,10 @@ this is posted from that same turn — so when the lookup runs, **the files usua
 carry no album tag yet**, which is exactly why you were running FAI in the first
 place. A tag-only match therefore found nothing and no cover was ever written.
 
-The lookup now falls back to the untagged files in a single folder. It stays
-narrow on purpose, and refuses when:
+The lookup now falls back to the untagged files in a single folder. "Untagged"
+means what each format's own reader reports: MP3, FLAC and WMA all have theirs,
+so a WMA album is matched by its tags like any other. It stays narrow on
+purpose, and refuses when:
 
 * the untagged files are spread over more than one folder, or
 * that folder already holds a *different* tagged album (so it is the library
@@ -814,6 +816,16 @@ fails if the guard ever goes back to `toc` alone.
 Supported: **MP3** (ID3v2 `APIC`), **FLAC** (`METADATA_BLOCK_PICTURE`) and
 **ASF/WMA** (`WM/Picture`). All three are written in pure Python. `.m4a` is
 recognised and left alone.
+
+**WMA tags are read as well as written.** `artwork_wma.read_tags()` parses the
+ASF Content Description (Title / Author) and Extended Content Description
+(`WM/AlbumTitle`, `WM/AlbumArtist`). Reading them is not bookkeeping: it is how
+`_find_album_files()` recognises an album's tracks. Without it every `.wma`
+looked untagged, so in a populated library the WMA album was rejected as
+"untagged files spread over N folders" and its cover was never written into a
+single track — even though writing `WM/Picture` itself worked. MP3 and FLAC
+matched, and WMP rips to WMA by default, so the failure looked like "the art
+forgot all the CD tracks" while the dialog's own pane still showed it.
 
 ##### WMA artwork, and the COM route that was tested
 

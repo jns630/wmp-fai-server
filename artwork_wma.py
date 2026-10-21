@@ -88,6 +88,21 @@ def _guid(text):
 _ASF_HEADER = _guid("75B22630-668E-11CF-A6D9-00AA0062CE6C")
 _ASF_METADATA = _guid("C5F8CBEA-5BAF-4877-8467-AA8C44FA4CCA")
 
+#: Content Description Object. Holds Title / Author / Copyright / Description /
+#: Rating, as five length-prefixed UTF-16LE strings. WMP puts a rip's track
+#: title and artist here.
+_ASF_CONTENT_DESCRIPTION = _guid("75B22633-668E-11CF-A6D9-00AA0062CE6C")
+
+#: Extended Content Description Object. Holds the named attributes - WMP writes
+#: WM/AlbumTitle, WM/AlbumArtist, WM/TrackNumber and friends here.
+_ASF_EXTENDED_CONTENT = _guid("D2D0A440-E307-11D2-97F0-00A0C95EA850")
+
+#: WMT_ATTR_DATATYPE values this reader converts. Everything else is skipped.
+_ASF_UNICODE = 0x00
+_ASF_DWORD = 0x03
+_ASF_QWORD = 0x04
+_ASF_WORD = 0x05
+
 #: Index objects. Any of these holds absolute packet offsets.
 _ASF_INDEX = _guid("D6E229DF-35DA-11D1-9034-00A0C90349BE")
 _ASF_SIMPLE_INDEX = _guid("33000890-E5B1-11CF-89F4-00A0C90349CB")
@@ -322,6 +337,118 @@ def _split_existing_picture(blob):
     except UnicodeDecodeError:
         return None
     return mime, desc, bytes(blob[data_off:data_off + data_len])
+
+
+def _decode_asf_string(raw):
+    """One UTF-16LE ASF string, without its terminator."""
+    try:
+        return raw.decode("utf-16-le").rstrip("\x00").strip()
+    except UnicodeDecodeError:
+        return ""
+
+
+def _asf_object_body(raw):
+    """A sub-object's body: skip its GUID(16) + Size(8) header."""
+    return raw[24:] if len(raw) > 24 else b""
+
+
+def read_tags(path):
+    """Return ``{'album': str, 'artist': str, 'title': str}`` from an ASF file.
+
+    This is the WMA half of ``artwork_embed.read_tags()``, and it exists for one
+    reason: without it every WMA in a library looks UNTAGGED. The cover writer
+    finds an album's files by reading their album tag back, so a WMA album in a
+    populated library could never be matched - ``_find_album_files()`` saw every
+    WMA folder as "untagged files spread over many folders" and refused them
+    all. MP3 and FLAC matched and got their covers; WMA (what WMP rips by
+    default) silently did not, leaving only WMP's database carrying the art.
+
+    The two objects that matter are the Content Description (Title/Author) and
+    the Extended Content Description (WM/AlbumTitle, WM/AlbumArtist). WMP writes
+    both into a ripped file, and both are walked defensively: a malformed file
+    returns whatever was read rather than raising, exactly like the MP3 and FLAC
+    readers.
+
+    Only the header is read, not the audio - these objects live in the first few
+    kilobytes of the file, and a library scan touches every track.
+    """
+    out = {"album": "", "artist": "", "title": ""}
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(30)
+            if len(head) < 30 or head[:16] != _ASF_HEADER:
+                return out
+            header_size = struct.unpack("<Q", head[16:24])[0]
+            # Same bound the writer enforces. A header this large is not a file
+            # we understand, and reading it into memory is not worth the risk.
+            if header_size < 30 or header_size > 16 * 1024 * 1024:
+                return out
+            data = head + handle.read(header_size - 30)
+        objects, _tail, _size = _parse_header(data)
+    except (OSError, ValueError, struct.error):
+        return out
+
+    author = album_artist = ""
+    for guid, raw in objects:
+        body = _asf_object_body(raw)
+        if len(body) < 2:
+            continue
+        if guid == _ASF_CONTENT_DESCRIPTION:
+            # Five WORD lengths, then the five strings back to back. Every
+            # length includes the string's trailing NUL.
+            if len(body) < 10:
+                continue
+            lengths = struct.unpack("<5H", body[:10])
+            pos = 10
+            values = []
+            for length in lengths:
+                if pos + length > len(body):
+                    break
+                values.append(body[pos:pos + length])
+                pos += length
+            if values:
+                out["title"] = _decode_asf_string(values[0])
+            if len(values) > 1:
+                author = _decode_asf_string(values[1])
+        elif guid == _ASF_EXTENDED_CONTENT:
+            # WORD count, then name/value records:
+            #   WORD name_len, name (UTF-16LE, NUL included),
+            #   WORD value_type, WORD value_len, value
+            count = struct.unpack("<H", body[:2])[0]
+            pos = 2
+            for _ in range(min(int(count), 1024)):   # bounded: a corrupt count
+                if pos + 2 > len(body):              # must not spin
+                    break
+                name_len = struct.unpack("<H", body[pos:pos + 2])[0]
+                pos += 2
+                if pos + name_len + 4 > len(body):
+                    break
+                name = _decode_asf_string(body[pos:pos + name_len]).lower()
+                pos += name_len
+                value_type, value_len = struct.unpack("<HH", body[pos:pos + 4])
+                pos += 4
+                if pos + value_len > len(body):
+                    break
+                value = body[pos:pos + value_len]
+                pos += value_len
+                if value_type == _ASF_UNICODE:
+                    text = _decode_asf_string(value)
+                elif value_type == _ASF_DWORD and len(value) >= 4:
+                    text = str(struct.unpack("<I", value[:4])[0])
+                elif value_type == _ASF_QWORD and len(value) >= 8:
+                    text = str(struct.unpack("<Q", value[:8])[0])
+                elif value_type == _ASF_WORD and len(value) >= 2:
+                    text = str(struct.unpack("<H", value[:2])[0])
+                else:
+                    continue
+                if name == "wm/albumtitle" and text:
+                    out["album"] = text
+                elif name == "wm/albumartist" and text:
+                    album_artist = text
+    # WM/AlbumArtist is what the dialog calls the artist; the Content
+    # Description's Author is the fallback for files WMP did not tag that way.
+    out["artist"] = album_artist or author
+    return out
 
 
 def read_art(path):

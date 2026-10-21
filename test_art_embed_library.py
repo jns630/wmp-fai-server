@@ -218,6 +218,80 @@ check("tags: embed_tags_in_library = false writes no tags at all",
 fai.ART_EMBED_TAGS_ENABLED = True
 
 # ---------------------------------------------------------------------------
+# WMA library albums. WMP rips to WMA by default, and until its TAGS could be
+# read back every WMA looked untagged to _find_album_files(): one album's files
+# were indistinguishable from every other folder's, so a populated library
+# refused the lookup ("untagged files spread over N folders") and the cover
+# never reached a single track. This is the shape a real library has - more
+# than one album folder - so it is the shape the test uses.
+print()
+print("WMA library albums, the format WMP rips to:")
+import artwork_wma as wma
+
+
+def make_wma(path, album, artist, title):
+    """A minimal ASF file carrying the tags WMP writes into a rip."""
+    def u16(text):
+        return text.encode("utf-16-le") + b"\x00\x00"
+
+    def obj(guid, body):
+        return guid + struct.pack("<Q", 24 + len(body)) + body
+
+    title_b, artist_b = u16(title), u16(artist)
+    content = (struct.pack("<5H", len(title_b), len(artist_b), 2, 2, 2)
+               + title_b + artist_b + b"\x00\x00" * 3)
+    records = b""
+    for name, value in (("WM/AlbumTitle", album),
+                        ("WM/AlbumArtist", artist)):
+        nb, vb = u16(name), u16(value)
+        records += (struct.pack("<H", len(nb)) + nb
+                    + struct.pack("<HH", 0, len(vb)) + vb)
+    objects = (obj(wma._ASF_CONTENT_DESCRIPTION, content)
+               + obj(wma._ASF_EXTENDED_CONTENT,
+                     struct.pack("<H", 2) + records))
+    header = (wma._ASF_HEADER + struct.pack("<Q", 30 + len(objects))
+              + struct.pack("<I", 2) + b"\x01\x02" + objects)
+    with open(path, "wb") as handle:
+        handle.write(header + b"\x00" * 64)
+
+
+WALBUM, WARTIST = "Break This Fall", "Filmmaker"
+wma_root = tempfile.mkdtemp(prefix="wmalib_")
+wma_targets = []
+for disc, titles in (("disc1", ("Don't Speak, She Said", "Shiver")),
+                     ("disc2", ("Offences Between Us",))):
+    folder = os.path.join(wma_root, disc)
+    os.makedirs(folder)
+    for i, title in enumerate(titles, 1):
+        p = os.path.join(folder, "%02d %s.wma" % (i, title))
+        make_wma(p, WALBUM, WARTIST, title)
+        wma_targets.append(p)
+
+wma_other = os.path.join(wma_root, "elsewhere", "other.wma")
+os.makedirs(os.path.dirname(wma_other))
+make_wma(wma_other, "A Completely Different Record", "Someone Else",
+         "Untitled")
+
+check("WMA: the album tag WMP writes is readable back",
+      ae.read_tags(wma_targets[0])["album"] == WALBUM,
+      ae.read_tags(wma_targets[0]))
+check("WMA: a multi-folder library matches every track of the album",
+      len(fai._find_album_files(WALBUM, WARTIST, [wma_root])) == len(wma_targets),
+      fai._find_album_files(WALBUM, WARTIST, [wma_root]))
+
+fai.ART_EMBED_FOLDERS = [wma_root]
+fai.ART_EMBED_TAGS_ENABLED = True
+fai._fetch_artwork_bytes = lambda url: PNG
+fai._embed_into_files(WALBUM, WARTIST, "http://example.invalid/wma.jpg",
+                      settle=0)
+check("WMA: the cover is written into EVERY track",
+      all(wma.read_art(p) and wma.read_art(p)[2] == PNG for p in wma_targets),
+      [bool(wma.read_art(p)) for p in wma_targets])
+check("WMA: a different WMA album was not touched",
+      wma.read_art(wma_other) is None)
+fai.ART_EMBED_FOLDERS = [tags_dir]
+
+# ---------------------------------------------------------------------------
 # A CD RIP IS NEVER TAGGED. WMP applies a disc's tags itself over COM, so
 # writing them from here would race WMP's own write.
 print()

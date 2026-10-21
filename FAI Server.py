@@ -831,8 +831,9 @@ def _find_album_files(album_title, artist, folders, recent_seconds=None,
 def _rip_file_matches_titles(path, wanted_titles):
     """Match a rip candidate by its staged title, using WMA's filename if needed.
 
-    WMP commonly rips to WMA. Its text tags are not parsed by artwork_embed,
-    but the default rip filename includes the track title.
+    WMP commonly rips to WMA. Its tags ARE readable now (artwork_wma.read_tags),
+    but a file can still be caught mid-write with no title tag yet, so the
+    default rip filename is checked as well - it includes the track title.
     """
     try:
         title = artwork_embed.read_tags(path).get("title", "")
