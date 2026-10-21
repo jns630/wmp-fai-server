@@ -3018,7 +3018,7 @@ def search_discogs(query, limit=40, artist_hint=None, album_hint=None,
                 "genre": (styles[0] if styles else ""),
                 "art_thumb": r.get("cover_image") or r.get("thumb") or "",
                 "country": "",
-                "format": " â€¢ ".join(r.get("format") or []),
+                "format": " • ".join(r.get("format") or []),
             })
     search_cache.set(cache_key, out, ttl=7200)
     return out
@@ -4647,12 +4647,12 @@ def _album_row_html(prov, item):
             meta_sub.append(genre)
         sub_text = "  ".join(meta_sub)
         if year:
-            sub_text = (sub_text + " â€¢ " + year) if sub_text else year
+            sub_text = (sub_text + " • " + year) if sub_text else year
     else:
         country = esc(item.get("country", ""))
         meta_sub = []
         if year: meta_sub.append(year)
-        # Discogs rows carry a 'format' ('Vinyl â€¢ Album â€¢ LP') instead of a
+        # Discogs rows carry a 'format' ('Vinyl • Album • LP') instead of a
         # country. It is the single most useful thing on a Discogs row - it is
         # how a user tells the CD pressing from the vinyl one - so it takes the
         # same slot rather than being dropped.
@@ -4678,7 +4678,7 @@ def _album_row_html(prov, item):
         art = (f"/api_art?source={prov}"
                f"&amp;id={rid}")
     return f'''<div class="album-item" onclick="pick('{prov}', '{rid}')">
-  <div class="tick">&#9654;</div>
+  <div class="tick">&#10004;</div>
   <img src="{art}" class="album-thumb" alt="" onerror="this.src='/static/noart.png';this.onerror=null;">
   <div class="album-meta">
     <div class="album-artist">{artist} <span class="{badge}</span></div>
@@ -4823,7 +4823,7 @@ def _artist_row_html(item):
     name = esc(item.get("name", "Unknown Artist"))
     bits = [b for b in (item.get("genre", ""), item.get("type", ""),
                         item.get("country", "")) if b]
-    sub = esc(" â€¢ ".join(bits))
+    sub = esc(" • ".join(bits))
     aid = esc(item.get("id", ""))
     badge = _ARTIST_BADGE.get(prov, "badge badge-mb\">MusicBrainz")
     art = item.get("art_thumb") or ""
@@ -4831,7 +4831,7 @@ def _artist_row_html(item):
              f'onerror="this.src=\'/static/noart.png\';this.onerror=null;">'
              if art else "")
     return f'''<div class="album-item" onclick="showArtist('{prov}', '{aid}')">
-  <div class="tick">&#9654;</div>
+  <div class="tick">&#10004;</div>
   {thumb}
   <div class="album-meta">
     <div class="album-artist">{name} <span class="{badge}</span></div>
@@ -4969,7 +4969,7 @@ def _track_row_html(item):
     else:
         onclick = ""
     return f'''<div class="album-item" onclick="{onclick}">
-  <div class="tick">&#9654;</div>
+  <div class="tick">&#10004;</div>
   <div class="album-meta">
     <div class="album-artist">{esc(track)} <span class="{badge}"></span></div>
     <div class="album-title">{esc(artist)}</div>
@@ -5328,71 +5328,139 @@ body { overflow: auto; }
 .album-item.sel { background-image: none !important; filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#E8F4FC', endColorstr='#E8F4FC', type='0'); }
 <![endif]-->
 """
-FAI_AERO_CSS = """
-/* Classic Aero glass treatment, shared by the search and confirmation steps.
-     Keep the flat colors first: IE7 ignores CSS gradients but understands the
-     DXImageTransform filters below. No layout or interaction rules are changed. */
-body { color: #243746; background-color: #EDF5FB; }
+FAI_CLASSIC_CSS = """
+/* ---- Classic "Find Album Information" skin -------------------------------
+   The dialog this server impersonates is the Vista/7 one: a white content
+   area under WMP's own Aero frame, the blue lead-in line, hairline rules
+   between the two columns, an Explorer/IE7 style search strip, one result
+   row highlighted in Aero blue and a green check on the album that is
+   selected. This block is injected LAST on both steps, so it only ever
+   overrides colour and chrome - no geometry, spacing or interaction rule is
+   changed here.
+   Everything is IE7-legal: plain colours first, then a DXImageTransform
+   gradient for the same field, no radius, no rgba, no flexbox and no custom
+   properties. ------------------------------------------------------------- */
+
+body { color: #1A1A1A; background-color: #FFFFFF; }
+
+/* Lead-in, in FAI link blue on white. */
 .header-area {
-    border-bottom: 1px solid #8DB6D3; background-color: #D5EAF8;
-    background-image: linear-gradient(to bottom, #F8FCFF 0%, #DDEFFB 45%, #C7E2F5 100%);
-    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F8FCFF', endColorstr='#C7E2F5', type='0');
+    background-color: #FFFFFF; background-image: none;
+    border-bottom: 1px solid #C6D2E0;
 }
-.header-text, .header-tag { color: #24577A; }
-.main-container { background-color: #F4F9FD; }
-.left-pane { border-right-color: #B5CDDF; background-color: #F7FBFE; }
-.right-pane { background-color: #F1F7FC; }
+.header-text, .header-tag { color: #0B5AA6; }
+
+/* Columns: white, one hairline divider, no tinted panes. */
+.main-container { background-color: #FFFFFF; }
+.left-pane { border-right: 1px solid #C6D2E0; background-color: #FFFFFF; }
+.right-pane { background-color: #FFFFFF; }
 .section-label {
-    color: #244F6C; border-bottom: 1px solid #B0C9DC;
-    background-color: #E6F1F9;
-    background-image: linear-gradient(to bottom, #F9FCFF 0%, #E3EFF8 100%);
-    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F9FCFF', endColorstr='#E3EFF8', type='0');
+    padding: 2px 7px; color: #24425C; font-weight: bold;
+    border: 1px solid #A0A0A0;
+    background-color: #E8F1F9;
+    background-image: linear-gradient(to bottom, #FCFDFE 0%, #E4EFF8 55%, #D6E6F3 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FCFDFE', endColorstr='#D6E6F3', type='0');
 }
+
+/* Existing Information: a light blue field, the way the original panel
+   sits behind the current tags, not a raised card. */
 .existing-info, .wmp-context-card {
-    border: 1px solid #B8CEDF; background-color: #F8FCFF;
+    border: 1px solid #DCE6F0; background-color: #F8FBFE;
 }
+.existing-artist { color: #0B5AA6; }
 .existing-thumb, .album-thumb, .found-cover {
-    border-color: #8FAFC7; background-color: #EAF3FA;
+    border: 1px solid #A8B8C8; background-color: #F0F3F7;
 }
-.search-input, .edit-input { border-color: #829FB7; }
-.search-input:focus, .edit-input:focus { border-color: #3B82B5; }
-.filter-row { border-bottom-color: #B5CDDF; }
-.filter-active { color: #1F6395; }
-.results-scroll { border-color: #9DB9CE; background-color: #FFFFFF; }
-.album-item { border-bottom-color: #E2ECF4; }
+
+/* ---- The IE7 search strip ------------------------------------------------
+   A 1px sunken plate around the field, which is the shape IE7 puts around a
+   search box: grey gradient toolbar, white field with the old #7F9DB9
+   border, and the clear control as a small square command. The field is
+   narrowed by the plate's own border and padding so the column still totals
+   the 405px the reference dialog gives it. ------------------------------- */
+.search-box-row {
+    padding: 3px; border: 1px solid #A0A0A0; background-color: #E9E9E9;
+    background-image: linear-gradient(to bottom, #FAFAFA 0%, #EDEDED 50%, #DFDFDF 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FAFAFA', endColorstr='#DFDFDF', type='0');
+}
+.search-input { width: 372px; border: 1px solid #7F9DB9; background-color: #FFFFFF; }
+.search-input:focus { border-color: #0B5AA6; }
+.search-clear { border: 1px solid #A0A0A0; background-color: #F5F5F5; color: #333333; }
+.search-clear:hover { border-color: #7EB4EA; background-color: #E3F1FD; }
+.edit-input { border: 1px solid #7F9DB9; }
+.edit-input:focus { border-color: #0B5AA6; }
+
+/* Filter strip: plain links, the active one bold and blue. */
+.filter-row { border-bottom: 1px solid #C6D2E0; }
+.filter-active { color: #0B5AA6; }
+
+/* Results: a sunken white well with the old grey scrollbar. The scrollbar-*
+   properties are IE-only and simply ignored by every other engine. */
+.results-scroll {
+    border: 1px solid #A0A0A0; background-color: #FFFFFF;
+    scrollbar-face-color: #F0F4F8; scrollbar-track-color: #F7F9FB;
+    scrollbar-arrow-color: #444444; scrollbar-shadow-color: #C6D2E0;
+    scrollbar-highlight-color: #FFFFFF; scrollbar-3dlight-color: #FFFFFF;
+    scrollbar-darkshadow-color: #A0A0A0;
+}
+
+/* ---- Blue hover pane, blue selection, green tick ------------------------
+   Hover is the pale Aero field; the selected row is the deeper one and is
+   the only row that carries the green check, which is how the original
+   marks the album you last picked. background-image:none cancels the flat
+   gradients from the sheets above so the filter below is the only paint. */
 .album-item:hover, .track-row:hover {
-    border-color: #A8CBE4; background-color: #EAF5FC;
-    background-image: linear-gradient(to bottom, #FFFFFF 0%, #E5F2FB 100%);
-    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#E5F2FB', type='0');
+    border-color: #8FC0E6; background-color: #E9F4FD;
+    background-image: none !important;
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F5FAFF', endColorstr='#DCEFFC', type='0');
 }
 .album-item.sel, .track-row.selected {
-    border-color: #73A6CC; background-color: #D9ECF9;
-    background-image: linear-gradient(to bottom, #F3FAFE 0%, #D2E8F7 100%);
-    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F3FAFE', endColorstr='#D2E8F7', type='0');
+    border-color: #2F6FA8; background-color: #BFDCF5;
+    background-image: none !important;
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#D6EAF9', endColorstr='#B4D5F2', type='0');
 }
-.selection-badge { border-color: #A9C5D9; background-color: #E6F2FA; }
-.nav-steps { border-color: #B7CEDF; background-color: #EAF4FB; }
+/* 2714 HEAVY CHECK MARK. Segoe UI Symbol carries it on Vista and later;
+   Tahoma and Arial are the fallback the rest of the page already uses. */
+.tick {
+    display: none; position: absolute; right: 8px; top: 7px; left: auto;
+    font-family: "Segoe UI Symbol", "Segoe UI", Tahoma, Arial, sans-serif;
+    font-size: 15px; font-weight: bold; line-height: 1; color: #1F8A2E;
+}
+.album-item:hover .tick { display: none; left: auto; top: 7px; color: #1F8A2E; }
+.album-item.sel .tick,
+.album-item.sel:hover .tick {
+    display: block; left: auto; right: 8px; top: 7px;
+    font-size: 15px; font-weight: bold; color: #1F8A2E;
+}
+/* Keep long titles from running under the check. */
+.album-meta { padding-right: 20px; }
+
+/* ---- Command strip ------------------------------------------------------ */
 .footer {
-    border-top-color: #9DBBD2; background-color: #DCECF8;
-    background-image: linear-gradient(to bottom, #F6FBFF 0%, #DCECF8 100%);
-    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#F6FBFF', endColorstr='#DCECF8', type='0');
+    border-top: 1px solid #C6D2E0; background-color: #F0F4F8;
+    background-image: linear-gradient(to bottom, #FBFDFF 0%, #EDF2F7 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FBFDFF', endColorstr='#EDF2F7', type='0');
 }
+/* Glass command buttons, the default one edged in Aero focus blue. */
 .btn {
-    color: #20394D; border-color: #8EA9BE; background-color: #E7F1F8;
-    background-image: linear-gradient(to bottom, #FFFFFF 0%, #F5FAFE 45%, #D8EAF6 55%, #EAF4FA 100%);
-    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#D8EAF6', type='0');
+    color: #1A1A1A; border: 1px solid #ADADAD; background-color: #F0F0F0;
+    background-image: linear-gradient(to bottom, #FDFDFD 0%, #F2F2F2 48%, #E4E4E4 52%, #F6F6F6 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FDFDFD', endColorstr='#E4E4E4', type='0');
 }
 .btn:hover, .btn-default {
-    color: #173D5A; border-color: #5B9BC9; background-color: #D9ECF9;
-    background-image: linear-gradient(to bottom, #FFFFFF 0%, #EEF8FE 45%, #C9E3F4 55%, #E3F2FB 100%);
-    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#C9E3F4', type='0');
+    border-color: #7EB4EA; background-color: #EAF4FD;
+    background-image: linear-gradient(to bottom, #FFFFFF 0%, #F1F8FE 48%, #DCEBF9 52%, #F1F8FE 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#FFFFFF', endColorstr='#DCEBF9', type='0');
 }
 .btn:active {
-    background-color: #CFE3F1;
-    background-image: linear-gradient(to bottom, #C9DFEF 0%, #EAF5FC 100%);
-    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#C9DFEF', endColorstr='#EAF5FC', type='0');
+    background-color: #E0E0E0;
+    background-image: linear-gradient(to bottom, #E2E2E2 0%, #F2F2F2 100%);
+    filter: progid:DXImageTransform.Microsoft.gradient(startColorstr='#E2E2E2', endColorstr='#F2F2F2', type='0');
 }
-.link, .link-gap { color: #17669E; }
+.btn[disabled] { color: #A6A6A6; border-color: #D6D6D6; background-color: #F5F5F5; background-image: none; }
+.selection-badge { border: 1px solid #A9C5D9; background-color: #EAF3FB; }
+.nav-steps { border: 1px solid #DCE6F0; background-color: #F7F9FB; }
+.link, .link-gap { color: #0B5AA6; }
 """
 
 @app.route("/FAI/ui")
@@ -5488,7 +5556,7 @@ def unified_ui():
 <head>
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <title>Find Album Information</title>
-    <style>{{ css|safe }}{{ ui_css|safe }}{{ aero_css|safe }}</style>
+    <style>{{ css|safe }}{{ ui_css|safe }}{{ classic_css|safe }}</style>
 </head>
 <body>
   <div class="header-area">
@@ -6052,7 +6120,7 @@ def unified_ui():
     };
   </script>
 </body>
-</html>""", css=COMMON_CSS, ui_css=FAI_UI_CSS, aero_css=FAI_AERO_CSS, toc_ref=toc_ref, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, flow=flow, request_id=request_id, session_id=session_id, disc_summary=disc_summary, disc_track_count=disc_track_count)
+</html>""", css=COMMON_CSS, ui_css=FAI_UI_CSS, classic_css=FAI_CLASSIC_CSS, toc_ref=toc_ref, q=q, wmp_artist=wmp_artist, wmp_album=wmp_album, wmp_track=wmp_track, rip_name=rip_name, has_context=has_context, flow=flow, request_id=request_id, session_id=session_id, disc_summary=disc_summary, disc_track_count=disc_track_count)
 # ==========================================================
 # UNIFIED CONFIRMATION & TRACK SELECTION PAGE
 # ==========================================================
@@ -6232,7 +6300,7 @@ def confirm():
 <head>
   <meta http-equiv="X-UA-Compatible" content="IE=edge">
   <title>Find Album Information</title>
-    <style>{{ css|safe }}{{ aero_css|safe }}</style>
+    <style>{{ css|safe }}{{ classic_css|safe }}</style>
 </head>
 <body>
   <div class="header-area">
@@ -7073,7 +7141,7 @@ def confirm():
 </body>
 </html>""",
     css=COMMON_CSS,
-    aero_css=FAI_AERO_CSS,
+    classic_css=FAI_CLASSIC_CSS,
       details=details,
       # The cover of the album being APPLIED. proxy_art was computed here since
       # long ago and never passed to the template, so the confirm page showed no
