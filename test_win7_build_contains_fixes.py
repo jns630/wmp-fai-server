@@ -45,10 +45,14 @@ markers = {
     "_disambiguate": "ambiguity helper",
     "no album tags on disk yet": "untagged-fallback log line",
     "100x100bb": "iTunes size segment handling",
-    # The disc discriminator. A rip has ?cd= and an EMPTY toc, so a guard that
-    # tested `toc` alone let a rip be written to mid-write. This string only
-    # exists once the guard accepts either identifier.
-    "CD rip (cd/toc present)": "disc identified by cd OR toc, not toc alone",
+    # The disc discriminator. A rip carries ?cd= and an EMPTY toc, so a guard
+    # that tested `toc` alone never recognised a rip at all. The log line this
+    # used to assert on ("CD rip (cd/toc present)") was deleted in b4d46d7
+    # because a rip is no longer REFUSED - it is queued and written. The guard
+    # itself is unchanged and is covered behaviourally by test_fai_v2.py; what
+    # is asserted here is that the path which replaced the refusal is in the
+    # bundle, so a rip is still recognised as a disc.
+    "CD rip - cover write queued": "disc identified by cd OR toc, then queued",
     # The per-apply artwork token. `direct` mode - the DEFAULT, and the mode a
     # Windows 11 install runs - used to emit a byte-identical URL on every apply,
     # so WMP never re-fetched a cover for a collection. The parameter name and

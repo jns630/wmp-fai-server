@@ -1430,9 +1430,20 @@ _ART_MODE = (os.environ.get("WMP_ART_MODE", "direct").strip().lower()
 # keys off that, and it is impossible for it to reach the official build or a
 # source checkout.
 #
+# ...AND TO THE OPERATING SYSTEM, NOT JUST THE ARTIFACT.
+# The artifact rule alone was still wrong, and produced a regression worth
+# recording. The Win7 test build gets run on Windows 11 - that is how it is
+# tested - and on Windows 11 a host-relative largeCoverParams is not even
+# fetched: the CD pane kept its music-note placeholder and the album had no
+# picture, while the only /cover/ requests in the log came from the dialog page
+# and from the art embedder, never from the player. The exe name said "Win7";
+# the player was WMP 12 on Windows 11, which needs "direct". Both conditions
+# are therefore required, so the workaround reaches the systems it was written
+# for and nothing else.
+#
 # Precedence, most specific first:
 #   1. $env:WMP_ART_MODE          - an operator always wins
-#   2. the Windows 7 test EXE     - this fix
+#   2. the Windows 7 test EXE on Windows 7/8.x - this fix
 #   3. a legacy XML client (WMC / WMP 7-9) - same shape, same reason
 #   4. "direct"                   - unchanged Windows 11 behaviour
 _ART_MODE_EXPLICIT = (os.environ.get("WMP_ART_MODE", "").strip().lower())
@@ -1464,6 +1475,28 @@ def _is_win7_build():
         return False
     try:
         return "win7" in os.path.basename(sys.executable).lower()
+    except Exception:
+        return False
+
+
+def _is_windows_7_family():
+    """True on Windows 7, 8 or 8.1 - the versions whose WMP needs /cover/.
+
+    Separate from _is_win7_build() on purpose. The Win7 TEST BUILD is only
+    *named* for those systems; nothing stops it being run on Windows 11, and
+    that is exactly the deployment that produced the bug this function exists
+    for. "relative" artwork is a Windows 7 workaround: a host-relative
+    largeCoverParams is resolved by the client against the metadata host, and
+    WMP 12 on Windows 11 does not resolve one at all - it makes no cover
+    request whatsoever, so the CD pane keeps its placeholder and the album gets
+    no picture. 'direct' is the mode actually observed working there.
+
+    The client's OS is knowable here because WMP only ever talks to a server
+    running on the same machine, so the server's own version IS the player's.
+    """
+    try:
+        version = sys.getwindowsversion()
+        return (version.major, version.minor) < (10, 0)
     except Exception:
         return False
 
@@ -1668,7 +1701,7 @@ def _effective_art_mode():
     """
     if _ART_MODE_EXPLICIT:
         return _ART_MODE_EXPLICIT
-    if _is_win7_build():
+    if _is_win7_build() and _is_windows_7_family():
         return "relative"
     if _is_legacy_xml_client():
         return "relative"

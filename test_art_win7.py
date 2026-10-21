@@ -14,17 +14,22 @@ that client instead, so there is no rewriting left to fail.
 
 Two things have to be true at once, and both are asserted here:
 
-  1. the Windows 7 build produces a /cover/ URL
+  1. the Windows 7 build ON Windows 7 produces a /cover/ URL
   2. NOTHING ELSE changes - WMP 12 on Windows 11, the source checkout, and the
      official build all keep the "direct" shape they had
 
 (2) is the one that matters. A fix for a Win7 bug that quietly alters Windows
-11 behaviour is a regression wearing a fix's clothes.
+11 behaviour is a regression wearing a fix's clothes - and it has already
+happened once: the Win7 test build, run on Windows 11, was given a host-relative
+cover URL that player never fetches, so the CD pane kept its placeholder. That
+is why the OS is simulated explicitly below rather than inherited from whatever
+Windows the suite happens to run on.
 """
 import contextlib
 import importlib.util
 import os
 import sys
+import types
 import urllib.parse
 import xml.etree.ElementTree as ET
 
@@ -54,6 +59,28 @@ def pretending_frozen(exe_path):
         else:
             del sys.frozen
         sys.executable = old_executable
+
+
+@contextlib.contextmanager
+def pretending_windows(version):
+    """Temporarily make sys.getwindowsversion() report ``version`` (major, minor).
+
+    The artwork mode keys off the OS as well as the artifact, because the Win7
+    test build is routinely run on Windows 11 - the exact deployment that lost
+    its cover art. Without this, one test case's answer would depend on which
+    Windows the suite happens to be running on, which is not a test.
+    """
+    had = hasattr(sys, "getwindowsversion")
+    old = getattr(sys, "getwindowsversion", None)
+    sys.getwindowsversion = lambda: types.SimpleNamespace(
+        major=version[0], minor=version[1])
+    try:
+        yield
+    finally:
+        if had:
+            sys.getwindowsversion = old
+        else:
+            del sys.getwindowsversion
 
 
 _DIR = os.path.dirname(os.path.abspath(__file__))
@@ -114,17 +141,29 @@ def cover_url(module):
     return ""
 
 
-def build_as(tag, frozen_exe=None, client_ua="", env_art_mode=None):
-    """Build a document under a simulated deployment and return the cover URL."""
+def build_as(tag, frozen_exe=None, client_ua="", env_art_mode=None,
+             windows=None):
+    """Build a document under a simulated deployment and return the cover URL.
+
+    ``windows`` is the OS the player runs on, as (major, minor). It defaults to
+    what the exe implies - Windows 7 for the Win7 test build, Windows 11 for
+    everything else - so a case does not accidentally pass on one machine and
+    fail on another. Pass it explicitly to model the Win7 build ON Windows 11,
+    which is how the test build is actually used.
+    """
     module = load_server(tag)
     if env_art_mode is not None:
         module._ART_MODE_EXPLICIT = env_art_mode
     if client_ua:
         module._LAST_CLIENT_UA = client_ua
+    if windows is None:
+        windows = (6, 1) if (frozen_exe and "win7" in frozen_exe.lower()) \
+            else (10, 0)
     if frozen_exe is None:
-        return cover_url(module)
-    # The context manager matters: writing sys.frozen directly would leak.
-    with pretending_frozen(frozen_exe):
+        with pretending_windows(windows):
+            return cover_url(module)
+    # The context managers matter: writing sys.frozen directly would leak.
+    with pretending_frozen(frozen_exe), pretending_windows(windows):
         return cover_url(module)
 
 
@@ -160,6 +199,20 @@ url_official = build_as("official", frozen_exe=OFFICIAL_EXE,
 check("official build is UNAFFECTED and still emits the upstream URL",
       url_official.startswith(ART) and "/cover/" not in url_official,
       url_official[:80])
+
+# The Win7 TEST BUILD RUN ON WINDOWS 11 - the deployment that lost its cover
+# art. The exe name says "Win7", but the player is WMP 12 on Windows 11, which
+# does not resolve a host-relative largeCoverParams at all: it makes no cover
+# request, so the CD pane keeps the music-note placeholder. The operating
+# system decides, not the artifact's name.
+url_win7_on_11 = build_as("win7_on_11", frozen_exe=WIN7_EXE,
+                          client_ua="WindowsMediaPlayer/12.0.26100.9711",
+                          windows=(10, 0))
+check("win7 build on Windows 11 emits the upstream URL, not /cover/",
+      url_win7_on_11.startswith(ART) and "/cover/" not in url_win7_on_11,
+      url_win7_on_11[:80])
+check("win7 build on Windows 11 still carries the per-apply token",
+      "fai_v=" in url_win7_on_11, url_win7_on_11[:80])
 
 # The part of "unaffected" that HAD to change, and the reason the two checks
 # above no longer demand byte-equality with ART. A bare upstream URL is
@@ -247,7 +300,7 @@ module._LAST_CLIENT_UA = "WindowsMediaPlayer/12.0.7601.17514"
 module.session.get = lambda url, **kw: _FakeImage()
 
 client = module.app.test_client()
-with pretending_frozen(WIN7_EXE):
+with pretending_frozen(WIN7_EXE), pretending_windows((6, 1)):
     target = cover_url(module)
 module.image_cache.clear()
 response = client.get(target)
@@ -260,7 +313,7 @@ check("the served body really is the image",
 # ever saw and a re-apply can never change it. Both builds must happen INSIDE
 # the pretending-frozen block, or the second one is a Windows 11 build and the
 # two are trivially different for the wrong reason.
-with pretending_frozen(WIN7_EXE):
+with pretending_frozen(WIN7_EXE), pretending_windows((6, 1)):
     first = cover_url(module)
     second = cover_url(module)
 check("the per-apply token still changes between builds",
